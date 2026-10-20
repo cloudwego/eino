@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -334,6 +335,27 @@ func TestDeterministicTransferRunPathPreserved(t *testing.T) {
 	}
 }
 
+func TestDeterministicTransferFlowAgent_ErrorSkipsTransfer(t *testing.T) {
+	ctx := context.Background()
+	testErr := errors.New("flow agent failed")
+
+	in, inGen := NewAsyncIteratorPair[*AgentEvent]()
+	out, outGen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer inGen.Close()
+		inGen.Send(&AgentEvent{Err: testErr})
+	}()
+
+	handleFlowAgentEvents(ctx, in, outGen, &runSession{}, nil, []string{"next_agent"})
+
+	ev, ok := out.Next()
+	assert.True(t, ok, "source error should be forwarded")
+	assert.ErrorIs(t, ev.Err, testErr)
+
+	_, ok = out.Next()
+	assert.False(t, ok, "transfer should not be generated after source error")
+}
+
 func TestDeterministicTransferExitSkipsTransfer(t *testing.T) {
 	ctx := context.Background()
 	store := newDTTestStore()
@@ -537,6 +559,46 @@ func TestDeterministicTransferNonFlowAgent_AppendsTransfer(t *testing.T) {
 	assert.True(t, sawTransfer, "should see transfer event after normal completion")
 	assert.Equal(t, "next_agent", transferTarget, "transfer target should be next_agent")
 	assert.Greater(t, len(events), 1, "should have more than 1 event (output + transfer messages)")
+}
+
+func TestDeterministicTransferNonFlowAgent_ErrorSkipsTransfer(t *testing.T) {
+	ctx := context.Background()
+	testErr := errors.New("source agent failed")
+
+	agent := &nonFlowTestAgent{
+		name: "test_agent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				gen.Send(&AgentEvent{Err: testErr})
+			}()
+			return iter
+		},
+	}
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        agent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	iter := wrapped.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+	var sawError, sawTransfer bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if errors.Is(ev.Err, testErr) {
+			sawError = true
+		}
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			sawTransfer = true
+		}
+	}
+
+	assert.True(t, sawError, "source error should be forwarded")
+	assert.False(t, sawTransfer, "transfer should not be generated after source error")
 }
 
 func TestDeterministicTransferNonFlowAgent_InterruptSkipsTransfer(t *testing.T) {
