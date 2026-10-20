@@ -18,11 +18,13 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -761,6 +763,130 @@ func TestNestedAgentTool_RunPath(t *testing.T) {
 			t.Fatalf("inner2 session contains non-inner2 event: %s", w.AgentName)
 		}
 	}
+}
+
+func TestAgentToolRetry(t *testing.T) {
+	t.Run("retries retryable error", func(t *testing.T) {
+		retryErr := errors.New("retry")
+		agent := &retryAgentToolAgent{
+			failures: 2,
+			err:      retryErr,
+		}
+		agentTool := NewAgentTool(context.Background(), agent, WithAgentToolRetry(&AgentToolRetryConfig{
+			MaxRetries: 2,
+		})).(tool.InvokableTool)
+
+		result, err := agentTool.InvokableRun(context.Background(), `{"request":"hello"}`)
+		require.NoError(t, err)
+		require.Equal(t, "success", result)
+		require.Equal(t, int32(3), agent.attempts.Load())
+	})
+
+	t.Run("predicate rejects retry", func(t *testing.T) {
+		terminalErr := errors.New("terminal")
+		agent := &retryAgentToolAgent{failures: 2, err: terminalErr}
+		agentTool := NewAgentTool(context.Background(), agent, WithAgentToolRetry(&AgentToolRetryConfig{
+			MaxRetries: 3,
+			IsRetryable: func(_ context.Context, err error) bool {
+				return !errors.Is(err, terminalErr)
+			},
+		})).(tool.InvokableTool)
+
+		_, err := agentTool.InvokableRun(context.Background(), `{"request":"hello"}`)
+		require.ErrorIs(t, err, terminalErr)
+		require.Equal(t, int32(1), agent.attempts.Load())
+	})
+
+	t.Run("returns last error when exhausted", func(t *testing.T) {
+		retryErr := errors.New("retry")
+		agent := &retryAgentToolAgent{failures: 3, err: retryErr}
+		agentTool := NewAgentTool(context.Background(), agent, WithAgentToolRetry(&AgentToolRetryConfig{
+			MaxRetries: 1,
+		})).(tool.InvokableTool)
+
+		_, err := agentTool.InvokableRun(context.Background(), `{"request":"hello"}`)
+		require.ErrorIs(t, err, retryErr)
+		require.Equal(t, int32(2), agent.attempts.Load())
+	})
+
+	t.Run("backoff observes context cancellation", func(t *testing.T) {
+		retryErr := errors.New("retry")
+		agent := &retryAgentToolAgent{failures: 2, err: retryErr}
+		agentTool := NewAgentTool(context.Background(), agent, WithAgentToolRetry(&AgentToolRetryConfig{
+			MaxRetries: 2,
+			Backoff: func(_ context.Context, _ int) time.Duration {
+				return time.Minute
+			},
+		})).(tool.InvokableTool)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := agentTool.InvokableRun(ctx, `{"request":"hello"}`)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, int32(1), agent.attempts.Load())
+	})
+
+	t.Run("interrupt is not retried", func(t *testing.T) {
+		agent := &retryAgentToolAgent{interrupt: true}
+		agentTool := NewAgentTool(context.Background(), agent, WithAgentToolRetry(&AgentToolRetryConfig{
+			MaxRetries: 2,
+		})).(tool.InvokableTool)
+
+		_, err := agentTool.InvokableRun(context.Background(), `{"request":"hello"}`)
+		require.Error(t, err)
+		require.Equal(t, int32(1), agent.attempts.Load())
+	})
+
+	t.Run("rejects negative max retries", func(t *testing.T) {
+		agent := &retryAgentToolAgent{}
+		agentTool := NewAgentTool(context.Background(), agent, WithAgentToolRetry(&AgentToolRetryConfig{
+			MaxRetries: -1,
+		})).(tool.InvokableTool)
+
+		_, err := agentTool.InvokableRun(context.Background(), `{"request":"hello"}`)
+		require.ErrorContains(t, err, "must be non-negative")
+		require.Zero(t, agent.attempts.Load())
+	})
+}
+
+type retryAgentToolAgent struct {
+	attempts  atomic.Int32
+	failures  int32
+	err       error
+	interrupt bool
+}
+
+func (a *retryAgentToolAgent) Name(context.Context) string {
+	return "retry_agent"
+}
+
+func (a *retryAgentToolAgent) Description(context.Context) string {
+	return "retry agent"
+}
+
+func (a *retryAgentToolAgent) Run(ctx context.Context, _ *AgentInput,
+	_ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	attempt := a.attempts.Add(1)
+	go func() {
+		defer gen.Close()
+		if a.interrupt {
+			gen.Send(&AgentEvent{Err: tool.Interrupt(ctx, "pause")})
+			return
+		}
+		if attempt <= a.failures {
+			gen.Send(&AgentEvent{Err: a.err})
+			return
+		}
+		gen.Send(&AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					Message: schema.AssistantMessage("success", nil),
+				},
+			},
+		})
+	}()
+	return iter
 }
 
 func TestNestedAgentTool_NoInternalEventsWhenDisabled(t *testing.T) {
