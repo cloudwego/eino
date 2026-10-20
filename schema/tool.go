@@ -539,6 +539,7 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 		return MessageInputPart{
 			Type:             ChatMessagePartTypeToolSearchResult,
 			ToolSearchResult: toolPart.ToolSearchResult,
+			Extra:            toolPart.Extra,
 		}, nil
 	default:
 		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)

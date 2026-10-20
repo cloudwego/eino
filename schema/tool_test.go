@@ -233,3 +233,34 @@ func TestMCPToolResult_WithErrorCode(t *testing.T) {
 		assert.Contains(t, s, "internal server error")
 	})
 }
+
+func TestToolResultToMessageInputPartsKeepsExtra(t *testing.T) {
+	url := "https://example.com/image.png"
+	toolResult := &ToolResult{
+		Parts: []ToolOutputPart{
+			{
+				Type:             ToolPartTypeToolSearchResult,
+				ToolSearchResult: &ToolSearchResult{Tools: []*ToolInfo{{Name: "get_weather"}}},
+				Extra:            map[string]any{"trace_id": "t-1"},
+			},
+			{
+				Type:  ToolPartTypeText,
+				Text:  "found 1 tool",
+				Extra: map[string]any{"trace_id": "t-2"},
+			},
+			{
+				Type:  ToolPartTypeImage,
+				Image: &ToolOutputImage{MessagePartCommon: MessagePartCommon{URL: &url}},
+			},
+		},
+	}
+
+	parts, err := toolResult.ToMessageInputParts()
+	require.NoError(t, err)
+	if assert.Len(t, parts, 3) {
+		assert.Equal(t, ChatMessagePartTypeToolSearchResult, parts[0].Type)
+		assert.Equal(t, map[string]any{"trace_id": "t-1"}, parts[0].Extra)
+		assert.Equal(t, map[string]any{"trace_id": "t-2"}, parts[1].Extra)
+		assert.Nil(t, parts[2].Extra)
+	}
+}
