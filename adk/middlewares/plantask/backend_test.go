@@ -78,3 +78,23 @@ func (b *inMemoryBackend) Delete(ctx context.Context, req *DeleteRequest) error 
 	delete(b.files, req.FilePath)
 	return nil
 }
+
+type baseNameLsBackend struct {
+	*inMemoryBackend
+}
+
+func newBaseNameLsBackend() *baseNameLsBackend {
+	return &baseNameLsBackend{inMemoryBackend: newInMemoryBackend()}
+}
+
+func (b *baseNameLsBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]FileInfo, error) {
+	infos, err := b.inMemoryBackend.LsInfo(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range infos {
+		infos[i].Path = filepath.Base(infos[i].Path)
+	}
+	return infos, nil
+}
