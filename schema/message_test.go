@@ -18,6 +18,7 @@ package schema
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -1762,7 +1763,7 @@ func TestConcatToolResults(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 		assert.Contains(t, err.Error(), "file")
 	})
-	
+
 	t.Run("same_chunk_text_merged", func(t *testing.T) {
 		chunks := []*ToolResult{
 			{
@@ -2189,4 +2190,57 @@ func TestConvToolOutputPartToMessageInputPart(t *testing.T) {
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, "unknown tool part type")
 	})
+}
+
+func TestConcatMessagesAudioPartBoundaries(t *testing.T) {
+	base64Part := MessageOutputPart{
+		Type: ChatMessagePartTypeAudioURL,
+		Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{
+			Base64Data: generic.PtrOf("QUJD"), MIMEType: "audio/wav",
+		}},
+	}
+	urlPart := MessageOutputPart{
+		Type: ChatMessagePartTypeAudioURL,
+		Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{
+			URL: generic.PtrOf("https://example.com/audio.wav"), MIMEType: "audio/wav",
+		}},
+		Extra: map[string]any{"source": "url"},
+	}
+	nilPart := MessageOutputPart{Type: ChatMessagePartTypeAudioURL}
+	tests := []struct {
+		name  string
+		parts []MessageOutputPart
+		want  []MessageOutputPart
+	}{
+		{"base64 followed by URL", []MessageOutputPart{base64Part, urlPart}, []MessageOutputPart{base64Part, urlPart}},
+		{"base64 followed by nil audio", []MessageOutputPart{base64Part, nilPart}, []MessageOutputPart{base64Part, nilPart}},
+		{"URL followed by base64", []MessageOutputPart{urlPart, base64Part}, []MessageOutputPart{urlPart, base64Part}},
+		{"nil audio followed by base64", []MessageOutputPart{nilPart, base64Part}, []MessageOutputPart{nilPart, base64Part}},
+		{"URL separates base64 chunks", []MessageOutputPart{base64Part, urlPart, base64Part}, []MessageOutputPart{base64Part, urlPart, base64Part}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, indexed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("indexed=%t", indexed), func(t *testing.T) {
+					messages := make([]*Message, len(tt.parts))
+					want := append([]MessageOutputPart(nil), tt.want...)
+					for i, part := range tt.parts {
+						if indexed {
+							part.StreamingMeta = &MessageStreamingMeta{Index: 0}
+							want[i].StreamingMeta = &MessageStreamingMeta{Index: 0}
+						}
+						messages[i] = &Message{Role: Assistant, AssistantGenMultiContent: []MessageOutputPart{part}}
+					}
+					var result *Message
+					var err error
+					if !assert.NotPanics(t, func() { result, err = ConcatMessages(messages) }) {
+						return
+					}
+					if assert.NoError(t, err) && assert.NotNil(t, result) {
+						assert.Equal(t, want, result.AssistantGenMultiContent)
+					}
+				})
+			}
+		})
+	}
 }
