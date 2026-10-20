@@ -26,3 +26,29 @@ func TestPanicErr(t *testing.T) {
 	err := NewPanicErr("info", []byte("stack"))
 	assert.Equal(t, "panic error: info, \nstack: stack", err.Error())
 }
+
+func TestPanicErrDiagnosticAccessors(t *testing.T) {
+	err := NewPanicErr("info", []byte("stack"))
+	panicErr, ok := err.(interface {
+		PanicValue() any
+		StackTrace() []byte
+	})
+	assert.True(t, ok)
+	assert.Equal(t, "info", panicErr.PanicValue())
+	assert.Equal(t, []byte("stack"), panicErr.StackTrace())
+
+	stack := panicErr.StackTrace()
+	stack[0] = 'S'
+	assert.Equal(t, []byte("stack"), panicErr.StackTrace())
+}
+
+func TestPanicErrDiagnosticAccessorsEmptyStack(t *testing.T) {
+	err := NewPanicErr("info", nil)
+	panicErr, ok := err.(interface {
+		PanicValue() any
+		StackTrace() []byte
+	})
+	assert.True(t, ok)
+	assert.Equal(t, "info", panicErr.PanicValue())
+	assert.Nil(t, panicErr.StackTrace())
+}

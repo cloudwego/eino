@@ -64,6 +64,14 @@ func (e *RetryExhaustedError) Unwrap() error {
 	return ErrExceedMaxRetries
 }
 
+// RootCause returns the last error observed before retry attempts were exhausted.
+func (e *RetryExhaustedError) RootCause() error {
+	if e == nil {
+		return nil
+	}
+	return e.LastErr
+}
+
 // WillRetryError is emitted when a retryable error occurs and a retry will be attempted.
 // It allows end-users to observe retry events in real-time via AgentEvent.
 //
