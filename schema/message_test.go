@@ -258,7 +258,7 @@ func TestConcatMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("err: different tool name", func(t *testing.T) {
+	t.Run("err: different tool call ID", func(t *testing.T) {
 		msgs := []*Message{
 			{
 				Role:       "",
@@ -295,6 +295,29 @@ func TestConcatMessage(t *testing.T) {
 		msg, err := ConcatMessages(msgs)
 		if assert.Error(t, err) {
 			assert.ErrorContains(t, err, "cannot concat messages with different toolCallIDs")
+			assert.Nil(t, msg)
+		}
+	})
+
+	t.Run("cannot concat messages with different toolNames", func(t *testing.T) {
+		msgs := []*Message{
+			{
+				Role:       Tool,
+				Content:    "result 1",
+				ToolCallID: "call_1",
+				ToolName:   "tool_a",
+			},
+			{
+				Role:       Tool,
+				Content:    "result 2",
+				ToolCallID: "call_1",
+				ToolName:   "tool_b",
+			},
+		}
+
+		msg, err := ConcatMessages(msgs)
+		if assert.Error(t, err) {
+			assert.EqualError(t, err, "cannot concat messages with different toolNames: 'tool_a' 'tool_b'")
 			assert.Nil(t, msg)
 		}
 	})
@@ -1762,7 +1785,7 @@ func TestConcatToolResults(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicting")
 		assert.Contains(t, err.Error(), "file")
 	})
-	
+
 	t.Run("same_chunk_text_merged", func(t *testing.T) {
 		chunks := []*ToolResult{
 			{
