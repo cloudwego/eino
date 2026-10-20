@@ -495,7 +495,7 @@ func (a *flowAgent) run(
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&AgentEvent{Err: e})
+			generator.Send(&AgentEvent{InvocationID: runCtx.InvocationID, Err: e})
 		}
 
 		cbGen.Close()
@@ -509,6 +509,9 @@ func (a *flowAgent) run(
 			break
 		}
 
+		if event.InvocationID == "" {
+			event.InvocationID = runCtx.InvocationID
+		}
 		// RunPath ownership: the eino framework sets RunPath exactly once.
 		// If event.RunPath is already set (e.g., by agentTool), we don't modify it.
 		// If event.RunPath is nil/empty, we set it to the current runCtx.RunPath.
@@ -562,7 +565,7 @@ func (a *flowAgent) run(
 		if agentToRun == nil {
 			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
 				destName, a.Name(ctxForSubAgents))
-			generator.Send(&AgentEvent{Err: e})
+			generator.Send(&AgentEvent{InvocationID: runCtx.InvocationID, Err: e})
 			return
 		}
 
@@ -741,7 +744,7 @@ func (a *typedFlowAgent[M]) run(
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&TypedAgentEvent[M]{Err: e})
+			generator.Send(&TypedAgentEvent[M]{InvocationID: runCtx.InvocationID, Err: e})
 		}
 
 		agenticCbGen.Close()
@@ -754,6 +757,9 @@ func (a *typedFlowAgent[M]) run(
 			break
 		}
 
+		if event.InvocationID == "" {
+			event.InvocationID = runCtx.InvocationID
+		}
 		if len(event.RunPath) == 0 {
 			event.AgentName = a.Name(ctx)
 			event.RunPath = runCtx.RunPath
