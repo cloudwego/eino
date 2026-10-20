@@ -46,7 +46,7 @@ func (b *inMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 	for path := range b.files {
 		dir := filepath.Dir(path)
 		if dir == reqPath {
-			result = append(result, FileInfo{Path: path})
+			result = append(result, FileInfo{Path: filepath.Base(path)})
 		}
 	}
 	return result, nil
