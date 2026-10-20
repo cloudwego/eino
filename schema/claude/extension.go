@@ -36,6 +36,18 @@ type AssistantGenTextExtension struct {
 	Citations []*TextCitation `json:"citations,omitempty"`
 }
 
+// ReasoningExtension contains Claude-specific reasoning data.
+type ReasoningExtension struct {
+	// RedactedThinking contains an opaque encrypted thinking block returned by Claude.
+	RedactedThinking *RedactedThinking `json:"redacted_thinking,omitempty"`
+}
+
+// RedactedThinking is an opaque encrypted thinking block that must be passed back
+// to Claude unchanged when continuing the conversation.
+type RedactedThinking struct {
+	Data string `json:"data"`
+}
+
 type TextCitation struct {
 	Type TextCitationType `json:"type,omitempty"`
 
@@ -99,6 +111,25 @@ func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*Ass
 
 	for _, ext := range chunks {
 		ret.Citations = append(ret.Citations, ext.Citations...)
+	}
+
+	return ret, nil
+}
+
+// ConcatReasoningExtensions merges multiple ReasoningExtension chunks into one.
+func ConcatReasoningExtensions(chunks []*ReasoningExtension) (*ReasoningExtension, error) {
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no reasoning extension found")
+	}
+	if len(chunks) == 1 {
+		return chunks[0], nil
+	}
+
+	ret := &ReasoningExtension{}
+	for _, ext := range chunks {
+		if ext != nil && ext.RedactedThinking != nil {
+			ret.RedactedThinking = ext.RedactedThinking
+		}
 	}
 
 	return ret, nil
