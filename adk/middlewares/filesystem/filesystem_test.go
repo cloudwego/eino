@@ -764,6 +764,99 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 
 }
 
+func TestFilesystemMiddleware_WrapInvokableToolCall_Offloading(t *testing.T) {
+	ctx := context.Background()
+
+	largeResult := strings.Repeat("x", 1000)
+
+	t.Run("large result is offloaded to the backend", func(t *testing.T) {
+		backend := setupTestBackend()
+		m, err := New(ctx, &MiddlewareConfig{
+			Backend:                             backend,
+			LargeToolResultOffloadingTokenLimit: 10,
+		})
+		assert.NoError(t, err)
+
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+			return largeResult, nil
+		}
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
+		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		result, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+		assert.Contains(t, result, "/large_tool_result/call-1")
+
+		stored, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/large_tool_result/call-1"})
+		assert.NoError(t, err)
+		assert.Equal(t, largeResult, stored.Content)
+	})
+
+	t.Run("offloading can be disabled", func(t *testing.T) {
+		backend := setupTestBackend()
+		m, err := New(ctx, &MiddlewareConfig{
+			Backend:                             backend,
+			WithoutLargeToolResultOffloading:    true,
+			LargeToolResultOffloadingTokenLimit: 10,
+		})
+		assert.NoError(t, err)
+
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+			return largeResult, nil
+		}
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
+		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		result, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+		assert.Equal(t, largeResult, result)
+
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/large_tool_result/call-1"})
+		assert.Error(t, err)
+	})
+}
+
+func TestFilesystemMiddleware_WrapStreamableToolCall_Offloading(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("large streamed result is offloaded to the backend", func(t *testing.T) {
+		backend := setupTestBackend()
+		m, err := New(ctx, &MiddlewareConfig{
+			Backend:                             backend,
+			LargeToolResultOffloadingTokenLimit: 10,
+		})
+		assert.NoError(t, err)
+
+		largeResult := strings.Repeat("y", 1000)
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+			return schema.StreamReaderFromArray([]string{"aaaa", "bbbb", largeResult}), nil
+		}
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-2"}
+		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		sr, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+
+		var sb strings.Builder
+		for {
+			chunk, err := sr.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			assert.NoError(t, err)
+			sb.WriteString(chunk)
+		}
+		assert.Contains(t, sb.String(), "/large_tool_result/call-2")
+
+		stored, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/large_tool_result/call-2"})
+		assert.NoError(t, err)
+		assert.Equal(t, "aaaabbbb"+largeResult, stored.Content)
+	})
+}
+
 func TestGrepToolWithSortingAndPagination(t *testing.T) {
 	backend := filesystem.NewInMemoryBackend()
 	ctx := context.Background()
