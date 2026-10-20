@@ -873,6 +873,73 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 	})
 }
 
+func TestGrepToolDirectFileNoMatch(t *testing.T) {
+	backend := setupTestBackend()
+	assert.NoError(t, backend.Write(context.Background(), &filesystem.WriteRequest{FilePath: "/empty.txt", Content: ""}))
+	grepTool, err := newGrepTool(backend, "", "")
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "existing direct file",
+			input: `{"pattern": "missing-token", "path": "/file1.txt", "output_mode": "files_with_matches"}`,
+			want:  "No matches found in /file1.txt",
+		},
+		{
+			name:  "existing direct file with default output mode",
+			input: `{"pattern": "missing-token", "path": "/file1.txt"}`,
+			want:  "No matches found in /file1.txt",
+		},
+		{
+			name:  "empty direct file",
+			input: `{"pattern": "missing-token", "path": "/empty.txt"}`,
+			want:  "No matches found in /empty.txt",
+		},
+		{
+			name:  "missing direct path",
+			input: `{"pattern": "missing-token", "path": "/missing.txt", "output_mode": "files_with_matches"}`,
+			want:  "No files found",
+		},
+		{
+			name:  "directory",
+			input: `{"pattern": "missing-token", "path": "/dir1", "output_mode": "files_with_matches"}`,
+			want:  "No files found",
+		},
+		{
+			name:  "glob",
+			input: `{"pattern": "missing-token", "glob": "*.txt", "output_mode": "files_with_matches"}`,
+			want:  "No files found",
+		},
+		{
+			name:  "file type filter",
+			input: `{"pattern": "missing-token", "path": "/file1.txt", "type": "go", "output_mode": "files_with_matches"}`,
+			want:  "No files found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := invokeTool(t, grepTool, tt.input)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+
+	t.Run("nil read result", func(t *testing.T) {
+		backend := &nilReadBackend{InMemoryBackend: setupTestBackend()}
+		grepTool, err := newGrepTool(backend, "", "")
+		assert.NoError(t, err)
+
+		result, err := invokeTool(t, grepTool, `{"pattern": "missing-token", "path": "/file1.txt"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, "No files found", result)
+	})
+}
+
 type unorderedQueryBackend struct {
 	filesystem.Backend
 }
