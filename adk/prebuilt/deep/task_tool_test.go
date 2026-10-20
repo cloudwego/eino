@@ -18,7 +18,9 @@ package deep
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -42,6 +44,7 @@ func TestTaskTool(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		0,
 	)
 	assert.NoError(t, err)
 
@@ -57,9 +60,54 @@ func TestTaskTool(t *testing.T) {
 	assert.Equal(t, "desc of my agent 2", result)
 }
 
+func TestTaskToolTimeout(t *testing.T) {
+	ctx := context.Background()
+	agent := &blockingAgent{name: "blocking", desc: "blocking agent", canceled: make(chan struct{})}
+	taskTool, err := typedNewTaskTool(
+		ctx,
+		nil,
+		[]adk.Agent{agent},
+		true,
+		nil,
+		"",
+		adk.ToolsConfig{},
+		10,
+		nil,
+		nil,
+		nil,
+		20*time.Millisecond,
+	)
+	assert.NoError(t, err)
+
+	result, err := taskTool.InvokableRun(ctx, `{"subagent_type":"blocking","description":"wait"}`)
+	assert.Empty(t, result)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "expected deadline exceeded, got %v", err)
+
+	select {
+	case <-agent.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent did not receive timeout cancellation")
+	}
+}
+
 type myAgent struct {
 	name string
 	desc string
+}
+
+type blockingAgent struct {
+	name     string
+	desc     string
+	canceled chan struct{}
+}
+
+func (a *blockingAgent) Name(context.Context) string        { return a.name }
+func (a *blockingAgent) Description(context.Context) string { return a.desc }
+func (a *blockingAgent) Run(ctx context.Context, _ *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	it, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	gen.Send(adk.EventFromMessage(schema.AssistantMessage("done", nil), nil, schema.Assistant, ""))
+	go func() { <-ctx.Done(); close(a.canceled) }()
+	return it
 }
 
 func (m *myAgent) Name(_ context.Context) string {

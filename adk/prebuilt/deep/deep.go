@@ -20,6 +20,7 @@ package deep
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bytedance/sonic"
 
@@ -62,6 +63,9 @@ type TypedConfig[M adk.MessageType] struct {
 	ToolsConfig adk.ToolsConfig
 	// MaxIteration limits the maximum number of reasoning iterations the agent can perform.
 	MaxIteration int
+	// TaskToolTimeout limits each task tool invocation. A non-positive duration
+	// disables the timeout and leaves cancellation to the caller's context.
+	TaskToolTimeout time.Duration
 
 	// Backend provides filesystem operations used by tools and offloading.
 	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
@@ -141,6 +145,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.
 			cfg.Middlewares,
 			append(handlers, cfg.Handlers...),
 			cfg.ModelFailoverConfig,
+			cfg.TaskToolTimeout,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/slongfield/pyfmt"
@@ -45,8 +46,9 @@ func typedTaskToolMiddleware[M adk.MessageType](
 	middlewares []adk.AgentMiddleware,
 	handlers []adk.TypedChatModelAgentMiddleware[M],
 	modelFailoverConfig *adk.ModelFailoverConfig[M],
+	taskToolTimeout time.Duration,
 ) (adk.TypedChatModelAgentMiddleware[M], error) {
-	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelFailoverConfig)
+	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelFailoverConfig, taskToolTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +73,7 @@ func typedNewTaskTool[M adk.MessageType](
 	middlewares []adk.AgentMiddleware,
 	handlers []adk.TypedChatModelAgentMiddleware[M],
 	modelFailoverConfig *adk.ModelFailoverConfig[M],
+	taskToolTimeout time.Duration,
 ) (tool.InvokableTool, error) {
 	t := &typedTaskTool[M]{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -103,7 +106,7 @@ func typedNewTaskTool[M adk.MessageType](
 			return nil, err
 		}
 
-		it, err := assertAgentTool(adk.NewTypedAgentTool(ctx, adk.TypedAgent[M](generalAgent)))
+		it, err := assertAgentTool(adk.NewTypedAgentTool(ctx, adk.TypedAgent[M](generalAgent), adk.WithAgentToolTimeout(taskToolTimeout)))
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +116,7 @@ func typedNewTaskTool[M adk.MessageType](
 
 	for _, a := range subAgents {
 		name := a.Name(ctx)
-		it, err := assertAgentTool(adk.NewTypedAgentTool(ctx, a))
+		it, err := assertAgentTool(adk.NewTypedAgentTool(ctx, a, adk.WithAgentToolTimeout(taskToolTimeout)))
 		if err != nil {
 			return nil, err
 		}
