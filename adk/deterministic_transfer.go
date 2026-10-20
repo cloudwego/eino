@@ -159,6 +159,9 @@ func forwardEventsAndAppendTransfer(iter *AsyncIterator[*AgentEvent],
 	if lastEvent != nil && lastEvent.Action != nil && (lastEvent.Action.Interrupted != nil || lastEvent.Action.Exit) {
 		return
 	}
+	if lastEvent != nil && lastEvent.Err != nil {
+		return
+	}
 
 	sendTransferEvents(generator, toAgentNames)
 }
@@ -263,6 +266,10 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 
 		generator.Send(event)
 		lastEvent = event
+	}
+
+	if lastEvent != nil && lastEvent.Err != nil {
+		return
 	}
 
 	if lastEvent != nil && lastEvent.Action != nil {
