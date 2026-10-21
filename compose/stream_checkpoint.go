@@ -171,14 +171,16 @@ func (replay *streamCheckpointReplay) restoreConsumedInputs(cp *checkpoint) {
 	}
 	for key := range affected {
 		ch, ok := cm.channels[key].(*dagChannel)
-		if !ok || ch.retainedInput == nil {
+		if !ok {
 			continue
 		}
-		// Transfer the retained copy into the ordinary checkpoint channel.
-		saved := ch.retainedInput
-		ch.retainedInput = nil
-		ch.closeValues()
-		ch.Values, ch.ControlPredecessors, ch.DataPredecessors, ch.Skipped = saved.Values, saved.ControlPredecessors, saved.DataPredecessors, saved.Skipped
+		// A consumer may not have claimed its channel before a sibling
+		// interrupts. Reset affected readiness in either representation.
+		if saved := ch.retainedInput; saved != nil {
+			ch.retainedInput = nil
+			ch.closeValues()
+			ch.Values, ch.ControlPredecessors, ch.DataPredecessors, ch.Skipped = saved.Values, saved.ControlPredecessors, saved.DataPredecessors, saved.Skipped
+		}
 		for from, value := range ch.Values {
 			if affected[from] {
 				if sr, ok := value.(streamReader); ok {
@@ -219,50 +221,80 @@ func (replay *streamCheckpointReplay) restoreConsumedInputs(cp *checkpoint) {
 	}
 }
 
-// collectStreamInterrupts drains retained source inputs so fan-in does not hide
-// simultaneous interrupts behind the first error returned to a consumer.
-func (r *runner) collectStreamInterrupts(ctx context.Context, ti *interruptTempInfo, cm *channelManager) error {
-	queue := make([]string, 0, len(ti.interruptTaskNodes))
-	for node := range ti.interruptTaskNodes {
-		queue = append(queue, node)
-	}
-	seen := map[string]bool{}
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
-		if seen[node] {
+// A completed task may only have returned its reader, without forwarding it to
+// any channel yet. Settle those readers before snapshotting state or classifying
+// sibling tasks, otherwise a late signal would first appear during serialization.
+func (r *runner) collectStreamTaskOutputs(info *interruptTempInfo, tasks []*task) error {
+	for _, t := range tasks {
+		if t.err != nil || t.output == nil {
 			continue
 		}
-		seen[node] = true
-		ch, ok := cm.channels[node].(*dagChannel)
-		if !ok || ch.retainedInput == nil {
-			continue
+		values := map[string]any{t.nodeKey: t.output}
+		if t.routing != nil {
+			values = t.routing.values
 		}
-		for from := range ch.retainedInput.Values {
-			queue = append(queue, from)
-		}
-		observer := &task{nodeKey: node, ctx: AppendAddressSegment(ctx, AddressSegmentNode, node)}
-		err := r.checkPointer.sc.convertOutputs(true, ch.retainedInput.Values, func(_ string, err error) streamErrorAction {
-			if nested := isSubGraphInterrupt(err); nested != nil {
-				key := r.interruptOriginNodeKey(observer, nested.signal.Address)
-				ti.subGraphInterrupts[key] = nested
-				ti.appendSignal(nested.signal)
-				return streamErrorAction{ignore: true, dropValue: true}
+		err := r.checkPointer.sc.convertOutputs(true, values, func(_ string, err error) streamErrorAction {
+			if !isStreamRoutingInterrupt(err) {
+				return streamErrorAction{}
 			}
-			var sig *core.InterruptSignal
-			if errors.As(err, &sig) {
-				ti.appendSignal(sig)
-				key := r.interruptOriginNodeKey(observer, sig.Address)
-				ti.interruptRerunNodes = appendIfNotExist(ti.interruptRerunNodes, key)
-				return streamErrorAction{ignore: true, dropValue: true}
-			}
-			return streamErrorAction{}
+			t.err = err
+			return streamErrorAction{ignore: true, dropValue: true}
 		})
 		if err != nil {
 			return err
 		}
-		if err = r.checkPointer.sc.restoreOutputs(true, ch.retainedInput.Values); err != nil {
+		if t.err != nil {
+			if err = r.resolveInterruptCompletedTasks(info, []*task{t}); err != nil {
+				return err
+			}
+		}
+		if err = r.checkPointer.sc.restoreOutputs(true, values); err != nil {
 			return err
+		}
+		if t.routing == nil {
+			t.output = values[t.nodeKey]
+		}
+	}
+	return nil
+}
+
+// collectStreamInterrupts settles current and retained channel inputs. A sibling
+// can interrupt before a consumer claims its channel, or after fan-in consumed
+// only the first error; neither case may hide another producer's interrupt.
+func (r *runner) collectStreamInterrupts(ctx context.Context, ti *interruptTempInfo, cm *channelManager) error {
+	for node, channel := range cm.channels {
+		ch, ok := channel.(*dagChannel)
+		if !ok {
+			continue
+		}
+		values := []map[string]any{ch.Values}
+		if ch.retainedInput != nil {
+			values = append(values, ch.retainedInput.Values)
+		}
+		observer := &task{nodeKey: node, ctx: AppendAddressSegment(ctx, AddressSegmentNode, node)}
+		for _, sourceValues := range values {
+			err := r.checkPointer.sc.convertOutputs(true, sourceValues, func(_ string, err error) streamErrorAction {
+				if nested := isSubGraphInterrupt(err); nested != nil {
+					key := r.interruptOriginNodeKey(observer, nested.signal.Address)
+					ti.subGraphInterrupts[key] = nested
+					ti.appendSignal(nested.signal)
+					return streamErrorAction{ignore: true, dropValue: true}
+				}
+				var sig *core.InterruptSignal
+				if errors.As(err, &sig) {
+					ti.appendSignal(sig)
+					key := r.interruptOriginNodeKey(observer, sig.Address)
+					ti.interruptRerunNodes = appendIfNotExist(ti.interruptRerunNodes, key)
+					return streamErrorAction{ignore: true, dropValue: true}
+				}
+				return streamErrorAction{}
+			})
+			if err != nil {
+				return err
+			}
+			if err = r.checkPointer.sc.restoreOutputs(true, sourceValues); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

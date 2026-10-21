@@ -686,6 +686,9 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	publishSubGraphCheckpoint func(*subGraphInterruptError),
 ) error {
 	if cm.streamReplay != nil {
+		if err := r.collectStreamTaskOutputs(tempInfo, completeTasks); err != nil {
+			return err
+		}
 		if err := r.collectStreamInterrupts(ctx, tempInfo, cm); err != nil {
 			return err
 		}

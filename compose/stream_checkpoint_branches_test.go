@@ -36,12 +36,13 @@ type replayCase struct {
 	name                                                                       string
 	interruptions                                                              int
 	viaTransform, lateSibling, nested, bothInterrupt, skippedBranch, beforeEnd bool
-	streamBranch                                                               bool
+	streamBranch, beforeConsumer                                               bool
 }
 
 func TestWorkflowStreamCheckpointBranches(t *testing.T) {
 	for _, tc := range []replayCase{
 		{name: "original_input", interruptions: 1},
+		{name: "before_consumer", interruptions: 1, beforeConsumer: true},
 		{name: "stream_branch", interruptions: 2, streamBranch: true},
 		{name: "interrupt_before_end", interruptions: 1, beforeEnd: true},
 		{name: "repeat_interrupt", interruptions: 2},
@@ -125,7 +126,7 @@ func runReplayCase(t *testing.T, tc replayCase) {
 				return nil, fmt.Errorf("B lost original input: %q", input)
 			}
 			was, _, _ := compose.GetInterruptState[int](ctx)
-			if tc.beforeEnd && !was {
+			if (tc.beforeEnd || tc.beforeConsumer) && !was {
 				return nil, compose.StatefulInterrupt(ctx, "B approval", input)
 			}
 			if !tc.lateSibling && (!tc.bothInterrupt || was) {
@@ -149,6 +150,9 @@ func runReplayCase(t *testing.T, tc replayCase) {
 			}()
 			return r, nil
 		})).AddInput(compose.START)
+		if tc.beforeConsumer {
+			once.Do(func() { close(observed) })
+		}
 		source := "A"
 		if tc.viaTransform {
 			wf.AddLambdaNode("M", compose.TransformableLambda(func(_ context.Context, r *schema.StreamReader[string]) (*schema.StreamReader[string], error) {
@@ -286,6 +290,9 @@ func runReplayCase(t *testing.T, tc replayCase) {
 				t.Fatalf("completed sibling branch ran %d times", siblingBranch.Load())
 			}
 			wantEnd = 1
+		}
+		if tc.beforeConsumer {
+			wantB, wantEnd = 2, 1
 		}
 		if tc.beforeEnd {
 			wantA, wantB, wantEnd = 1, 2, 1
