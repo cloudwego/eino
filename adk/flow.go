@@ -420,7 +420,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 				return wrapIterWithOnEnd(ctx, aIter)
 			}
 
-			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, opts...)
+			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, filterOptions(agentName, opts)...)
 
 			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 			go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), getRunCtx(ctxForSubAgents), aIter, generator, filterCancelOption(opts)...)
@@ -693,7 +693,7 @@ func (a *typedFlowAgent[M]) Resume(ctx context.Context, info *ResumeInfo, opts .
 
 	if info.WasInterrupted {
 		if ra, ok := a.TypedAgent.(TypedResumableAgent[M]); ok {
-			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, opts...)
+			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, filterOptions(agentName, opts)...)
 
 			iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 			go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), getRunCtx(ctxForSubAgents), aIter, generator, filterCancelOption(opts)...)
