@@ -360,7 +360,7 @@ func testMode1InitializationGeneric[M adk.MessageType](t *testing.T) {
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 			ti("dynamic_tool_a", "Dynamic tool A"),
 			ti("dynamic_tool_b", "Dynamic tool B"),
 		},
@@ -402,7 +402,7 @@ func testMode1ForwardSelectionGeneric[M adk.MessageType](t *testing.T) {
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 		},
 	}
 
@@ -443,7 +443,7 @@ func testMalformedJSONGeneric[M adk.MessageType](t *testing.T) {
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 		},
 	}
 
