@@ -3726,7 +3726,7 @@ func TestPreemptController_RequestPreemptIdleTurnAcksImmediately(t *testing.T) {
 	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
 
 	requireAckClosed(t, ack)
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 }
 
@@ -3764,12 +3764,12 @@ func TestPreemptController_RequestPreemptForPlanningTurnIsConsumedAfterActivatio
 	ack := make(chan struct{})
 	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
 
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 	requireAckOpen(t, ack)
 
 	c.beginActiveTurn(context.Background(), "tc")
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 	requireAckOpen(t, ack)
 
@@ -3787,14 +3787,14 @@ func TestPreemptController_RequestPreemptForActiveTurnIsConsumedOnce(t *testing.
 	ack := make(chan struct{})
 	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
 
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 	opts := req.cancelOptions(time.Now())
 	cfg := parseAgentCancelOptions(opts...)
 	assert.Equal(t, CancelAfterChatModel, cfg.Mode)
 	requireAckOpen(t, ack)
 
-	_, ok = c.receivePreempt()
+	_, ok = c.receivePreempt(c.notify)
 	assert.False(t, ok)
 
 	req.ack()
@@ -3815,7 +3815,7 @@ func TestPreemptController_AbortPlanningTurnAcksUnconsumedRequest(t *testing.T) 
 	req.ack()
 	requireAckClosed(t, ack)
 
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 }
 
@@ -3834,7 +3834,7 @@ func TestPreemptController_EndActiveTurnAcksUnconsumedRequest(t *testing.T) {
 	req.ack()
 	requireAckClosed(t, ack)
 
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 }
 
@@ -3847,7 +3847,7 @@ func TestPreemptController_EndActiveTurnDoesNotAckConsumedRequest(t *testing.T) 
 
 	ack := make(chan struct{})
 	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 
 	assert.Nil(t, c.endActiveTurn())
@@ -3869,7 +3869,7 @@ func TestPreemptController_TargetTurnMismatchAcksImmediately(t *testing.T) {
 	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
 
 	requireAckClosed(t, ack)
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 }
 
@@ -3905,7 +3905,7 @@ func TestPreemptController_MultipleRequestsBeforeReceiveMergeAcksAndUseMergedOpt
 	c.requestPreempt(snapshot, ack1, WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(time.Minute))
 	c.requestPreempt(snapshot, ack2, WithAgentCancelMode(CancelAfterToolCalls), WithRecursive(), WithAgentCancelTimeout(time.Second))
 
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 	opts := req.cancelOptions(time.Now())
 	cfg := parseAgentCancelOptions(opts...)
@@ -3945,7 +3945,7 @@ func TestPreemptController_ConcurrentPreemptRequestsMergeAndAck(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 	req.ack()
 	for _, ack := range acks {
@@ -3994,7 +3994,7 @@ func TestPreemptController_RequestPreemptAfterCloseForLoopExit(t *testing.T) {
 	requireAckClosed(t, ack)
 
 	// receivePreempt should return nothing.
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 }
 
@@ -4043,7 +4043,7 @@ func TestPreemptController_RequestPreemptWithNilAck(t *testing.T) {
 	})
 
 	// The request should still be stored and consumable.
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 	// ack() with nil channels in the list must not panic.
 	assert.NotPanics(t, func() {
@@ -4068,7 +4068,7 @@ func TestPreemptController_MergeImmediateOverridesTimeout(t *testing.T) {
 	ack2 := make(chan struct{})
 	c.requestPreempt(snapshot, ack2, WithAgentCancelMode(CancelImmediate))
 
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 
 	opts := req.cancelOptions(time.Now())
@@ -4105,7 +4105,7 @@ func TestPreemptController_DelayedPreemptTargetGoneBetweenTurns(t *testing.T) {
 	requireAckClosed(t, ack)
 
 	// The new turn should have no pending preempt.
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok, "stale preempt must not affect new turn")
 
 	c.endActiveTurn()
@@ -4134,7 +4134,7 @@ func TestPreemptController_BeginActiveTurnNotifiesExistingPending(t *testing.T) 
 	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
 
 	// During planning, receivePreempt returns nothing.
-	_, ok := c.receivePreempt()
+	_, ok := c.receivePreempt(c.notify)
 	assert.False(t, ok)
 
 	// beginActiveTurn should notify the watcher via the notify channel.
@@ -4149,7 +4149,7 @@ func TestPreemptController_BeginActiveTurnNotifiesExistingPending(t *testing.T) 
 	}
 
 	// Now receivePreempt should return the pending request.
-	req, ok := c.receivePreempt()
+	req, ok := c.receivePreempt(c.notify)
 	require.True(t, ok)
 	req.ack()
 	requireAckClosed(t, ack)
@@ -6032,7 +6032,7 @@ func TestStopController_BareStopCommitsWithoutCancelRequest(t *testing.T) {
 	assert.True(t, decision.commit)
 	assert.True(t, c.isCommitted())
 	c.beginActiveTurn()
-	_, ok := c.receiveCancel()
+	_, ok := c.receiveCancel(c.notify)
 	assert.False(t, ok)
 }
 
@@ -6046,7 +6046,7 @@ func TestStopController_UntilIdleForDoesNotCreateCancelRequest(t *testing.T) {
 	assert.Equal(t, time.Second, c.idleDuration())
 	assert.False(t, c.isCommitted())
 	c.beginActiveTurn()
-	_, ok := c.receiveCancel()
+	_, ok := c.receiveCancel(c.notify)
 	assert.False(t, ok)
 }
 
@@ -6060,7 +6060,7 @@ func TestStopController_CancelOptsDroppedWhenCombinedWithUntilIdleFor(t *testing
 
 	assert.False(t, decision.commit)
 	c.beginActiveTurn()
-	_, ok := c.receiveCancel()
+	_, ok := c.receiveCancel(c.notify)
 	assert.False(t, ok)
 }
 
@@ -6071,7 +6071,7 @@ func TestStopController_ImmediateStopCreatesPendingCancelForActiveTurn(t *testin
 	decision := c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
 
 	assert.True(t, decision.commit)
-	req, ok := c.receiveCancel()
+	req, ok := c.receiveCancel(c.notify)
 	require.True(t, ok)
 	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
 	assert.Equal(t, CancelImmediate, cfg.Mode)
@@ -6085,7 +6085,7 @@ func TestStopController_StopBeforeWatcherStartsConsumedAfterBeginActiveTurn(t *t
 	assert.True(t, decision.commit)
 
 	c.beginActiveTurn()
-	req, ok := c.receiveCancel()
+	req, ok := c.receiveCancel(c.notify)
 	require.True(t, ok)
 	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
 	assert.Equal(t, CancelImmediate, cfg.Mode)
@@ -6099,7 +6099,7 @@ func TestStopController_EndActiveTurnDropsUnconsumedCancel(t *testing.T) {
 	req := c.endActiveTurn()
 
 	require.NotNil(t, req)
-	_, ok := c.receiveCancel()
+	_, ok := c.receiveCancel(c.notify)
 	assert.False(t, ok)
 }
 
@@ -6114,7 +6114,7 @@ func TestStopController_RepeatedStopsMergeWithoutDeescalation(t *testing.T) {
 		WithRecursive(),
 	}})
 
-	req, ok := c.receiveCancel()
+	req, ok := c.receiveCancel(c.notify)
 	require.True(t, ok)
 	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
 	assert.Equal(t, CancelImmediate, cfg.Mode)
@@ -6128,7 +6128,7 @@ func TestStopController_RepeatedStopsUseSharedCancelMergeState(t *testing.T) {
 	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}})
 	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithAgentCancelMode(CancelAfterToolCalls)}})
 
-	req, ok := c.receiveCancel()
+	req, ok := c.receiveCancel(c.notify)
 	require.True(t, ok)
 	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
 	assert.Equal(t, CancelAfterChatModel|CancelAfterToolCalls, cfg.Mode)
@@ -6193,7 +6193,7 @@ func TestStopController_CloseForLoopExitClearsPendingCancel(t *testing.T) {
 
 	c.closeForLoopExit()
 
-	_, ok := c.receiveCancel()
+	_, ok := c.receiveCancel(c.notify)
 	assert.False(t, ok)
 }
 
