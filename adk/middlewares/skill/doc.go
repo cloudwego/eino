@@ -44,4 +44,18 @@
 //
 // NewBackendFromFilesystem loads skills from a filesystem backend. It scans only first-level
 // subdirectories under BaseDir and reads each <dir>/SKILL.md as a skill definition.
+//
+// # Input error recovery
+//
+// Errors propagate by default. Set Config.RecoverInputErrors (or its TypedConfig
+// equivalent) to true to return argument decoding failures and missing skills as
+// tool results, allowing the model to correct its next call. The same option is
+// supported by New, NewMiddleware, and NewTyped.
+// Recovered results include a skill-error marker, the error detail, and a short
+// instruction to check the skill name and arguments before retrying.
+//
+// Custom backends must return an error wrapping ErrSkillNotFound for an absent
+// skill to be recoverable. Backend failures and errors from content builders or
+// nested agents still propagate. Cancellation, deadlines, and interrupt signals
+// are preserved, including interrupts returned by nested graphs.
 package skill
