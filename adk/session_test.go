@@ -231,10 +231,8 @@ type runnerSessionAgent struct {
 }
 
 type testTurnState[M MessageType] struct {
-	Messages          []M
-	ToolInfos         []*schema.ToolInfo
-	DeferredToolInfos []*schema.ToolInfo
-	SessionValues     map[string]any
+	Messages      []M
+	SessionValues map[string]any
 }
 
 func (a *runnerSessionAgent) Name(_ context.Context) string        { return a.name }
@@ -648,67 +646,6 @@ func TestRunnerSessionModePrependsCommittedMessagesOnce(t *testing.T) {
 	require.Len(t, secondAgent.values, 1)
 	assert.Nil(t, secondAgent.values[0]["k"])
 	assert.Equal(t, "value", secondAgent.values[0]["override"])
-}
-
-func TestRunnerSessionModeSkipsDuplicateEmptyModelContext(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	sessionID := "runner-model-context-session"
-	model := &leadingSystemTestModel[*schema.Message]{response: schema.AssistantMessage("ok", nil)}
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "runner-model-context-agent",
-		Description: "runner model context agent",
-		Instruction: "You are a helpful assistant.",
-		Model:       model,
-	})
-	require.NoError(t, err)
-
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        agent,
-		SessionID:    sessionID,
-		SessionStore: store,
-	})
-	drainSessionEvents(t, runner.Query(ctx, "first"))
-	drainSessionEvents(t, runner.Query(ctx, "second"))
-
-	result, err := store.LoadEventsForSession(ctx, sessionID, &LoadSessionEventsRequest{
-		Kinds: []SessionEventKind{SessionEventModelContext},
-	})
-	require.NoError(t, err)
-	require.Len(t, result.Events, 0)
-}
-
-func TestRunnerSessionModeSkipsDuplicateToolModelContext(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	sessionID := "runner-tool-model-context-session"
-	model := &sessionToolCallingModel{response: schema.AssistantMessage("ok", nil)}
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "runner-tool-model-context-agent",
-		Description: "runner tool model context agent",
-		Instruction: "You are a helpful assistant.",
-		Model:       model,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{modelContextExtraTool{}},
-			},
-		},
-	})
-	require.NoError(t, err)
-
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        agent,
-		SessionID:    sessionID,
-		SessionStore: store,
-	})
-	drainSessionEvents(t, runner.Query(ctx, "first"))
-	drainSessionEvents(t, runner.Query(ctx, "second"))
-
-	result, err := store.LoadEventsForSession(ctx, sessionID, &LoadSessionEventsRequest{
-		Kinds: []SessionEventKind{SessionEventModelContext},
-	})
-	require.NoError(t, err)
-	require.Len(t, result.Events, 0)
 }
 
 func TestRunnerSessionModeReordersParallelToolResultsByToolCallOrder(t *testing.T) {
@@ -1233,27 +1170,6 @@ func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 	err := res.finalize(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete session checkpoint")
-}
-
-func TestModelContextEvent_JSONLikeRoundTrip(t *testing.T) {
-	modelCtx := &ModelContextEvent{
-		ToolInfos: []*schema.ToolInfo{
-			{
-				Name:        "lookup",
-				Desc:        "lookup tool",
-				ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"q": {Type: schema.String}}),
-			},
-		},
-	}
-
-	se := &SessionEvent[*schema.Message]{Kind: SessionEventModelContext, ModelContext: modelCtx}
-	data, err := encodeSessionEvent(withTestEventID(se))
-	require.NoError(t, err)
-	decoded, err := decodeSessionEvent[*schema.Message](data)
-	require.NoError(t, err)
-	require.NotNil(t, decoded.ModelContext)
-	require.Len(t, decoded.ModelContext.ToolInfos, 1)
-	assert.Equal(t, "lookup", decoded.ModelContext.ToolInfos[0].Name)
 }
 
 func TestRunnerSessionStreamingDoesNotBlockLiveEvent(t *testing.T) {
@@ -1916,18 +1832,6 @@ func TestSessionPersister_DirectAppendNoRetryAndLatch(t *testing.T) {
 	})
 }
 
-// TestModelContextEvent_GobRoundtripNilFields verifies gob roundtrip preserves nil semantics.
-func TestModelContextEvent_GobRoundtripNilFields(t *testing.T) {
-	se := &SessionEvent[*schema.Message]{Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}}
-	encoded, err := encodeSessionEvent(withTestEventID(se))
-	require.NoError(t, err)
-	decoded, err := decodeSessionEvent[*schema.Message](encoded)
-	require.NoError(t, err)
-	require.NotNil(t, decoded.ModelContext)
-	assert.Nil(t, decoded.ModelContext.ToolInfos)
-	assert.Nil(t, decoded.ModelContext.DeferredToolInfos)
-}
-
 func TestNormalizeSessionConfig_Variations(t *testing.T) {
 	cfg := normalizeSessionConfig[*schema.Message](nil)
 	assert.NotNil(t, cfg.EventIDGenerator)
@@ -2273,19 +2177,6 @@ func TestStripSessionEventFields(t *testing.T) {
 		assert.Equal(t, "hi", stripped.Output.MessageOutput.Message.Content)
 	})
 
-	t.Run("SessionEvent-only event drops to nil", func(t *testing.T) {
-		ev := &AgentEvent{
-			SessionEventVariant: &SessionEventVariant[*schema.Message]{
-				Event: &SessionEvent[*schema.Message]{
-					Kind:         SessionEventModelContext,
-					ModelContext: &ModelContextEvent{},
-				},
-			},
-		}
-		stripped := stripSessionEventFields(ev)
-		assert.Nil(t, stripped)
-	})
-
 	t.Run("message mutation SessionEvent-only event drops to nil", func(t *testing.T) {
 		msgs := []*schema.Message{schema.UserMessage("x")}
 		ev := &AgentEvent{
@@ -2306,8 +2197,8 @@ func TestStripSessionEventFields(t *testing.T) {
 			SessionEventVariant: &SessionEventVariant[*schema.Message]{
 				SessionID: "child-1",
 				Event: &SessionEvent[*schema.Message]{
-					Kind:         SessionEventModelContext,
-					ModelContext: &ModelContextEvent{},
+					Kind:      SessionEventSessionStatusIdle,
+					Lifecycle: &LifecycleEvent{State: SessionRunStateIdle},
 				},
 			},
 		}
@@ -2785,7 +2676,7 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 		assert.Equal(t, "post", result.state.Messages[0].Content)
 	})
 
-	t.Run("message mutations and model context after replacement", func(t *testing.T) {
+	t.Run("message mutations after replacement", func(t *testing.T) {
 		store := newSessionHelperStore()
 		sid := "replacement-increments"
 		first := testMessageWithID("first", schema.User)
@@ -2794,8 +2685,6 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 		updated := testMessageWithID("first-updated", schema.Assistant)
 		setMessageIDForTest(updated, GetMessageID(first))
 		inserted := testMessageWithID("inserted", schema.User)
-		tools := []*schema.ToolInfo{{Name: "tool"}}
-		deferredTools := []*schema.ToolInfo{{Name: "deferred-tool"}}
 		boundary := replacementEvent([]*schema.Message{first, second, deleted})
 		boundary.Extra = map[string]any{"reason": "opaque-to-eino"}
 		appendEvents(t, store, sid,
@@ -2819,21 +2708,11 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 				Kind:            SessionEventMessagesDeleted,
 				MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{GetMessageID(deleted)}},
 			},
-			&SessionEvent[*schema.Message]{
-				Kind: SessionEventModelContext,
-				ModelContext: &ModelContextEvent{
-					ToolInfos:         tools,
-					DeferredToolInfos: deferredTools,
-				},
-			},
 		)
 
 		result, _ := reconstruct(t, store, sid, 10)
 
 		assert.Equal(t, []*schema.Message{updated, inserted, second}, result.state.Messages)
-		assert.Equal(t, tools, result.state.ToolInfos)
-		assert.Equal(t, deferredTools, result.state.DeferredToolInfos)
-		assert.True(t, result.state.sawModelContext)
 
 		fullEvents, err := loadActiveSessionEventsReverse[*schema.Message](ctx, store, sid, 2)
 		require.NoError(t, err)
@@ -5494,7 +5373,7 @@ func TestSessionEvent_StreamCopyConcat_ByteIdentical(t *testing.T) {
 
 // TestExplicitCheckpointResume_WithSessionMode verifies that when a caller passes
 // an explicit checkpoint ID alongside a configured SessionID/SessionStore[*schema.Message], the
-// resume path restores model context without retaining reconstructed messages.
+// resume path does not retain reconstructed messages.
 func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -5510,12 +5389,6 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
-	modelContext := &ModelContextEvent{
-		ToolInfos:         []*schema.ToolInfo{{Name: "lookup"}},
-		DeferredToolInfos: []*schema.ToolInfo{{Name: "search"}},
-	}
-	contextEvent := withTestEventID(&SessionEvent[*schema.Message]{ModelContext: modelContext})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{contextEvent}))
 	committedIdleSE := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleSE}))
 
@@ -5533,9 +5406,6 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	require.True(t, state.enabled, "session mode must remain enabled when an explicit checkpoint ID is supplied")
 	require.NotNil(t, state.latestState)
 	assert.Nil(t, state.latestState.Messages)
-	assert.True(t, state.latestState.sawModelContext)
-	assert.Equal(t, modelContext.ToolInfos, state.latestState.ToolInfos)
-	assert.Equal(t, modelContext.DeferredToolInfos, state.latestState.DeferredToolInfos)
 	assert.Equal(t, explicitCheckpointID, effective,
 		"caller-supplied checkpoint ID must be preserved")
 }
@@ -5563,8 +5433,8 @@ func TestPrepareRunnerSessionResume_LegacyCheckpointUsesResumeEventTurnID(t *tes
 	assert.Equal(t, resumeEvent.EventID, resumeEvent.TurnID)
 }
 
-// TestResumePath_TailReplay verifies that resume restores model context from the
-// log tail without retaining the reconstructed message history.
+// TestResumePath_TailReplay verifies that resume does not retain the reconstructed
+// message history, including messages from the log tail.
 func TestResumePath_TailReplay(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
@@ -5586,12 +5456,6 @@ func TestResumePath_TailReplay(t *testing.T) {
 	EnsureMessageID(tailMsg)
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: tailMsg})
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
-	modelContext := &ModelContextEvent{
-		ToolInfos:         []*schema.ToolInfo{{Name: "lookup"}},
-		DeferredToolInfos: []*schema.ToolInfo{{Name: "search"}},
-	}
-	contextEvent := withTestEventID(&SessionEvent[*schema.Message]{ModelContext: modelContext})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{contextEvent}))
 
 	// Seed a runner session checkpoint so the resume path finds something to load.
 	cpStore := newSessionHelperStore()
@@ -5604,9 +5468,6 @@ func TestResumePath_TailReplay(t *testing.T) {
 	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
 	require.NoError(t, err)
 	assert.Nil(t, state.latestState.Messages)
-	assert.True(t, state.latestState.sawModelContext)
-	assert.Equal(t, modelContext.ToolInfos, state.latestState.ToolInfos)
-	assert.Equal(t, modelContext.DeferredToolInfos, state.latestState.DeferredToolInfos)
 }
 
 // Ensure the io package import is used (for compile when chunks are empty).
@@ -5903,28 +5764,6 @@ func (m *leadingSystemTestModel[M]) Stream(ctx context.Context, input []M, opts 
 	return schema.StreamReaderFromArray([]M{msg}), nil
 }
 
-type sessionToolCallingModel struct {
-	response *schema.Message
-	inputs   [][]*schema.Message
-}
-
-func (m *sessionToolCallingModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	m.inputs = append(m.inputs, append([]*schema.Message{}, input...))
-	return m.response, nil
-}
-
-func (m *sessionToolCallingModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	msg, err := m.Generate(ctx, input, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
-}
-
-func (m *sessionToolCallingModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return m, nil
-}
-
 type parallelToolSessionModel struct {
 	inputs [][]*schema.Message
 }
@@ -5997,26 +5836,6 @@ func toolResultCallIDs(messages []*schema.Message) []string {
 		}
 	}
 	return ids
-}
-
-type modelContextExtraTool struct{}
-
-func (modelContextExtraTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{
-		Name:  "extra_tool",
-		Desc:  "tool with json-normalized extra",
-		Extra: map[string]any{"version": 1},
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"query": {
-				Type: schema.String,
-				Desc: "query",
-			},
-		}),
-	}, nil
-}
-
-func (modelContextExtraTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
-	return "ok", nil
 }
 
 func drainAgenticSessionEvents(t *testing.T, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) {

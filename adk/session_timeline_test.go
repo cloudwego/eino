@@ -285,7 +285,6 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 			},
 		}},
 		{EventID: uuid.NewString(), Kind: SessionEventSessionError, Error: &SessionErrorEvent{Type: "transient", RetryStatus: &RetryStatus{Type: RetryStatusRetrying}}},
-		{EventID: uuid.NewString(), Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}},
 	}
 	for _, se := range events {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
@@ -297,7 +296,6 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 	require.NotNil(t, result.state)
 	require.Len(t, result.state.Messages, 1)
 	assert.Equal(t, "hello", result.state.Messages[0].Content)
-	assert.True(t, result.state.sawModelContext)
 }
 
 func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) {
@@ -1121,15 +1119,6 @@ func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testi
 		assert.Equal(t, se.Timestamp, event.SessionEventVariant.Event.Timestamp)
 		assert.Empty(t, original.EventID)
 	})
-
-	t.Run("model context event normalizes without mutation", func(t *testing.T) {
-		original := &SessionEvent[*schema.Message]{Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}}
-		event := &AgentEvent{SessionEventVariant: &SessionEventVariant[*schema.Message]{Event: original}}
-		se, err := normalizeAgentSessionEvent(event)
-		require.NoError(t, err)
-		require.NotNil(t, se.ModelContext)
-		require.NotNil(t, event.SessionEventVariant.Event.ModelContext)
-	})
 }
 
 func TestRetryOnlyModelSpansHaveNoParentSpanID(t *testing.T) {
@@ -1730,7 +1719,6 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg1},
 		{EventID: uuid.NewString(), Kind: SessionEventMessage, Message: msg2},
 		{EventID: uuid.NewString(), Kind: SessionEventSpanModelRequestStart, Span: &SpanEvent{SpanID: uuid.NewString(), Kind: SpanKindModel, StartedAt: time.Now().UTC(), Model: &ModelSpanMeta{}}},
-		{EventID: uuid.NewString(), Kind: SessionEventModelContext, ModelContext: &ModelContextEvent{}},
 	}
 	for _, se := range events {
 		require.NoError(t, inner.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
@@ -1751,7 +1739,6 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	require.Len(t, result.state.Messages, 2)
 	assert.Equal(t, "hello", result.state.Messages[0].Content)
 	assert.Equal(t, "world", result.state.Messages[1].Content)
-	assert.True(t, result.state.sawModelContext)
 }
 
 func TestToolSpan_StreamableToolEmitsEndAfterEOF(t *testing.T) {

@@ -649,10 +649,6 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		sessionState.inputMessages = nil
 		opts = append(opts, withEnableSessionEvents())
 		opts = append(opts, withEnableInternalTimelineEvents())
-		opts = append(opts, withInitialModelContext(&ModelContextEvent{
-			ToolInfos:         sessionState.latestState.ToolInfos,
-			DeferredToolInfos: sessionState.latestState.DeferredToolInfos,
-		}, sessionState.latestState.sawModelContext))
 	}
 
 	input := &TypedAgentInput[M]{
@@ -735,10 +731,6 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 	if sessionState.enabled {
 		opts = append(opts, withEnableSessionEvents())
 		opts = append(opts, withEnableInternalTimelineEvents())
-		opts = append(opts, withInitialModelContext(&ModelContextEvent{
-			ToolInfos:         sessionState.latestState.ToolInfos,
-			DeferredToolInfos: sessionState.latestState.DeferredToolInfos,
-		}, sessionState.latestState.sawModelContext))
 	}
 
 	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointForSession(store, ctx, checkPointID, sessionState.enabled)

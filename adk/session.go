@@ -164,7 +164,6 @@ type SessionEvent[M MessageType] struct {
 	MessageUpdated          *MessageUpdatedEvent[M]          `json:"message_updated,omitempty"`
 	MessageInserted         *MessageInsertedEvent[M]         `json:"message_inserted,omitempty"`
 	MessagesDeleted         *MessagesDeletedEvent            `json:"messages_deleted,omitempty"`
-	ModelContext            *ModelContextEvent               `json:"model_context,omitempty"`
 	Rollback                *SessionRollbackEvent            `json:"rollback,omitempty"`
 
 	Lifecycle *LifecycleEvent    `json:"lifecycle,omitempty"`
@@ -212,7 +211,6 @@ const (
 	SessionEventMessageUpdated          SessionEventKind = "message_updated"
 	SessionEventMessageInserted         SessionEventKind = "message_inserted"
 	SessionEventMessagesDeleted         SessionEventKind = "messages_deleted"
-	SessionEventModelContext            SessionEventKind = "model_context"
 	SessionEventRollback                SessionEventKind = "rollback"
 
 	SessionEventSessionStatusRunning SessionEventKind = "session.status_running"
@@ -237,7 +235,6 @@ var knownSessionEventKinds = map[SessionEventKind]struct{}{
 	SessionEventMessageUpdated:          {},
 	SessionEventMessageInserted:         {},
 	SessionEventMessagesDeleted:         {},
-	SessionEventModelContext:            {},
 	SessionEventRollback:                {},
 	SessionEventSessionStatusRunning:    {},
 	SessionEventSessionStatusIdle:       {},
@@ -300,11 +297,6 @@ const (
 	// StopReasonFailed means the run ended with a non-retry terminal failure.
 	StopReasonFailed StopReasonType = "failed"
 )
-
-type ModelContextEvent struct {
-	ToolInfos         []*schema.ToolInfo `json:"tool_infos,omitempty"`
-	DeferredToolInfos []*schema.ToolInfo `json:"deferred_tool_infos,omitempty"`
-}
 
 type SessionErrorEvent struct {
 	// Type identifies the timeline error category. Known values are
@@ -572,10 +564,7 @@ type SessionConfig[M MessageType] struct {
 }
 
 type reconstructedSessionState[M MessageType] struct {
-	Messages          []M
-	ToolInfos         []*schema.ToolInfo
-	DeferredToolInfos []*schema.ToolInfo
-	sawModelContext   bool
+	Messages []M
 }
 
 type runnerSessionCheckpoint struct {
@@ -596,7 +585,6 @@ func init() {
 	schema.RegisterName[*MessageInsertedEvent[*schema.Message]]("_eino_adk_message_inserted_event")
 	schema.RegisterName[*MessageInsertedEvent[*schema.AgenticMessage]]("_eino_adk_agentic_message_inserted_event")
 	schema.RegisterName[*MessagesDeletedEvent]("_eino_adk_messages_deleted_event")
-	schema.RegisterName[*ModelContextEvent]("_eino_adk_model_context_event")
 	schema.RegisterName[*LifecycleEvent]("_eino_adk_lifecycle_event")
 	schema.RegisterName[*SessionErrorEvent]("_eino_adk_session_error_event")
 	schema.RegisterName[*RetryStatus]("_eino_adk_retry_status")
@@ -710,9 +698,6 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		if err := ValidateEmittedSessionEventKind(&se); err != nil {
 			return nil, err
 		}
-		if se.Kind == SessionEventModelContext {
-			return nil, nil
-		}
 		return &se, nil
 	}
 	if event.Output != nil && event.Output.MessageOutput != nil &&
@@ -807,12 +792,6 @@ func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		}
 		add(SessionEventMessagesDeleted)
 	}
-	if event.ModelContext != nil {
-		if err := validateModelContextEvent(event.ModelContext); err != nil {
-			return "", err
-		}
-		add(SessionEventModelContext)
-	}
 	if event.Rollback != nil {
 		if event.EventID == "" {
 			return "", errors.New("rollback session event must set non-empty EventID")
@@ -884,9 +863,6 @@ func countActiveSessionEventPayloads[M MessageType](event *SessionEvent[M]) int 
 		count++
 	}
 	if event.MessagesDeleted != nil {
-		count++
-	}
-	if event.ModelContext != nil {
 		count++
 	}
 	if event.Rollback != nil {
@@ -1448,33 +1424,6 @@ func validateMessageIDs(field string, ids []string) error {
 	return nil
 }
 
-func validateModelContextEvent(event *ModelContextEvent) error {
-	if event == nil {
-		return nil
-	}
-	if err := validateToolInfoNames("ModelContext.ToolInfos", event.ToolInfos); err != nil {
-		return err
-	}
-	return validateToolInfoNames("ModelContext.DeferredToolInfos", event.DeferredToolInfos)
-}
-
-func validateToolInfoNames(field string, infos []*schema.ToolInfo) error {
-	seen := make(map[string]struct{}, len(infos))
-	for _, info := range infos {
-		if info == nil {
-			continue
-		}
-		if info.Name == "" {
-			return fmt.Errorf("%s must not contain empty tool name", field)
-		}
-		if _, ok := seen[info.Name]; ok {
-			return fmt.Errorf("%s contains duplicate tool name %q", field, info.Name)
-		}
-		seen[info.Name] = struct{}{}
-	}
-	return nil
-}
-
 type sessionReconstructResult[M MessageType] struct {
 	state *reconstructedSessionState[M]
 }
@@ -1487,7 +1436,6 @@ var sessionReplayEventKinds = []SessionEventKind{
 	SessionEventMessageUpdated,
 	SessionEventMessageInserted,
 	SessionEventMessagesDeleted,
-	SessionEventModelContext,
 	SessionEventSessionStatusIdle,
 	SessionEventInterrupt,
 	SessionEventCancel,
@@ -1850,25 +1798,11 @@ func replayDurableContextEvents[M MessageType](events []*SessionEvent[M]) (*reco
 		startIdx = boundaryIdx + 1
 	}
 
-	// Model-context reconstruction is intentionally scoped to events at or after
-	// the latest MessagesReplaced boundary, the same window used for messages.
-	// A model_context emitted before that boundary is not recovered: doing so
-	// would require scanning the full session log, which defeats the point of
-	// shortcutting reconstruction at MessagesReplaced. The only consequence is
-	// that the next turn's first model call re-emits a model_context snapshot
-	// (sawModelContext starts false) even when the tool set is unchanged — an
-	// extra audit event, not a correctness issue, since reconstructed ToolInfos
-	// feed only the change-detection baseline and never the model itself.
 	replay := newMessageReplay(messages)
 	state := &reconstructedSessionState[M]{Messages: messages}
 	for i := startIdx; i < len(events); i++ {
 		if err := replay.apply(events[i]); err != nil {
 			return nil, fmt.Errorf("reconstruct: %w", err)
-		}
-		if events[i] != nil && events[i].ModelContext != nil {
-			state.ToolInfos = cloneToolInfos(events[i].ModelContext.ToolInfos)
-			state.DeferredToolInfos = cloneToolInfos(events[i].ModelContext.DeferredToolInfos)
-			state.sawModelContext = true
 		}
 	}
 	state.Messages = replay.visibleMessages()
