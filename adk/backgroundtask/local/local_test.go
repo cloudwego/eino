@@ -118,6 +118,25 @@ func waitTerminal(
 	return task
 }
 
+func waitRunning(
+	t *testing.T,
+	manager *backgroundtask.Manager,
+	task *backgroundtask.Task,
+) *backgroundtask.Task {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for task.Status == backgroundtask.StatusPending {
+		next, err := manager.WaitForTaskVersion(ctx, &backgroundtask.WaitForTaskVersionRequest{
+			TaskID: task.Spec.ID, AfterVersion: task.Version,
+		})
+		require.NoError(t, err)
+		task = next
+	}
+	require.Equal(t, backgroundtask.StatusRunning, task.Status)
+	return task
+}
+
 func TestRunnerBufferedForegroundAndBackground_BitsUT(t *testing.T) {
 	runner, manager := newTestRunner(t)
 	foreground, err := runner.Run(context.Background(), &Input{Description: "foreground"},
@@ -246,6 +265,53 @@ func TestRunnerStreamProjectsForegroundOutput_BitsUT(t *testing.T) {
 
 	_, err = manager.Get(context.Background(), "test_1")
 	require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+}
+
+func TestRunnerForegroundStreamCloseReleasesSource_BitsUT(t *testing.T) {
+	timeout := 0
+	runner, _ := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+	})
+	sourceWriterCh := make(chan *schema.StreamWriter[string], 1)
+	workCanceled := make(chan struct{})
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "close foreground projection"},
+		func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](streamBufferCap * 32)
+			sourceWriterCh <- writer
+			go func() {
+				<-ctx.Done()
+				close(workCanceled)
+			}()
+			return reader, nil
+		},
+	)
+	require.NoError(t, err)
+
+	sourceWriter := <-sourceWriterCh
+	stream.Close()
+	require.False(t, sourceWriter.Send("trigger-close-detection", nil))
+	select {
+	case <-workCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("closing the foreground projection did not cancel the work context")
+	}
+
+	sourceClosed := false
+	for i := 0; i < streamBufferCap*4; i++ {
+		if sourceWriter.Send("queued-after-cancel", nil) {
+			sourceClosed = true
+			break
+		}
+	}
+	if sourceClosed {
+		return
+	}
+	require.Eventually(t, func() bool {
+		return sourceWriter.Send("probe", nil)
+	}, time.Second, 10*time.Millisecond, "adapter did not close its source reader after cancellation")
 }
 
 func TestRunnerStreamTimeoutStartsAfterConstruction_BitsUT(t *testing.T) {
@@ -483,6 +549,337 @@ func TestRunnerStreamBackgroundNotices(t *testing.T) {
 		close(release)
 		require.Equal(t, backgroundtask.StatusCompleted,
 			waitTerminal(t, manager, onlyTask(t, manager)).Status)
+	})
+}
+
+func TestRunnerAutoBackgroundStreamDrainsAfterProjectionCloses_BitsUT(t *testing.T) {
+	timeout := 1
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+			return true
+		}
+	})
+	release := make(chan struct{})
+	const chunkCount = streamBufferCap * 4
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "auto background with continued output"},
+		func(context.Context, backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](chunkCount)
+			go func() {
+				<-release
+				for i := 0; i < chunkCount; i++ {
+					writer.Send("x", nil)
+				}
+				writer.Close()
+			}()
+			return reader, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Contains(t, drain(t, stream), "moved to the background")
+
+	close(release)
+	task := waitTerminal(t, manager, onlyTask(t, manager))
+	require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+	require.Equal(t, strings.Repeat("x", chunkCount), string(task.ResultData))
+}
+
+func TestRunnerAutoBackgroundCancelStopsOriginalBufferedWork_BitsUT(t *testing.T) {
+	timeout := 1
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+			return true
+		}
+	})
+	release := make(chan struct{})
+	defer close(release)
+	workCanceled := make(chan struct{})
+
+	task, err := runner.Run(
+		context.Background(),
+		&Input{Description: "cancel adopted buffered work"},
+		func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (string, error) {
+			select {
+			case <-ctx.Done():
+				close(workCanceled)
+				return "", ctx.Err()
+			case <-release:
+				return "released", nil
+			}
+		},
+	)
+	require.NoError(t, err)
+	task = waitRunning(t, manager, task)
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	task, err = manager.RequestCancel(cancelCtx, task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCanceled, task.Status)
+	select {
+	case <-workCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("canceling the adopted task did not cancel the original buffered work")
+	}
+}
+
+func TestRunnerAutoBackgroundCancelStopsOriginalStreamWork_BitsUT(t *testing.T) {
+	timeout := 1
+	runner, manager := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+		config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+			return true
+		}
+	})
+	release := make(chan struct{})
+	defer close(release)
+	sourceCanceled := make(chan struct{})
+
+	stream, err := runner.RunStream(
+		context.Background(),
+		&Input{Description: "cancel adopted stream work"},
+		func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+			reader, writer := schema.Pipe[string](1)
+			go func() {
+				select {
+				case <-ctx.Done():
+					close(sourceCanceled)
+				case <-release:
+				}
+				writer.Close()
+			}()
+			return reader, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Contains(t, drain(t, stream), "moved to the background")
+	task := waitRunning(t, manager, onlyTask(t, manager))
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	task, err = manager.RequestCancel(cancelCtx, task.Spec.ID)
+	require.NoError(t, err)
+	require.Equal(t, backgroundtask.StatusCanceled, task.Status)
+	select {
+	case <-sourceCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("canceling the adopted task did not cancel the original stream work")
+	}
+}
+
+func TestRunnerAutoBackgroundDetachesCallerContext_BitsUT(t *testing.T) {
+	type contextKey struct{}
+	key := contextKey{}
+
+	t.Run("buffered", func(t *testing.T) {
+		timeout := 1
+		runner, manager := newTestRunner(t, func(config *Config) {
+			config.ForegroundTimeoutMs = &timeout
+			config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+				return true
+			}
+		})
+		callerCtx, cancelCaller := context.WithCancel(
+			context.WithValue(context.Background(), key, "preserved"),
+		)
+		defer cancelCaller()
+		workCtxCh := make(chan context.Context, 1)
+		release := make(chan struct{})
+		released := false
+		defer func() {
+			if !released {
+				close(release)
+			}
+		}()
+
+		task, err := runner.Run(
+			callerCtx,
+			&Input{Description: "detach buffered caller context"},
+			func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (string, error) {
+				workCtxCh <- ctx
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-release:
+					return "done", nil
+				}
+			},
+		)
+		require.NoError(t, err)
+		task = waitRunning(t, manager, task)
+		workCtx := <-workCtxCh
+		require.Equal(t, "preserved", workCtx.Value(key))
+
+		cancelCaller()
+		require.NoError(t, workCtx.Err())
+		close(release)
+		released = true
+		task = waitTerminal(t, manager, task)
+		require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+		require.Equal(t, "done", string(task.ResultData))
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		timeout := 1
+		runner, manager := newTestRunner(t, func(config *Config) {
+			config.ForegroundTimeoutMs = &timeout
+			config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+				return true
+			}
+		})
+		callerCtx, cancelCaller := context.WithCancel(
+			context.WithValue(context.Background(), key, "preserved"),
+		)
+		defer cancelCaller()
+		workCtxCh := make(chan context.Context, 1)
+		release := make(chan struct{})
+		released := false
+		defer func() {
+			if !released {
+				close(release)
+			}
+		}()
+
+		stream, err := runner.RunStream(
+			callerCtx,
+			&Input{Description: "detach streaming caller context"},
+			func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+				workCtxCh <- ctx
+				reader, writer := schema.Pipe[string](1)
+				go func() {
+					select {
+					case <-ctx.Done():
+						writer.Send("", ctx.Err())
+					case <-release:
+						writer.Send("done", nil)
+					}
+					writer.Close()
+				}()
+				return reader, nil
+			},
+		)
+		require.NoError(t, err)
+		require.Contains(t, drain(t, stream), "moved to the background")
+		task := waitRunning(t, manager, onlyTask(t, manager))
+		workCtx := <-workCtxCh
+		require.Equal(t, "preserved", workCtx.Value(key))
+
+		cancelCaller()
+		require.NoError(t, workCtx.Err())
+		close(release)
+		released = true
+		task = waitTerminal(t, manager, task)
+		require.Equal(t, backgroundtask.StatusCompleted, task.Status)
+		require.Contains(t, string(task.ResultData), "done")
+	})
+}
+
+func TestRunnerForegroundStreamConstructionHonorsCallerCancellation_BitsUT(t *testing.T) {
+	timeout := 0
+	runner, _ := newTestRunner(t, func(config *Config) {
+		config.ForegroundTimeoutMs = &timeout
+	})
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	workCanceled := make(chan struct{})
+	type runResult struct {
+		stream *schema.StreamReader[string]
+		err    error
+	}
+	returned := make(chan runResult, 1)
+	go func() {
+		stream, err := runner.RunStream(
+			callerCtx,
+			&Input{Description: "cancel stream construction"},
+			func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+				close(entered)
+				<-ctx.Done()
+				close(workCanceled)
+				return nil, ctx.Err()
+			},
+		)
+		returned <- runResult{stream: stream, err: err}
+	}()
+
+	<-entered
+	cancelCaller()
+	select {
+	case result := <-returned:
+		require.ErrorIs(t, result.err, context.Canceled)
+		require.Nil(t, result.stream)
+	case <-time.After(time.Second):
+		t.Fatal("RunStream did not return after caller cancellation during construction")
+	}
+	select {
+	case <-workCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("caller cancellation did not reach constructing stream work")
+	}
+}
+
+func TestRunnerAutoBackgroundRejectsCanceledCallerAtHandoff_BitsUT(t *testing.T) {
+	t.Run("buffered", func(t *testing.T) {
+		timeout := 1
+		var cancelCaller context.CancelFunc
+		runner, manager := newTestRunner(t, func(config *Config) {
+			config.ForegroundTimeoutMs = &timeout
+			config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+				cancelCaller()
+				return true
+			}
+		})
+		callerCtx, cancel := context.WithCancel(context.Background())
+		cancelCaller = cancel
+		defer cancel()
+
+		task, err := runner.Run(
+			callerCtx,
+			&Input{Description: "caller canceled at buffered handoff"},
+			func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (string, error) {
+				<-ctx.Done()
+				return "", ctx.Err()
+			},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Nil(t, task)
+		_, err = manager.Get(context.Background(), "test_1")
+		require.ErrorIs(t, err, backgroundtask.ErrNotFound)
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		timeout := 1
+		var cancelCaller context.CancelFunc
+		runner, manager := newTestRunner(t, func(config *Config) {
+			config.ForegroundTimeoutMs = &timeout
+			config.ShouldAutoBackground = func(context.Context, *backgroundtask.ForegroundCandidate) bool {
+				cancelCaller()
+				return true
+			}
+		})
+		callerCtx, cancel := context.WithCancel(context.Background())
+		cancelCaller = cancel
+		defer cancel()
+
+		stream, err := runner.RunStream(
+			callerCtx,
+			&Input{Description: "caller canceled at streaming handoff"},
+			func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (*schema.StreamReader[string], error) {
+				reader, writer := schema.Pipe[string](1)
+				go func() {
+					<-ctx.Done()
+					writer.Close()
+				}()
+				return reader, nil
+			},
+		)
+		require.NoError(t, err)
+		require.Empty(t, drain(t, stream))
+		_, err = manager.Get(context.Background(), "test_1")
+		require.ErrorIs(t, err, backgroundtask.ErrNotFound)
 	})
 }
 
