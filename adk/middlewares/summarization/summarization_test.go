@@ -2235,6 +2235,41 @@ func smakeAssistantMsg[M adk.MessageType](content string) M {
 	panic("unreachable")
 }
 
+func smakeAssistantToolCallMsg[M adk.MessageType](content string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(&schema.Message{
+			Role:    schema.Assistant,
+			Content: content,
+			ToolCalls: []schema.ToolCall{
+				{
+					ID: "call_1",
+					Function: schema.FunctionCall{
+						Name:      "lookup",
+						Arguments: `{"query":"context"}`,
+					},
+				},
+			},
+		}).(M)
+	case *schema.AgenticMessage:
+		blocks := make([]*schema.ContentBlock, 0, 2)
+		if content != "" {
+			blocks = append(blocks, schema.NewContentBlock(&schema.AssistantGenText{Text: content}))
+		}
+		blocks = append(blocks, schema.NewContentBlock(&schema.FunctionToolCall{
+			CallID:    "call_1",
+			Name:      "lookup",
+			Arguments: `{"query":"context"}`,
+		}))
+		return any(&schema.AgenticMessage{
+			Role:          schema.AgenticRoleTypeAssistant,
+			ContentBlocks: blocks,
+		}).(M)
+	}
+	panic("unreachable")
+}
+
 // ============================================================================
 // Generic mock model
 // ============================================================================
@@ -2252,6 +2287,18 @@ func (m *genericMockModel[M]) Stream(_ context.Context, _ []M, _ ...model.Option
 	return nil, fmt.Errorf("not implemented")
 }
 
+type genericFuncModel[M adk.MessageType] struct {
+	generate func(context.Context, []M, ...model.Option) (M, error)
+}
+
+func (m *genericFuncModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+	return m.generate(ctx, input, opts...)
+}
+
+func (m *genericFuncModel[M]) Stream(_ context.Context, _ []M, _ ...model.Option) (*schema.StreamReader[M], error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
 // ============================================================================
 // Generic tests
 // ============================================================================
@@ -2260,11 +2307,13 @@ func TestSummarizationGeneric(t *testing.T) {
 	t.Run("Message", func(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.Message])
 		t.Run("Flow", testSummarizationFlow[*schema.Message])
+		t.Run("ToolCallResponses", testSummaryToolCallResponses[*schema.Message])
 		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.Message])
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.AgenticMessage])
 		t.Run("Flow", testSummarizationFlow[*schema.AgenticMessage])
+		t.Run("ToolCallResponses", testSummaryToolCallResponses[*schema.AgenticMessage])
 		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.AgenticMessage])
 	})
 }
@@ -2448,6 +2497,164 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 		}
 	}
 	assert.True(t, foundSummary, "should have a summary message")
+}
+
+func testSummaryToolCallResponses[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+	input := []M{smakeUserMsg[M]("conversation")}
+	noBackoff := func(context.Context, int, M, error) time.Duration { return 0 }
+
+	t.Run("plain text succeeds", func(t *testing.T) {
+		mdl := &genericMockModel[M]{response: smakeAssistantMsg[M]("summary")}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{}}
+
+		resp, err := mw.generateWithRetry(ctx, mdl, input, nil, nil)
+
+		require.NoError(t, err)
+		assert.Equal(t, "summary", getAssistantTextContent(resp))
+	})
+
+	t.Run("default retry handles tool call", func(t *testing.T) {
+		attempts := 0
+		mdl := &genericFuncModel[M]{
+			generate: func(context.Context, []M, ...model.Option) (M, error) {
+				attempts++
+				if attempts == 1 {
+					return smakeAssistantToolCallMsg[M](""), nil
+				}
+				return smakeAssistantMsg[M]("summary after retry"), nil
+			},
+		}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{}}
+
+		resp, err := mw.generateWithRetry(ctx, mdl, input, nil, &TypedRetryConfig[M]{
+			MaxRetries:  intPtr(1),
+			BackoffFunc: noBackoff,
+		})
+
+		require.NoError(t, err)
+		assert.Equal(t, 2, attempts)
+		assert.Equal(t, "summary after retry", getAssistantTextContent(resp))
+	})
+
+	t.Run("default failover handles tool call", func(t *testing.T) {
+		primaryAttempts := 0
+		failoverAttempts := 0
+		primary := &genericFuncModel[M]{
+			generate: func(context.Context, []M, ...model.Option) (M, error) {
+				primaryAttempts++
+				return smakeAssistantToolCallMsg[M](""), nil
+			},
+		}
+		failover := &genericFuncModel[M]{
+			generate: func(context.Context, []M, ...model.Option) (M, error) {
+				failoverAttempts++
+				return smakeAssistantMsg[M]("summary from failover"), nil
+			},
+		}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{
+			Model: primary,
+			Failover: &TypedFailoverConfig[M]{
+				MaxRetries:  intPtr(1),
+				BackoffFunc: noBackoff,
+				GetFailoverModel: func(context.Context, *TypedFailoverContext[M]) (model.BaseModel[M], []M, error) {
+					return failover, input, nil
+				},
+			},
+		}}
+
+		resp, _, err := mw.summarize(ctx, adk.TypedChatModelAgentState[M]{Messages: input})
+
+		require.NoError(t, err)
+		assert.Equal(t, 1, primaryAttempts)
+		assert.Equal(t, 1, failoverAttempts)
+		assert.Equal(t, "summary from failover", getAssistantTextContent(resp))
+	})
+
+	t.Run("failover exhaustion preserves semantic error", func(t *testing.T) {
+		primaryAttempts := 0
+		failoverAttempts := 0
+		primary := &genericFuncModel[M]{
+			generate: func(context.Context, []M, ...model.Option) (M, error) {
+				primaryAttempts++
+				return smakeAssistantToolCallMsg[M](""), nil
+			},
+		}
+		failover := &genericFuncModel[M]{
+			generate: func(context.Context, []M, ...model.Option) (M, error) {
+				failoverAttempts++
+				return smakeAssistantToolCallMsg[M](""), nil
+			},
+		}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{
+			Model: primary,
+			Failover: &TypedFailoverConfig[M]{
+				MaxRetries:  intPtr(1),
+				BackoffFunc: noBackoff,
+				GetFailoverModel: func(context.Context, *TypedFailoverContext[M]) (model.BaseModel[M], []M, error) {
+					return failover, input, nil
+				},
+			},
+		}}
+
+		_, _, err := mw.summarize(ctx, adk.TypedChatModelAgentState[M]{Messages: input})
+
+		assert.Equal(t, 1, primaryAttempts)
+		assert.Equal(t, 1, failoverAttempts)
+		assert.EqualError(t, err, "exceeds max failover attempts: summary response contains tool calls")
+	})
+
+	t.Run("text with tool call is rejected", func(t *testing.T) {
+		toolCallResp := smakeAssistantToolCallMsg[M]("premature summary")
+		mdl := &genericMockModel[M]{response: toolCallResp}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{}}
+
+		resp, err := mw.generateWithRetry(ctx, mdl, input, nil, nil)
+
+		assert.Equal(t, toolCallResp, resp)
+		assert.ErrorContains(t, err, "summary response contains tool calls")
+	})
+
+	t.Run("retry exhaustion preserves semantic error", func(t *testing.T) {
+		attempts := 0
+		mdl := &genericFuncModel[M]{
+			generate: func(context.Context, []M, ...model.Option) (M, error) {
+				attempts++
+				return smakeAssistantToolCallMsg[M](""), nil
+			},
+		}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{}}
+
+		_, err := mw.generateWithRetry(ctx, mdl, input, nil, &TypedRetryConfig[M]{
+			MaxRetries:  intPtr(1),
+			BackoffFunc: noBackoff,
+		})
+
+		assert.Equal(t, 2, attempts)
+		assert.EqualError(t, err, "exceeds max retries: summary response contains tool calls")
+	})
+
+	t.Run("custom predicate receives response and semantic error", func(t *testing.T) {
+		toolCallResp := smakeAssistantToolCallMsg[M]("")
+		mdl := &genericMockModel[M]{response: toolCallResp}
+		mw := &TypedMiddleware[M]{cfg: &TypedConfig[M]{}}
+		var predicateResp M
+		var predicateErr error
+
+		resp, err := mw.generateWithRetry(ctx, mdl, input, nil, &TypedRetryConfig[M]{
+			MaxRetries: intPtr(0),
+			ShouldRetry: func(_ context.Context, got M, gotErr error) bool {
+				predicateResp = got
+				predicateErr = gotErr
+				return false
+			},
+		})
+
+		assert.Equal(t, toolCallResp, resp)
+		assert.Equal(t, toolCallResp, predicateResp)
+		assert.ErrorContains(t, predicateErr, "summary response contains tool calls")
+		assert.ErrorContains(t, err, "summary response contains tool calls")
+	})
 }
 
 func testTokenCounterReceivesStateToolInfos[M adk.MessageType](t *testing.T) {
