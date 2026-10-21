@@ -48,7 +48,7 @@ func TestSendTopicMemoryEventAnchorsBeforeLastUserQuery(t *testing.T) {
 	sendCtx, _ := startwindow.Open(parentCtx)
 	defer startwindow.Signal(sendCtx)
 
-	m := &middleware[*schema.Message]{}
+	m := &Middleware[*schema.Message]{}
 	m.sendTopicMemoryEvent(
 		sendCtx,
 		[]*schema.Message{user, assistant, toolResult},
@@ -77,7 +77,7 @@ func TestAppendTopicMemoryEventUsesEmptyAnchor(t *testing.T) {
 	sendCtx, _ := startwindow.Open(parentCtx)
 	defer startwindow.Signal(sendCtx)
 
-	m := &middleware[*schema.Message]{}
+	m := &Middleware[*schema.Message]{}
 	m.appendTopicMemoryEvent(sendCtx, newMemoryMessage[*schema.Message]("memory"))
 
 	require.NotNil(t, captured)
@@ -166,7 +166,7 @@ func TestTopicSelectionEmptyStream(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			selectionModel := &emptyTopicSelectionModel{}
-			mw := &middleware[*schema.Message]{topicSelectionModel: selectionModel}
+			mw := &Middleware[*schema.Message]{topicSelectionModel: selectionModel}
 			var err error
 			if mode == "" {
 				_, err = mw.selectTopicPlain(context.Background(), "question", nil, 1)
