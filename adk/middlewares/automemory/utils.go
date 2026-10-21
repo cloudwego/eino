@@ -18,13 +18,13 @@ package automemory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/eino-contrib/jsonschema"
 	"gopkg.in/yaml.v3"
 
@@ -266,7 +266,7 @@ func parseTopicSelectionFromToolCall[M adk.MessageType](msg M, valid map[string]
 		return nil, fmt.Errorf("unexpected tool call: %s", tc.Function.Name)
 	}
 	var parsed topicSelectionResp
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &parsed); err != nil {
+	if err := sonic.Unmarshal([]byte(tc.Function.Arguments), &parsed); err != nil {
 		return nil, err
 	}
 	out := normalizeSelected(parsed.SelectedMemories)
@@ -395,7 +395,7 @@ func parseTopicSelectionFromContent[M adk.MessageType](msg M, valid map[string]s
 	}
 
 	var parsed topicSelectionResp
-	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+	if err := sonic.Unmarshal([]byte(jsonStr), &parsed); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON from content: %w", err)
 	}
 
@@ -699,7 +699,7 @@ func ensureMemoryMsgUnchanged[M adk.MessageType](state *adk.TypedChatModelAgentS
 
 func extractFilePath(args string) (string, bool) {
 	var m map[string]any
-	if err := json.Unmarshal([]byte(args), &m); err != nil {
+	if err := sonic.Unmarshal([]byte(args), &m); err != nil {
 		return "", false
 	}
 	if v, ok := m["file_path"]; ok {
@@ -733,6 +733,14 @@ func isPathWithinMemoryDir(memDir string, filePath string) bool {
 }
 
 func getWriteCursorFromMessages[M adk.MessageType](msgs []M) int {
+	cursor, valid := getLocalWriteCursor(msgs)
+	if !valid {
+		return 0
+	}
+	return cursor
+}
+
+func getLocalWriteCursor[M adk.MessageType](msgs []M) (cursor int, valid bool) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
 		extra := getMsgExtra(m)
@@ -746,40 +754,123 @@ func getWriteCursorFromMessages[M adk.MessageType](msgs []M) int {
 		switch meta := v.(type) {
 		case *memoryExtra:
 			if meta != nil && meta.Type == "write_cursor" {
-				return meta.Cursor
+				if meta.AnchorMessageID == "" {
+					return i + 1, true
+				}
+				return i + 1, adk.GetMessageID(m) == meta.AnchorMessageID
 			}
 		case map[string]any:
-			if typ, _ := meta["type"].(string); typ != "write_cursor" {
+			typ, _ := meta["type"].(string)
+			if typ == "" {
+				typ, _ = meta["Type"].(string)
+			}
+			if typ != "write_cursor" {
 				continue
 			}
-			switch c := meta["cursor"].(type) {
-			case int:
-				return c
-			case int64:
-				return int(c)
-			case float64:
-				return int(c)
+			anchor, _ := meta["anchor_message_id"].(string)
+			if anchor == "" {
+				anchor, _ = meta["AnchorMessageID"].(string)
 			}
+			if anchor == "" {
+				return i + 1, true
+			}
+			return i + 1, adk.GetMessageID(m) == anchor
 		}
 	}
-	return 0
+	return 0, true
+}
+
+func resolveWriteProgressAnchor[M adk.MessageType](msgs []M, anchorMessageID string) (int, bool) {
+	if anchorMessageID == "" {
+		return 0, false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if !isNilMessage(msgs[i]) && adk.GetMessageID(msgs[i]) == anchorMessageID {
+			return i + 1, true
+		}
+	}
+	return 0, false
+}
+
+func ensureWriteProgressAnchor[M adk.MessageType](msgs []M, cursor int) (anchorMessageID string, normalizedCursor int, ok bool) {
+	if cursor <= 0 || cursor > len(msgs) {
+		return "", 0, false
+	}
+	for i := cursor - 1; i >= 0; i-- {
+		if isNilMessage(msgs[i]) {
+			continue
+		}
+		adk.EnsureMessageID(msgs[i])
+		anchorMessageID = adk.GetMessageID(msgs[i])
+		if anchorMessageID == "" {
+			return "", 0, false
+		}
+		return anchorMessageID, i + 1, true
+	}
+	return "", 0, false
 }
 
 func markWriteCursor[M adk.MessageType](state *adk.TypedChatModelAgentState[M], cursor int) *adk.TypedChatModelAgentState[M] {
 	if state == nil || len(state.Messages) == 0 {
 		return state
 	}
-	last := state.Messages[len(state.Messages)-1]
-	if isNilMessage(last) {
+	anchorMessageID, cursor, ok := ensureWriteProgressAnchor(state.Messages, cursor)
+	if !ok {
 		return state
 	}
+	anchor := state.Messages[cursor-1]
 
-	copyAndSetMsgExtra(last, memoryExtraKey, &memoryExtra{
-		Type:   "write_cursor",
-		Cursor: cursor,
+	copyAndSetMsgExtra(anchor, memoryExtraKey, &memoryExtra{
+		Type:            "write_cursor",
+		Cursor:          cursor,
+		AnchorMessageID: anchorMessageID,
 	})
 
 	return state
+}
+
+func (m *middleware[M]) resolveWriteCursor(ctx context.Context, msgs []M, coordKey string) (cursor int, remoteAhead bool) {
+	localCursor, localValid := getLocalWriteCursor(msgs)
+	if !localValid {
+		return 0, false
+	}
+	if coordKey == "" || m.coordination == nil || m.coordination.Coordinator == nil {
+		return localCursor, false
+	}
+
+	progress, ok, err := getCoordinatorWriteProgress(ctx, m.coordination.Coordinator, coordKey)
+	if err != nil || !ok || progress.Version != coordinatorWriteProgressVersion {
+		// A legacy remote cursor has no transcript identity. The local marker is
+		// still safe to use, but the integer alone must not skip messages.
+		return localCursor, false
+	}
+	remoteCursor, valid := resolveWriteProgressAnchor(msgs, progress.AnchorMessageID)
+	if !valid {
+		// The transcript was rebased (for example, by summarization). Reprocess
+		// the current snapshot rather than silently skipping new content.
+		return 0, false
+	}
+	if remoteCursor > localCursor {
+		return remoteCursor, true
+	}
+	return localCursor, false
+}
+
+func (m *middleware[M]) commitWriteProgress(
+	ctx context.Context,
+	state *adk.TypedChatModelAgentState[M],
+	coordKey string,
+	cursor int,
+) {
+	state = markWriteCursor(state, cursor)
+	if state == nil || coordKey == "" || m.coordination == nil || m.coordination.Coordinator == nil {
+		return
+	}
+	anchorMessageID, cursor, ok := ensureWriteProgressAnchor(state.Messages, cursor)
+	if !ok {
+		return
+	}
+	_ = setCoordinatorWriteProgress(ctx, m.coordination.Coordinator, coordKey, anchorMessageID, cursor)
 }
 
 func countModelVisibleMessages[M adk.MessageType](msgs []M) int {
@@ -796,13 +887,13 @@ func countModelVisibleMessages[M adk.MessageType](msgs []M) int {
 }
 
 func buildPendingSnapshot[M adk.MessageType](messages []M, cursor int, toolInfos []*schema.ToolInfo) (*PendingSnapshot, error) {
-	raw, err := json.Marshal(messages)
+	raw, err := sonic.Marshal(messages)
 	if err != nil {
 		return nil, err
 	}
-	var rawToolInfos json.RawMessage
+	var rawToolInfos []byte
 	if toolInfos != nil {
-		rawToolInfos, err = json.Marshal(toolInfos)
+		rawToolInfos, err = sonic.Marshal(toolInfos)
 		if err != nil {
 			return nil, err
 		}
@@ -815,12 +906,12 @@ func decodePendingSnapshot[M adk.MessageType](snapshot *PendingSnapshot) ([]M, i
 		return nil, 0, nil, nil
 	}
 	var msgs []M
-	if err := json.Unmarshal(snapshot.Messages, &msgs); err != nil {
+	if err := sonic.Unmarshal(snapshot.Messages, &msgs); err != nil {
 		return nil, 0, nil, err
 	}
 	var toolInfos []*schema.ToolInfo
 	if len(snapshot.ToolInfos) > 0 {
-		if err := json.Unmarshal(snapshot.ToolInfos, &toolInfos); err != nil {
+		if err := sonic.Unmarshal(snapshot.ToolInfos, &toolInfos); err != nil {
 			return nil, 0, nil, err
 		}
 	}

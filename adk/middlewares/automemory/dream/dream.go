@@ -137,52 +137,50 @@ func (m *middleware[M]) AfterAgent(ctx context.Context, state *adk.TypedChatMode
 }
 
 func (m *middleware[M]) maybeTrigger(ctx context.Context, currentSessionID string, excludeCurrent bool) error {
-	st, err := m.cfg.Schedule.Store.GetScheduleState(ctx, m.resolvedMemoryDir)
-	if err != nil {
+	_, _, ready, err := m.checkSchedule(ctx, currentSessionID, excludeCurrent)
+	if err != nil || !ready {
 		return err
 	}
-	if st == nil {
-		st = &ScheduleState{}
-	}
-	now := m.now()
-	if st.NextCheckAt.After(now) {
-		return nil
-	}
-	since := st.LastConsolidatedAt
-	if !since.IsZero() && now.Sub(since) < m.cfg.Schedule.MinInterval {
-		st.NextCheckAt = st.LastConsolidatedAt.Add(m.cfg.Schedule.MinInterval)
-		return m.cfg.Schedule.Store.SetScheduleState(ctx, m.resolvedMemoryDir, st)
-	}
-	touchedSessions, err := m.cfg.Schedule.Store.ListSessionsTouchedSince(ctx, m.resolvedMemoryDir, since)
-	if err != nil {
-		return err
-	}
-	filtered := touchedSessions[:0]
-	for _, sessionID := range touchedSessions {
-		if excludeCurrent && currentSessionID != "" && sessionID == currentSessionID {
-			continue
-		}
-		filtered = append(filtered, sessionID)
-	}
-	if len(filtered) < m.cfg.Schedule.MinTouchedSession {
-		st.NextCheckAt = now.Add(m.cfg.Schedule.ScanInterval)
-		return m.cfg.Schedule.Store.SetScheduleState(ctx, m.resolvedMemoryDir, st)
-	}
+
 	unlock, ok, err := m.cfg.Schedule.Store.AcquireRunLock(ctx, m.resolvedMemoryDir, m.cfg.Schedule.LockTTL)
 	if err != nil || !ok {
 		return err
 	}
+	releaseLock := func(releaseCtx context.Context) {
+		if releaseErr := unlock(releaseCtx); releaseErr != nil {
+			m.onErr(releaseCtx, stageRunDream, releaseErr)
+		}
+	}
+
+	st, selectedTouches, ready, err := m.checkSchedule(ctx, currentSessionID, excludeCurrent)
+	if err != nil || !ready {
+		releaseLock(ctx)
+		return err
+	}
+	selectedSessions := sessionIDsFromTouches(selectedTouches)
+
 	runFn := func() {
-		defer func() { _ = unlock(context.Background()) }()
-		if err := m.runDream(context.Background(), currentSessionID, filtered); err != nil {
-			m.onErr(context.Background(), stageRunDream, err)
+		backgroundCtx := context.Background()
+		defer releaseLock(backgroundCtx)
+		if err := m.runDream(backgroundCtx, currentSessionID, selectedSessions); err != nil {
+			m.onErr(backgroundCtx, stageRunDream, err)
 			st.NextCheckAt = m.now().Add(m.cfg.Schedule.ScanInterval)
-			_ = m.cfg.Schedule.Store.SetScheduleState(context.Background(), m.resolvedMemoryDir, st)
+			_ = m.cfg.Schedule.Store.SetScheduleState(backgroundCtx, m.resolvedMemoryDir, st)
 			return
 		}
-		st.LastConsolidatedAt = m.now()
-		st.NextCheckAt = st.LastConsolidatedAt.Add(m.cfg.Schedule.MinInterval)
-		_ = m.cfg.Schedule.Store.SetScheduleState(context.Background(), m.resolvedMemoryDir, st)
+
+		completedAt := m.now()
+		if err := m.cfg.Schedule.Store.AcknowledgeSessionTouches(
+			backgroundCtx,
+			m.resolvedMemoryDir,
+			selectedTouches,
+		); err != nil {
+			m.onErr(backgroundCtx, stageRecordTouch, err)
+		}
+
+		st.LastConsolidatedAt = completedAt
+		st.NextCheckAt = completedAt.Add(m.cfg.Schedule.MinInterval)
+		_ = m.cfg.Schedule.Store.SetScheduleState(backgroundCtx, m.resolvedMemoryDir, st)
 	}
 	if m.cfg.Schedule.RunInline {
 		runFn()
@@ -190,6 +188,55 @@ func (m *middleware[M]) maybeTrigger(ctx context.Context, currentSessionID strin
 	}
 	go runFn()
 	return nil
+}
+
+func (m *middleware[M]) checkSchedule(
+	ctx context.Context,
+	currentSessionID string,
+	excludeCurrent bool,
+) (*ScheduleState, []SessionTouch, bool, error) {
+	st, err := m.cfg.Schedule.Store.GetScheduleState(ctx, m.resolvedMemoryDir)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if st == nil {
+		st = &ScheduleState{}
+	}
+	now := m.now()
+	if st.NextCheckAt.After(now) {
+		return st, nil, false, nil
+	}
+	if !st.LastConsolidatedAt.IsZero() && now.Sub(st.LastConsolidatedAt) < m.cfg.Schedule.MinInterval {
+		st.NextCheckAt = st.LastConsolidatedAt.Add(m.cfg.Schedule.MinInterval)
+		err = m.cfg.Schedule.Store.SetScheduleState(ctx, m.resolvedMemoryDir, st)
+		return st, nil, false, err
+	}
+
+	touches, err := m.cfg.Schedule.Store.ListSessionTouches(ctx, m.resolvedMemoryDir)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	filtered := make([]SessionTouch, 0, len(touches))
+	for _, touch := range touches {
+		if excludeCurrent && currentSessionID != "" && touch.SessionID == currentSessionID {
+			continue
+		}
+		filtered = append(filtered, touch)
+	}
+	if len(filtered) < m.cfg.Schedule.MinTouchedSession {
+		st.NextCheckAt = now.Add(m.cfg.Schedule.ScanInterval)
+		err = m.cfg.Schedule.Store.SetScheduleState(ctx, m.resolvedMemoryDir, st)
+		return st, filtered, false, err
+	}
+	return st, filtered, true, nil
+}
+
+func sessionIDsFromTouches(touches []SessionTouch) []string {
+	sessionIDs := make([]string, 0, len(touches))
+	for _, touch := range touches {
+		sessionIDs = append(sessionIDs, touch.SessionID)
+	}
+	return sessionIDs
 }
 
 func (m *middleware[M]) runDream(ctx context.Context, sessionID string, touchedSessions []string) error {
