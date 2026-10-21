@@ -36,11 +36,13 @@ type replayCase struct {
 	name                                                                       string
 	interruptions                                                              int
 	viaTransform, lateSibling, nested, bothInterrupt, skippedBranch, beforeEnd bool
+	streamBranch                                                               bool
 }
 
 func TestWorkflowStreamCheckpointBranches(t *testing.T) {
 	for _, tc := range []replayCase{
 		{name: "original_input", interruptions: 1},
+		{name: "stream_branch", interruptions: 2, streamBranch: true},
 		{name: "interrupt_before_end", interruptions: 1, beforeEnd: true},
 		{name: "repeat_interrupt", interruptions: 2},
 		{name: "transform_chain", interruptions: 1, viaTransform: true},
@@ -61,7 +63,7 @@ func runReplayCase(t *testing.T, tc replayCase) {
 	if processDir != "" {
 		store = streamReplayFileStore{processDir}
 	}
-	var a, b, end, chosen, skipped streamCallCount
+	var a, b, end, chosen, skipped, siblingBranch streamCallCount
 	if processDir != "" {
 		t.Cleanup(func() {
 			data, err := json.Marshal(map[string]int32{"A": a.Load(), "B": b.Load(), "End": end.Load()})
@@ -181,8 +183,20 @@ func runReplayCase(t *testing.T, tc replayCase) {
 				}
 			}
 		}))
-		c.AddInput(source, compose.ToField("a"))
-		c.AddInput("B", compose.ToField("b"))
+		if tc.streamBranch {
+			// The branch consumes A before the consumer can be scheduled.
+			once.Do(func() { close(observed) })
+			c.AddInputWithOptions(source, []*compose.FieldMapping{compose.ToField("a")}, compose.WithNoDirectDependency())
+			wf.AddBranch(source, compose.NewGraphBranch(func(_ context.Context, _ string) (string, error) { return "End", nil }, map[string]bool{"End": true}))
+		} else {
+			c.AddInput(source, compose.ToField("a"))
+		}
+		if tc.streamBranch {
+			c.AddInputWithOptions("B", []*compose.FieldMapping{compose.ToField("b")}, compose.WithNoDirectDependency())
+			wf.AddBranch("B", compose.NewGraphBranch(func(_ context.Context, _ string) (string, error) { siblingBranch.Add(1); return "End", nil }, map[string]bool{"End": true}))
+		} else {
+			c.AddInput("B", compose.ToField("b"))
+		}
 		if tc.skippedBranch {
 			wf.AddLambdaNode("Selector", compose.InvokableLambda(func(_ context.Context, s string) (string, error) { return s, nil })).AddInput(compose.START)
 			wf.AddLambdaNode("Chosen", compose.InvokableLambda(func(_ context.Context, s string) (string, error) { chosen.Add(1); return s, nil })).AddInputWithOptions(compose.START, nil, compose.WithNoDirectDependency())
@@ -267,6 +281,12 @@ func runReplayCase(t *testing.T, tc replayCase) {
 			wantB = 2
 		}
 		wantA, wantEnd := int32(tc.interruptions+1), int32(tc.interruptions+1)
+		if tc.streamBranch {
+			if siblingBranch.Load() != 1 {
+				t.Fatalf("completed sibling branch ran %d times", siblingBranch.Load())
+			}
+			wantEnd = 1
+		}
 		if tc.beforeEnd {
 			wantA, wantB, wantEnd = 1, 2, 1
 		}

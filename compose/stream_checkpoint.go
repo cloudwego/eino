@@ -267,3 +267,31 @@ func (r *runner) collectStreamInterrupts(ctx context.Context, ti *interruptTempI
 	}
 	return nil
 }
+
+func isStreamRoutingInterrupt(err error) bool {
+	_, rerun := IsInterruptRerunError(err)
+	return rerun || isSubGraphInterrupt(err) != nil
+}
+
+type streamCheckpointTarget struct {
+	id         *string
+	isSubGraph bool
+	publish    func(*subGraphInterruptError)
+}
+
+// Branch collection can be the first reader to observe a deferred interrupt.
+// Settle concurrent tasks before materializing the same checkpoint as a node error.
+func (r *runner) handleStreamRoutingInterrupt(ctx context.Context, completed, pending []*task, tm *taskManager,
+	cm *channelManager, target streamCheckpointTarget) error {
+	remaining, canceled := tm.waitAll()
+	all := append(append(append(completed, remaining...), canceled...), pending...)
+	cm.streamReplay.retainTaskInputs(pending)
+	info := newInterruptTempInfo()
+	for _, t := range append(canceled, pending...) {
+		info.interruptRerunNodes = appendIfNotExist(info.interruptRerunNodes, t.nodeKey)
+	}
+	if err := r.resolveInterruptCompletedTasks(info, all); err != nil {
+		return err
+	}
+	return r.handleInterruptWithSubGraphAndRerunNodes(ctx, info, all, target.id, target.isSubGraph, cm, true, target.publish)
+}

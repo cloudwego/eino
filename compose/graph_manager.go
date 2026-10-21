@@ -269,6 +269,7 @@ type task struct {
 	syntheticRerunInput     bool
 	subGraphCheckpointReady <-chan *subGraphInterruptError
 	finished                chan struct{}
+	routing                 *completedTaskRouting
 }
 
 type taskManager struct {
