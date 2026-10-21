@@ -153,6 +153,13 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	// Extract subgraph
 	path, isSubGraph := getNodePath(ctx)
 
+	if r.dag && isStream && r.checkPointer != nil &&
+		(writeToCheckPointID != nil || ctx.Value(streamReplayContextKey{}) == true) {
+		ctx = context.WithValue(ctx, streamReplayContextKey{}, true)
+		cm.streamReplay = newStreamCheckpointReplay(cm)
+		defer cm.streamReplay.release()
+	}
+
 	// load checkpoint from ctx/store or init graph
 	initialized := false
 	var nextTasks []*task
@@ -223,7 +230,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(fmt.Errorf("calculate next tasks fail: %w", err))
 		}
 		if isEnd {
-			return result, nil
+			return r.wrapStreamCheckpointOutput(ctx, result, cm, writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher), nil
 		}
 		if len(nextTasks) == 0 {
 			return nil, newGraphRunError(fmt.Errorf("no tasks to execute after graph start"))
@@ -264,6 +271,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// 2. get completed tasks
 		// 3. calculate next tasks
 
+		cm.streamReplay.retainTaskInputs(nextTasks)
 		err = tm.submit(nextTasks)
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("failed to submit tasks: %w", err))
@@ -319,10 +327,13 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		var isEnd bool
 		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
 		if err != nil {
+			if cm.streamReplay != nil && isStreamRoutingInterrupt(err) {
+				return nil, r.handleStreamRoutingInterrupt(ctx, completedTasks, nil, tm, cm, streamCheckpointTarget{writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher})
+			}
 			return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 		}
 		if isEnd {
-			return result, nil
+			return r.wrapStreamCheckpointOutput(ctx, result, cm, writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher), nil
 		}
 
 		tempInfo.interruptBeforeNodes = getHitKey(nextTasks, r.interruptBeforeNodes)
@@ -356,11 +367,14 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			var newNextTasks []*task
 			newNextTasks, result, isEnd, err = r.calculateNextTasks(ctx, newCompletedTasks, isStream, cm, optMap)
 			if err != nil {
+				if cm.streamReplay != nil && isStreamRoutingInterrupt(err) {
+					return nil, r.handleStreamRoutingInterrupt(ctx, newCompletedTasks, nextTasks, tm, cm, streamCheckpointTarget{writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher})
+				}
 				return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 			}
 
 			if isEnd {
-				return result, nil
+				return r.wrapStreamCheckpointOutput(ctx, result, cm, writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher), nil
 			}
 
 			tempInfo.interruptBeforeNodes = append(tempInfo.interruptBeforeNodes, getHitKey(newNextTasks, r.interruptBeforeNodes)...)
@@ -493,7 +507,9 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 	for _, completedTask := range completedTasks {
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
-				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
+				origin := r.interruptOriginNodeKey(completedTask, info.signal.Address)
+				tempInfo.subGraphInterrupts[origin] = info
+				tempInfo.interruptTaskNodes[completedTask.nodeKey] = struct{}{}
 				tempInfo.appendSignal(info.signal)
 				continue
 			}
@@ -669,15 +685,24 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	isStream bool,
 	publishSubGraphCheckpoint func(*subGraphInterruptError),
 ) error {
-	var rerunTasks, subgraphTasks, otherTasks []*task
+	if cm.streamReplay != nil {
+		if err := r.collectStreamTaskOutputs(tempInfo, completeTasks); err != nil {
+			return err
+		}
+		if err := r.collectStreamInterrupts(ctx, tempInfo, cm); err != nil {
+			return err
+		}
+	}
+	var rerunTasks, otherTasks []*task
 	skipPreHandler := map[string]bool{}
 	for _, t := range completeTasks {
 		if _, ok := tempInfo.subGraphInterrupts[t.nodeKey]; ok {
-			subgraphTasks = append(subgraphTasks, t)
+			t.closeRouting()
 			skipPreHandler[t.nodeKey] = true // subgraph won't run pre-handler again, but rerun nodes will
 			continue
 		}
 		if _, ok := tempInfo.interruptTaskNodes[t.nodeKey]; ok {
+			t.closeRouting()
 			for _, key := range tempInfo.interruptRerunNodes {
 				if key == t.nodeKey {
 					rerunTasks = append(rerunTasks, t)
@@ -689,6 +714,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		rerun := false
 		for _, key := range tempInfo.interruptRerunNodes {
 			if key == t.nodeKey {
+				t.closeRouting()
 				rerunTasks = append(rerunTasks, t)
 				rerun = true
 				break
@@ -702,6 +728,12 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	// forward completed tasks
 	toValue, controls, err := r.resolveCompletedTasks(ctx, otherTasks, isStream, cm)
 	if err != nil {
+		if cm.streamReplay != nil && isStreamRoutingInterrupt(err) {
+			if resolveErr := r.resolveInterruptCompletedTasks(tempInfo, completeTasks); resolveErr != nil {
+				return resolveErr
+			}
+			return r.handleInterruptWithSubGraphAndRerunNodes(ctx, tempInfo, completeTasks, checkPointID, isSubGraph, cm, isStream, publishSubGraphCheckpoint)
+		}
 		return fmt.Errorf("failed to resolve completed tasks in interrupt: %w", err)
 	}
 	err = cm.updateValues(ctx, toValue)
@@ -750,16 +782,20 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
 
-	for _, t := range subgraphTasks {
-		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
-		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
-		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
+	for nodeKey, nested := range tempInfo.subGraphInterrupts {
+		cp.RerunNodes = append(cp.RerunNodes, nodeKey)
+		cp.SkipPreHandler[nodeKey] = true
+		cp.SubGraphs[nodeKey] = nested.CheckPoint
+		intInfo.SubGraphs[nodeKey] = nested.Info
 	}
 	cp.RerunNodes = append(cp.RerunNodes, tempInfo.interruptRerunNodes...)
 	for _, t := range rerunTasks {
 		if t.originalInput != nil {
 			cp.Inputs[t.nodeKey] = t.originalInput
 		}
+	}
+	if cm.streamReplay != nil {
+		cm.streamReplay.restoreConsumedInputs(cp)
 	}
 	if err = r.validateCheckpointIntegrity(cp); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
@@ -946,40 +982,72 @@ func isSubGraphCall(call *chanCall) bool {
 	return cmp == ComponentOfGraph || cmp == ComponentOfChain || cmp == ComponentOfWorkflow
 }
 
+type completedTaskRouting struct {
+	values   map[string]any
+	controls []string
+}
+
+func (t *task) closeRouting() {
+	if t.routing == nil {
+		return
+	}
+	for _, value := range t.routing.values {
+		if reader, ok := value.(streamReader); ok {
+			reader.close()
+		}
+	}
+	t.routing = nil
+}
+
 func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager) (map[string]map[string]any, map[string][]string, error) {
 	writeChannelValues := make(map[string]map[string]any)
 	newDependencies := make(map[string][]string)
 	for _, t := range completedTasks {
-		for _, key := range t.call.controls {
-			newDependencies[key] = append(newDependencies[key], t.nodeKey)
-		}
-
-		// update channel & new_next_tasks
-		vs := copyItem(t.output, len(t.call.writeTo)+len(t.call.writeToBranches)*2)
-		nextNodeKeys, err := r.calculateBranch(ctx, t.nodeKey, t.call,
-			vs[len(t.call.writeTo)+len(t.call.writeToBranches):], isStream, cm)
-		if err != nil {
-			return nil, nil, fmt.Errorf("calculate next step fail, node: %s, error: %w", t.nodeKey, err)
-		}
-
-		for _, key := range nextNodeKeys {
-			newDependencies[key] = append(newDependencies[key], t.nodeKey)
-		}
-		nextNodeKeys = append(nextNodeKeys, t.call.writeTo...)
-
-		// If branches generates more than one successor, the inputs need to be copied accordingly.
-		if len(nextNodeKeys) > 0 {
-			toCopyNum := len(nextNodeKeys) - len(t.call.writeTo) - len(t.call.writeToBranches)
-			nVs := copyItem(vs[len(t.call.writeTo)+len(t.call.writeToBranches)-1], toCopyNum+1)
-			vs = append(vs[:len(t.call.writeTo)+len(t.call.writeToBranches)-1], nVs...)
-
-			for i, next := range nextNodeKeys {
-				if _, ok := writeChannelValues[next]; !ok {
-					writeChannelValues[next] = make(map[string]any)
+		if t.routing == nil {
+			vs := copyItem(t.output, len(t.call.writeTo)+len(t.call.writeToBranches)*2)
+			next, err := r.calculateBranch(ctx, t.nodeKey, t.call,
+				vs[len(t.call.writeTo)+len(t.call.writeToBranches):], isStream, cm)
+			if err != nil {
+				for _, value := range vs {
+					if reader, ok := value.(streamReader); ok {
+						reader.close()
+					}
 				}
-				writeChannelValues[next][t.nodeKey] = vs[i]
+				if cm.streamReplay != nil && isStreamRoutingInterrupt(err) {
+					t.err = err
+				} else {
+					for _, completed := range completedTasks {
+						completed.closeRouting()
+					}
+				}
+				return nil, nil, fmt.Errorf("calculate next step fail, node: %s, error: %w", t.nodeKey, err)
 			}
+			routing := &completedTaskRouting{values: map[string]any{}, controls: append(append([]string(nil), t.call.controls...), next...)}
+			next = append(next, t.call.writeTo...)
+			if len(next) > 0 {
+				toCopyNum := len(next) - len(t.call.writeTo) - len(t.call.writeToBranches)
+				nVs := copyItem(vs[len(t.call.writeTo)+len(t.call.writeToBranches)-1], toCopyNum+1)
+				vs = append(vs[:len(t.call.writeTo)+len(t.call.writeToBranches)-1], nVs...)
+				for i, key := range next {
+					routing.values[key] = vs[i]
+				}
+			}
+			t.routing = routing
 		}
+		for _, key := range t.routing.controls {
+			newDependencies[key] = append(newDependencies[key], t.nodeKey)
+		}
+		for next, value := range t.routing.values {
+			if writeChannelValues[next] == nil {
+				writeChannelValues[next] = make(map[string]any)
+			}
+			writeChannelValues[next][t.nodeKey] = value
+		}
+	}
+	// On a late interrupt retain already evaluated branches for the checkpoint
+	// pass. Their callbacks and consumed streams must not be evaluated twice.
+	for _, t := range completedTasks {
+		t.routing = nil
 	}
 	return writeChannelValues, newDependencies, nil
 }

@@ -72,6 +72,11 @@ func WithSerializer(serializer Serializer) GraphCompileOption {
 }
 
 // WithCheckPointID sets the checkpoint ID to load from and write to by default.
+// Streaming DAG executions retain consumed inputs until completion so late
+// interrupts can restore downstream dependencies without rerunning completed
+// producers. This increases memory retention with the amount of streamed data.
+// Always close the returned reader, including after interruption or cancellation.
+// Resumed consumers may replay output; callers must treat it as a new attempt.
 func WithCheckPointID(checkPointID string) Option {
 	return Option{
 		checkPointID: &checkPointID,
