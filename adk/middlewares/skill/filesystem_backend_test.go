@@ -18,6 +18,7 @@ package skill
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -191,15 +192,78 @@ Content 2`,
 		assert.Contains(t, names, "skill-2")
 	})
 
-	t.Run("invalid SKILL.md returns error", func(t *testing.T) {
+	t.Run("invalid SKILL.md is skipped with a warning", func(t *testing.T) {
 		fsBackend := filesystem.NewInMemoryBackend()
 		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
 			FilePath: "/skills/invalid-skill/SKILL.md",
 			Content:  `No frontmatter here`,
 		})
 
+		var warningPath string
+		var warningErr error
 		backend, err := NewBackendFromFilesystem(ctx, &BackendFromFilesystemConfig{
 			Backend: fsBackend,
+			BaseDir: "/skills",
+			OnLoadWarning: func(filePath string, err error) {
+				warningPath = filePath
+				warningErr = err
+			},
+		})
+		require.NoError(t, err)
+
+		skills, err := backend.List(ctx)
+		assert.NoError(t, err)
+		assert.Empty(t, skills)
+		assert.Equal(t, "/skills/invalid-skill/SKILL.md", warningPath)
+		assert.Error(t, warningErr)
+		assert.Contains(t, warningErr.Error(), "failed to parse frontmatter")
+	})
+
+	t.Run("invalid skill does not prevent valid skills from loading", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/valid-skill/SKILL.md",
+			Content: `---
+name: valid-skill
+description: Valid skill
+---
+Content`,
+		})
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/invalid-skill/SKILL.md",
+			Content:  `No frontmatter here`,
+		})
+
+		var warnings []string
+		backend, err := NewBackendFromFilesystem(ctx, &BackendFromFilesystemConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+			OnLoadWarning: func(filePath string, _ error) {
+				warnings = append(warnings, filePath)
+			},
+		})
+		require.NoError(t, err)
+
+		skills, err := backend.List(ctx)
+		require.NoError(t, err)
+		require.Len(t, skills, 1)
+		assert.Equal(t, "valid-skill", skills[0].Name)
+		assert.Equal(t, []string{"/skills/invalid-skill/SKILL.md"}, warnings)
+	})
+
+	t.Run("filesystem read errors are not skipped", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/read-error/SKILL.md",
+			Content: `---
+name: read-error
+description: Read error
+---
+Content`,
+		})
+
+		backend, err := NewBackendFromFilesystem(ctx, &BackendFromFilesystemConfig{
+			Backend: &readErrorBackend{Backend: fsBackend},
 			BaseDir: "/skills",
 		})
 		require.NoError(t, err)
@@ -207,7 +271,7 @@ Content 2`,
 		skills, err := backend.List(ctx)
 		assert.Error(t, err)
 		assert.Nil(t, skills)
-		assert.Contains(t, err.Error(), "failed to load skill")
+		assert.Contains(t, err.Error(), "failed to read file")
 	})
 
 	t.Run("non-existent baseDir returns empty list", func(t *testing.T) {
@@ -327,6 +391,42 @@ Content for ` + name,
 		assert.Equal(t, "Skill beta", skill.Description)
 		assert.Equal(t, "Content for beta", skill.Content)
 	})
+
+	t.Run("valid skill can be retrieved when another skill is malformed", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/valid/SKILL.md",
+			Content: `---
+name: valid
+description: Valid skill
+---
+Valid content`,
+		})
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/invalid/SKILL.md",
+			Content:  `No frontmatter here`,
+		})
+
+		backend, err := NewBackendFromFilesystem(ctx, &BackendFromFilesystemConfig{
+			Backend:       fsBackend,
+			BaseDir:       "/skills",
+			OnLoadWarning: func(_ string, _ error) {},
+		})
+		require.NoError(t, err)
+
+		skill, err := backend.Get(ctx, "valid")
+		require.NoError(t, err)
+		assert.Equal(t, "valid", skill.Name)
+		assert.Equal(t, "Valid content", skill.Content)
+	})
+}
+
+type readErrorBackend struct {
+	filesystem.Backend
+}
+
+func (b *readErrorBackend) Read(context.Context, *filesystem.ReadRequest) (*filesystem.FileContent, error) {
+	return nil, errors.New("read failed")
 }
 
 func TestParseFrontmatter(t *testing.T) {
