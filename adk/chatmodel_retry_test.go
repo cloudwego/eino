@@ -3256,3 +3256,168 @@ func TestWillRetryError_RejectReason(t *testing.T) {
 		assert.Equal(t, 2, wrErr.RetryAttempt)
 	})
 }
+
+func TestRetryChatModel_IsLastAttempt(t *testing.T) {
+	// IsLastAttempt must be false on every attempt that still produces another
+	// model call, and true exactly once: on the attempt whose decision the loop
+	// discards. Asserted inside the callback (assert, not require: it runs on the
+	// agent goroutine) and cross-checked by the call counts.
+
+	t.Run("Generate", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, errRetryAble).Times(3)
+
+		var calls, lastCalls int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "IsLastAttemptGenerateAgent",
+			Description: "Generate always fails, so every retry slot is used",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+					atomic.AddInt32(&calls, 1)
+					if retryCtx.IsLastAttempt {
+						atomic.AddInt32(&lastCalls, 1)
+					}
+					assert.Equal(t, retryCtx.RetryAttempt == 3, retryCtx.IsLastAttempt,
+						"unexpected IsLastAttempt at RetryAttempt=%d", retryCtx.RetryAttempt)
+					return &RetryDecision{Retry: true}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		require.NoError(t, err)
+
+		drainAgentEvents(t, agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("Hello")}}))
+
+		assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&lastCalls))
+	})
+
+	t.Run("StreamReturnsError", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, errRetryAble).Times(3)
+
+		var calls, lastCalls int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "IsLastAttemptStreamErrorAgent",
+			Description: "Stream() itself fails on every attempt",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+					atomic.AddInt32(&calls, 1)
+					if retryCtx.IsLastAttempt {
+						atomic.AddInt32(&lastCalls, 1)
+					}
+					assert.Equal(t, retryCtx.RetryAttempt == 3, retryCtx.IsLastAttempt,
+						"unexpected IsLastAttempt at RetryAttempt=%d", retryCtx.RetryAttempt)
+					return &RetryDecision{Retry: true}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		require.NoError(t, err)
+
+		drainStreamingAgentEvents(t, agent.Run(ctx, &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}))
+
+		assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&lastCalls))
+	})
+
+	t.Run("StreamRejected", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (
+				*schema.StreamReader[*schema.Message], error) {
+				r, w := schema.Pipe[*schema.Message](1)
+				go func() {
+					_ = w.Send(schema.AssistantMessage("rejected", nil), nil)
+					w.Close()
+				}()
+				return r, nil
+			}).Times(3)
+
+		var calls, lastCalls int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "IsLastAttemptStreamRejectAgent",
+			Description: "Stream succeeds but ShouldRetry rejects the output every time",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+					atomic.AddInt32(&calls, 1)
+					if retryCtx.IsLastAttempt {
+						atomic.AddInt32(&lastCalls, 1)
+					}
+					assert.Equal(t, retryCtx.RetryAttempt == 3, retryCtx.IsLastAttempt,
+						"unexpected IsLastAttempt at RetryAttempt=%d", retryCtx.RetryAttempt)
+					return &RetryDecision{Retry: true}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		require.NoError(t, err)
+
+		drainStreamingAgentEvents(t, agent.Run(ctx, &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}))
+
+		assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
+		assert.Equal(t, int32(1), atomic.LoadInt32(&lastCalls))
+	})
+
+	t.Run("MaxRetriesZero", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, errRetryAble).Times(1)
+
+		var calls int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "IsLastAttemptMaxZeroAgent",
+			Description: "With MaxRetries=0 the only attempt is also the last one",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 0,
+				ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+					atomic.AddInt32(&calls, 1)
+					assert.True(t, retryCtx.IsLastAttempt,
+						"the only attempt must be reported as the last one")
+					return &RetryDecision{Retry: true}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		require.NoError(t, err)
+
+		drainAgentEvents(t, agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("Hello")}}))
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
+	})
+}
