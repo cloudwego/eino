@@ -153,6 +153,13 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	// Extract subgraph
 	path, isSubGraph := getNodePath(ctx)
 
+	if r.dag && isStream && r.checkPointer != nil &&
+		(writeToCheckPointID != nil || ctx.Value(streamReplayContextKey{}) == true) {
+		ctx = context.WithValue(ctx, streamReplayContextKey{}, true)
+		cm.streamReplay = newStreamCheckpointReplay(cm)
+		defer cm.streamReplay.release()
+	}
+
 	// load checkpoint from ctx/store or init graph
 	initialized := false
 	var nextTasks []*task
@@ -223,7 +230,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(fmt.Errorf("calculate next tasks fail: %w", err))
 		}
 		if isEnd {
-			return result, nil
+			return r.wrapStreamCheckpointOutput(ctx, result, cm, writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher), nil
 		}
 		if len(nextTasks) == 0 {
 			return nil, newGraphRunError(fmt.Errorf("no tasks to execute after graph start"))
@@ -264,6 +271,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// 2. get completed tasks
 		// 3. calculate next tasks
 
+		cm.streamReplay.retainTaskInputs(nextTasks)
 		err = tm.submit(nextTasks)
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("failed to submit tasks: %w", err))
@@ -322,7 +330,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 		}
 		if isEnd {
-			return result, nil
+			return r.wrapStreamCheckpointOutput(ctx, result, cm, writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher), nil
 		}
 
 		tempInfo.interruptBeforeNodes = getHitKey(nextTasks, r.interruptBeforeNodes)
@@ -360,7 +368,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			}
 
 			if isEnd {
-				return result, nil
+				return r.wrapStreamCheckpointOutput(ctx, result, cm, writeToCheckPointID, isSubGraph, subGraphCheckpointPublisher), nil
 			}
 
 			tempInfo.interruptBeforeNodes = append(tempInfo.interruptBeforeNodes, getHitKey(newNextTasks, r.interruptBeforeNodes)...)
@@ -493,7 +501,9 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 	for _, completedTask := range completedTasks {
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
-				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
+				origin := r.interruptOriginNodeKey(completedTask, info.signal.Address)
+				tempInfo.subGraphInterrupts[origin] = info
+				tempInfo.interruptTaskNodes[completedTask.nodeKey] = struct{}{}
 				tempInfo.appendSignal(info.signal)
 				continue
 			}
@@ -669,11 +679,15 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	isStream bool,
 	publishSubGraphCheckpoint func(*subGraphInterruptError),
 ) error {
-	var rerunTasks, subgraphTasks, otherTasks []*task
+	if cm.streamReplay != nil {
+		if err := r.collectStreamInterrupts(ctx, tempInfo, cm); err != nil {
+			return err
+		}
+	}
+	var rerunTasks, otherTasks []*task
 	skipPreHandler := map[string]bool{}
 	for _, t := range completeTasks {
 		if _, ok := tempInfo.subGraphInterrupts[t.nodeKey]; ok {
-			subgraphTasks = append(subgraphTasks, t)
 			skipPreHandler[t.nodeKey] = true // subgraph won't run pre-handler again, but rerun nodes will
 			continue
 		}
@@ -750,16 +764,20 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 
 	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
 
-	for _, t := range subgraphTasks {
-		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
-		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
-		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
+	for nodeKey, nested := range tempInfo.subGraphInterrupts {
+		cp.RerunNodes = append(cp.RerunNodes, nodeKey)
+		cp.SkipPreHandler[nodeKey] = true
+		cp.SubGraphs[nodeKey] = nested.CheckPoint
+		intInfo.SubGraphs[nodeKey] = nested.Info
 	}
 	cp.RerunNodes = append(cp.RerunNodes, tempInfo.interruptRerunNodes...)
 	for _, t := range rerunTasks {
 		if t.originalInput != nil {
 			cp.Inputs[t.nodeKey] = t.originalInput
 		}
+	}
+	if cm.streamReplay != nil {
+		cm.streamReplay.restoreConsumedInputs(cp)
 	}
 	if err = r.validateCheckpointIntegrity(cp); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
