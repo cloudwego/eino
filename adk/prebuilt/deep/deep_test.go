@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -639,6 +640,94 @@ func TestDeepAgentNewTypedWithManager(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)
+}
+
+func TestDeepTaskToolDescriptionGeneratorReturnsFinalText(t *testing.T) {
+	const customDescription = `Call task with {"prompt":"full request"}; preserve {background_prompt} and {tool_name}.`
+	ctx := context.Background()
+	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
+
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              cm,
+		SubAgents:              []adk.Agent{&spySubAgent{}},
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+		TaskToolDescriptionGenerator: func(context.Context, []adk.Agent) (string, error) {
+			return customDescription, nil
+		},
+	})
+
+	require.NoError(t, err)
+	assert.NotNil(t, agent)
+}
+
+func TestDeepTaskToolUsesRegisteredNameInModelContext(t *testing.T) {
+	ctx := context.Background()
+	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
+	var capturedTools []*schema.ToolInfo
+	var capturedMessages []*schema.Message
+
+	cm.EXPECT().WithTools(gomock.Any()).
+		DoAndReturn(func(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+			capturedTools = tools
+			return cm, nil
+		}).
+		AnyTimes()
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			capturedMessages = input
+			if len(capturedTools) == 0 {
+				capturedTools = model.GetCommonOptions(nil, opts...).Tools
+			}
+			return schema.AssistantMessage("done", nil), nil
+		}).
+		Times(1)
+
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		Instruction:            "base instruction",
+		ChatModel:              cm,
+		SubAgents:              []adk.Agent{&spySubAgent{}},
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+	})
+	require.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+	iter := runner.Query(ctx, "delegate this")
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	var taskInfo *schema.ToolInfo
+	for _, info := range capturedTools {
+		if info.Name == taskToolName {
+			taskInfo = info
+			break
+		}
+	}
+	require.NotNil(t, taskInfo)
+	assert.Contains(t, taskInfo.Desc, "When using the task tool")
+	assert.NotContains(t, taskInfo.Desc, "When using the Agent tool")
+
+	var modelText strings.Builder
+	for _, message := range capturedMessages {
+		if message.Role == schema.System {
+			modelText.WriteString(message.Content)
+			modelText.WriteByte('\n')
+		}
+	}
+	assert.Contains(t, modelText.String(), "You can use the 'task' tool")
+	assert.Contains(t, modelText.String(), "Available agent types for the task tool:")
+	assert.NotContains(t, modelText.String(), "You can use the 'agent' tool")
+	assert.NotContains(t, modelText.String(), "Available agent types for the Agent tool:")
 }
 
 func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
