@@ -121,6 +121,7 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	// remains byte-identical.
 	var beforeID string
 	if !isNilMessage(anchorMsg) {
+		adk.EnsureMessageID(anchorMsg)
 		beforeID = adk.GetMessageID(anchorMsg)
 	}
 	_ = adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
