@@ -173,7 +173,7 @@ type TypedConfig[M adk.MessageType] struct {
 	CustomFormatReminder func(ctx context.Context, in *FormatReminderInput) (*FormatReminderOutput, error)
 
 	// CustomToolParams customizes tool parameters for the skill tool.
-	// defaults is the default schema with only the required "skill" field.
+	// defaults contains the required "skill" field and the optional string "args" field.
 	// optional
 	CustomToolParams func(ctx context.Context, defaults map[string]*schema.ParameterInfo) (map[string]*schema.ParameterInfo, error)
 
@@ -584,13 +584,16 @@ func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) 
 	}, nil
 }
 
-type inputArguments struct {
+type routingArguments struct {
 	Skill string `json:"skill"`
-	Args  string `json:"args"`
+}
+
+type defaultContentArguments struct {
+	Args json.RawMessage `json:"args"`
 }
 
 func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	args := &inputArguments{}
+	args := &routingArguments{}
 	err := json.Unmarshal([]byte(argumentsInJSON), args)
 	if err != nil {
 		return "", fmt.Errorf("failed to unmarshal arguments: %w", err)
@@ -666,15 +669,31 @@ func (s *typedSkillTool[M]) buildParamsOneOf(ctx context.Context) (*schema.Param
 
 func (s *typedSkillTool[M]) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
 	if s.buildContent == nil {
-		args := &inputArguments{}
-		_ = json.Unmarshal([]byte(rawArguments), args)
-		return s.defaultSkillContent(skill, args.Args), nil
+		args := &defaultContentArguments{}
+		if err := json.Unmarshal([]byte(rawArguments), args); err != nil {
+			return "", fmt.Errorf("failed to unmarshal arguments: %w", err)
+		}
+		return s.defaultSkillContent(skill, formatSkillArguments(args.Args)), nil
 	}
 	content, err := s.buildContent(ctx, skill, rawArguments)
 	if err != nil {
 		return "", fmt.Errorf("failed to build skill result: %w", err)
 	}
 	return content, nil
+}
+
+func formatSkillArguments(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 func (s *typedSkillTool[M]) defaultSkillContent(skill Skill, args string) string {
