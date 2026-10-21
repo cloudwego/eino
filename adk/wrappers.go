@@ -2055,7 +2055,6 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
-	syncModelContextSessionEvent(ctx, state)
 
 	// Derive model options from state. Append after caller opts so state takes precedence
 	// (model.GetCommonOptions applies left-to-right, last wins).
@@ -2189,7 +2188,6 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
-	syncModelContextSessionEvent(ctx, state)
 
 	// Derive model options from state. Append after caller opts so state takes precedence
 	// (model.GetCommonOptions applies left-to-right, last wins).
