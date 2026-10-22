@@ -130,7 +130,7 @@ func (cfg *loaderConfig) load(ctx context.Context) (string, error) {
 		if l.stopped {
 			// The budget was exhausted by an earlier file; the rest never load.
 			for _, p := range l.files[i:] {
-				omitted = append(omitted, filepath.Clean(p))
+				omitted = append(omitted, filepath.ToSlash(filepath.Clean(p)))
 			}
 			break
 		}
@@ -144,7 +144,7 @@ func (cfg *loaderConfig) load(ctx context.Context) (string, error) {
 
 		// This file crossed the budget and was dropped whole (truncated files stay in parts).
 		if l.stopped && len(parts) == before {
-			omitted = append(omitted, filepath.Clean(filePath))
+			omitted = append(omitted, filepath.ToSlash(filepath.Clean(filePath)))
 		}
 	}
 
@@ -157,7 +157,7 @@ func (cfg *loaderConfig) load(ctx context.Context) (string, error) {
 // visited tracks the current ancestor chain to detect circular imports.
 // seen tracks globally loaded files to avoid duplicate reads and byte counting.
 func (l *loader) loadFile(ctx context.Context, filePath string, depth int, visited map[string]bool, seen map[string]bool) ([]loadedFile, error) {
-	filePath = filepath.Clean(filePath)
+	filePath = filepath.ToSlash(filepath.Clean(filePath))
 
 	if depth > maxImportDepth {
 		l.onWarning(filePath, fmt.Errorf("@import depth exceeds maximum of %d", maxImportDepth))
@@ -287,7 +287,7 @@ func (l *loader) collectImports(ctx context.Context, hostPath, content string, d
 		}
 
 		importPath := rawPath
-		if !filepath.IsAbs(importPath) {
+		if !filepath.IsAbs(importPath) && !strings.HasPrefix(importPath, "/") {
 			importPath = filepath.Join(dir, importPath)
 		}
 

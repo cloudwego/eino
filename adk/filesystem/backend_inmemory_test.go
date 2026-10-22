@@ -2641,3 +2641,20 @@ func BenchmarkInMemoryBackend_OpenAppend(b *testing.B) {
 		}
 	}
 }
+
+func TestInMemoryBackendSlashPaths(t *testing.T) {
+	b := NewInMemoryBackend()
+	ctx := context.Background()
+	if err := b.Write(ctx, &WriteRequest{FilePath: "/dir/a.txt", Content: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{"", "/"} {
+		entries, err := b.LsInfo(ctx, &LsInfoRequest{Path: root})
+		if err != nil || len(entries) != 1 || !entries[0].IsDir {
+			t.Fatalf("root %q: %+v %v", root, entries, err)
+		}
+	}
+	if got := normalizePath("dir/../dir/a.txt"); got != "/dir/a.txt" {
+		t.Fatal(got)
+	}
+}
