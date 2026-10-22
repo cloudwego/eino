@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -89,6 +90,11 @@ func TestNew_Validation(t *testing.T) {
 	_, err = New(ctx, &Config{Backend: b, AgentsMDFiles: []string{"/test.md"}, AllAgentsMDMaxBytes: -1})
 	if err == nil {
 		t.Fatal("expected error for negative max bytes")
+	}
+
+	_, err = New(ctx, &Config{Backend: b, AgentsMDFiles: []string{"/test.md"}, PerAgentsMDMaxBytes: -1})
+	if err == nil {
+		t.Fatal("expected error for negative per-file max bytes")
 	}
 
 	_, err = New(ctx, &Config{AgentsMDFiles: []string{"/test.md"}})
@@ -308,14 +314,14 @@ func TestMiddleware_CircularImport(t *testing.T) {
 
 func TestMiddleware_MaxBytesLimit(t *testing.T) {
 	b := newMemBackend()
-	b.set("/a.md", "AAAA") // 4 bytes
-	b.set("/b.md", "BBBB") // 4 bytes
+	b.set("/a.md", strings.Repeat("A", 560)) // fills the budget exactly
+	b.set("/b.md", "BBBB")
 
 	ctx := context.Background()
 	mw, err := New(ctx, &Config{
 		Backend:             b,
 		AgentsMDFiles:       []string{"/a.md", "/b.md"},
-		AllAgentsMDMaxBytes: 5, // file a (4) fits, file b (4) would exceed
+		AllAgentsMDMaxBytes: 560, // file a fills it, so file b is excluded
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +334,7 @@ func TestMiddleware_MaxBytesLimit(t *testing.T) {
 	}
 
 	content := state.Messages[0].Content
-	if !strings.Contains(content, "AAAA") {
+	if !strings.Contains(content, strings.Repeat("A", 560)) {
 		t.Fatal("first file should be included")
 	}
 	if strings.Contains(content, "BBBB") {
@@ -456,7 +462,7 @@ func TestLoader_NoImportsPassthrough(t *testing.T) {
 	b := newMemBackend()
 	b.set("/agent.md", "plain text without imports\nline two")
 
-	l := newLoaderConfig(b, []string{"/agent.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/agent.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -475,7 +481,7 @@ func TestLoader_ImportAsSeparateSection(t *testing.T) {
 	b.set("/doc.md", "before @/snippet.md after")
 	b.set("/snippet.md", "INJECTED")
 
-	l := newLoaderConfig(b, []string{"/doc.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/doc.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -500,7 +506,7 @@ func TestLoader_MultipleImportsSameLine(t *testing.T) {
 	b.set("/a.txt", "AAA")
 	b.set("/b.txt", "BBB")
 
-	l := newLoaderConfig(b, []string{"/doc.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/doc.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -530,7 +536,7 @@ func TestLoader_SameFileTwiceOnSameLine(t *testing.T) {
 	b.set("/doc.md", "@/shared.md and @/shared.md again")
 	b.set("/shared.md", "SHARED")
 
-	l := newLoaderConfig(b, []string{"/doc.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/doc.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -550,7 +556,7 @@ func TestLoader_ImportFileNotFound(t *testing.T) {
 	b := newMemBackend()
 	b.set("/doc.md", "load @/missing.md please")
 
-	l := newLoaderConfig(b, []string{"/doc.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/doc.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error (missing import is logged), got %v", err)
@@ -570,7 +576,7 @@ func TestLoader_RelativePathResolution(t *testing.T) {
 	b.set("/a/b/host.md", "ref @../c/target.md done")
 	b.set("/a/c/target.md", "TARGET")
 
-	l := newLoaderConfig(b, []string{"/a/b/host.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/a/b/host.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -594,7 +600,7 @@ func TestLoader_RelativeTopLevelPath(t *testing.T) {
 	b.set("sub/agents.md", "start @./other.md end")
 	b.set("sub/other.md", "OTHER CONTENT")
 
-	l := newLoaderConfig(b, []string{"sub/agents.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"sub/agents.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -613,7 +619,7 @@ func TestLoader_RelativeTopLevelWithDotDotImport(t *testing.T) {
 	b.set("sub/agents.md", "see @../shared/x.md here")
 	b.set("shared/x.md", "SHARED X")
 
-	l := newLoaderConfig(b, []string{"sub/agents.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"sub/agents.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -633,7 +639,7 @@ func TestLoader_RelativeTopLevelDedup(t *testing.T) {
 	b := newMemBackend()
 	b.set("sub/a.md", "CONTENT A")
 
-	l := newLoaderConfig(b, []string{"sub/a.md", "./sub/a.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"sub/a.md", "./sub/a.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -650,7 +656,7 @@ func TestLoader_AbsoluteTopLevelWithRelativeImport(t *testing.T) {
 	b.set("/project/agents.md", "ref @./lib/helper.md done")
 	b.set("/project/lib/helper.md", "HELPER")
 
-	l := newLoaderConfig(b, []string{"/project/agents.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/project/agents.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -669,7 +675,7 @@ func TestLoader_AbsoluteTopLevelWithDotDotImport(t *testing.T) {
 	b.set("/project/sub/agents.md", "load @../shared/x.md here")
 	b.set("/project/shared/x.md", "SHARED")
 
-	l := newLoaderConfig(b, []string{"/project/sub/agents.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/project/sub/agents.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -690,7 +696,7 @@ func TestLoader_RelativeImportDedup(t *testing.T) {
 	b.set("/a/main.md", "first @/a/b/shared.md second @../a/b/shared.md end")
 	b.set("/a/b/shared.md", "SHARED ONCE")
 
-	l := newLoaderConfig(b, []string{"/a/main.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/a/main.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -709,7 +715,7 @@ func TestLoader_NestedRelativeImport(t *testing.T) {
 	b.set("/root/sub/mid.md", "mid @deep/leaf.md mid_end")
 	b.set("/root/sub/deep/leaf.md", "LEAF")
 
-	l := newLoaderConfig(b, []string{"/root/main.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/root/main.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -731,7 +737,7 @@ func TestLoader_TransitiveImport(t *testing.T) {
 	b.set("/mid.md", "mid-start @/leaf.md mid-end")
 	b.set("/leaf.md", "LEAF_VALUE")
 
-	l := newLoaderConfig(b, []string{"/main.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/main.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -750,7 +756,7 @@ func TestLoader_EmptyFile(t *testing.T) {
 	b := newMemBackend()
 	b.set("/empty.md", "")
 
-	l := newLoaderConfig(b, []string{"/empty.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/empty.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -761,18 +767,71 @@ func TestLoader_EmptyFile(t *testing.T) {
 	}
 }
 
-func TestLoader_MaxBytesFirstFileFull(t *testing.T) {
-	// Even if the first file alone exceeds maxBytes, it should still be loaded in full.
+func TestLoader_MaxBytesFirstFileTruncated(t *testing.T) {
+	// The budget applies to the first file too: it is truncated to the remaining
+	// budget (with a notice) when at least minTruncatableBytes remain.
 	b := newMemBackend()
-	b.set("/big.md", "ABCDEFGHIJ") // 10 bytes
+	b.set("/big.md", strings.Repeat("A", 1000)) // 1000 bytes
 
-	l := newLoaderConfig(b, []string{"/big.md"}, 3, nil)
-	content, err := l.load(context.Background()) // maxBytes=3, but first file always loads
+	l := newLoaderConfig(b, []string{"/big.md"}, 600, 0, nil)
+	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, "ABCDEFGHIJ") {
-		t.Fatalf("first file should always load in full, got %q", content)
+	if !strings.Contains(content, strings.Repeat("A", 600)) {
+		t.Fatalf("first file should retain 600 bytes, got %q", content)
+	}
+	if strings.Contains(content, strings.Repeat("A", 601)) {
+		t.Fatalf("first file should be truncated to 600 bytes, got more")
+	}
+	if !strings.Contains(content, "truncated 400 bytes") {
+		t.Fatalf("expected truncation notice, got %q", content)
+	}
+}
+
+func TestLoader_MaxBytesBelowThresholdStillCaps(t *testing.T) {
+	// A positive budget below minTruncatableBytes is still a hard cap: the first
+	// (and only) file is truncated to fit rather than being dropped or loaded whole.
+	// minTruncatableBytes is a tail-only optimization and must have no effect here.
+	b := newMemBackend()
+	b.set("/big.md", strings.Repeat("A", 1000))
+
+	l := newLoaderConfig(b, []string{"/big.md"}, 100, 0, nil)
+	content, err := l.load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, strings.Repeat("A", 100)) {
+		t.Fatalf("first file should be truncated to the 100-byte budget, got %q", content)
+	}
+	if strings.Contains(content, strings.Repeat("A", 101)) {
+		t.Fatalf("content must not exceed the 100-byte budget, got %q", content)
+	}
+	if !strings.Contains(content, "truncated") {
+		t.Fatalf("truncation notice expected, got %q", content)
+	}
+}
+
+func TestLoader_MaxBytesLaterFileDropped(t *testing.T) {
+	// Once earlier content leaves less than minTruncatableBytes of budget, the next
+	// file is dropped whole and listed as omitted.
+	b := newMemBackend()
+	b.set("/a.md", strings.Repeat("A", 550)) // consumes most of a 600-byte budget
+	b.set("/b.md", strings.Repeat("B", 200))
+
+	l := newLoaderConfig(b, []string{"/a.md", "/b.md"}, 600, 0, nil)
+	content, err := l.load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, strings.Repeat("A", 550)) {
+		t.Fatalf("a.md should load in full, got %q", content)
+	}
+	if strings.Contains(content, "B") && strings.Contains(content, strings.Repeat("B", 2)) {
+		t.Fatalf("b.md should be dropped whole (remaining budget below threshold), got %q", content)
+	}
+	if !strings.Contains(content, "1 more file(s) not loaded due to the total byte limit") {
+		t.Fatalf("dropped file should be listed as omitted, got %q", content)
 	}
 }
 
@@ -782,7 +841,7 @@ func TestLoader_CircularImportInline(t *testing.T) {
 	b.set("/a.md", "text @/b.md more")
 	b.set("/b.md", "ref @/a.md back")
 
-	l := newLoaderConfig(b, []string{"/a.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/a.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error (circular import is logged), got %v", err)
@@ -809,7 +868,7 @@ func TestLoader_MaxDepthInline(t *testing.T) {
 		b.set(fmt.Sprintf("/level%d.md", i), content)
 	}
 
-	l := newLoaderConfig(b, []string{"/level0.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/level0.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error (depth exceeded is logged), got %v", err)
@@ -836,7 +895,7 @@ func TestLoader_DiamondDependency(t *testing.T) {
 	b.set("/d.md", "D(@/c.md)")
 	b.set("/c.md", "SHARED")
 
-	l := newLoaderConfig(b, []string{"/a.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/a.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("diamond dependency should not be circular, got error: %v", err)
@@ -861,7 +920,7 @@ func TestLoader_AtSignInNormalText(t *testing.T) {
 	b := newMemBackend()
 	b.set("/agent.md", "contact me @ anytime or @  spaces and @someone mentioned and user@example.com and @company.org")
 
-	l := newLoaderConfig(b, []string{"/agent.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/agent.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -886,11 +945,11 @@ func TestLoader_MaxBytesWithImports(t *testing.T) {
 	b := newMemBackend()
 	b.set("/a.md", "A(@/shared.md)")
 	b.set("/b.md", "B(@/shared.md)")
-	b.set("/shared.md", strings.Repeat("X", 100)) // 100 bytes
+	b.set("/shared.md", strings.Repeat("X", 600)) // 600 bytes
 
-	l := newLoaderConfig(b, []string{"/a.md", "/b.md"}, 120, nil)
-	// /a.md = 14 bytes + /shared.md = 100 bytes => 114 total after /a.md.
-	// Budget = 120: /b.md (14 bytes) would push to 128, exceeding budget.
+	l := newLoaderConfig(b, []string{"/a.md", "/b.md"}, 620, 0, nil)
+	// /a.md = 14 bytes + /shared.md = 600 bytes => 614 total after /a.md.
+	// Budget = 620: only 6 bytes remain, below minTruncatableBytes, so /b.md is dropped.
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("load failed: %v", err)
@@ -945,7 +1004,7 @@ func TestLoader_DuplicateTopLevelFiles(t *testing.T) {
 	b := newMemBackend()
 	b.set("/agent.md", "unique content")
 
-	l := newLoaderConfig(b, []string{"/agent.md", "/agent.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/agent.md", "/agent.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -960,7 +1019,7 @@ func TestLoader_DuplicateTopLevelFiles(t *testing.T) {
 func TestLoader_LoadFileError(t *testing.T) {
 	// Missing file (ErrNotExist) is silently skipped.
 	b := newMemBackend()
-	l := newLoaderConfig(b, []string{"/missing.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/missing.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected missing file to be skipped, got error: %v", err)
@@ -974,10 +1033,10 @@ func TestLoader_MaxBytesStopsImports(t *testing.T) {
 	// When budget is exhausted, further imports in collectImports should be skipped.
 	b := newMemBackend()
 	b.set("/main.md", "@/big.md @/small.md")
-	b.set("/big.md", strings.Repeat("B", 200))
+	b.set("/big.md", strings.Repeat("B", 600))
 	b.set("/small.md", "SMALL")
 
-	l := newLoaderConfig(b, []string{"/main.md"}, 50, nil)
+	l := newLoaderConfig(b, []string{"/main.md"}, 560, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -993,12 +1052,98 @@ func TestLoader_MaxBytesStopsImports(t *testing.T) {
 	}
 }
 
+func TestLoader_PerFileMaxBytesTruncates(t *testing.T) {
+	// PerAgentsMDMaxBytes caps each file individually; a per-file truncation does
+	// not stop the loader, so later files still load.
+	b := newMemBackend()
+	b.set("/a.md", strings.Repeat("A", 1000))
+	b.set("/b.md", "KEEP")
+
+	l := newLoaderConfig(b, []string{"/a.md", "/b.md"}, 0, 100, nil)
+	content, err := l.load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(content, strings.Repeat("A", 100)) {
+		t.Fatalf("a.md should retain 100 bytes, got %q", content)
+	}
+	if strings.Contains(content, strings.Repeat("A", 101)) {
+		t.Fatal("a.md should be truncated to 100 bytes")
+	}
+	if !strings.Contains(content, "truncated 900 bytes") {
+		t.Fatalf("expected per-file truncation notice, got %q", content)
+	}
+	if !strings.Contains(content, "KEEP") {
+		t.Fatal("b.md should still load; per-file cap must not stop the loader")
+	}
+}
+
+func TestLoader_PerFileTruncatedSkipsImports(t *testing.T) {
+	// A file truncated by the per-file cap must not pull in its @imports.
+	b := newMemBackend()
+	b.set("/a.md", "@/imp.md "+strings.Repeat("A", 200))
+	b.set("/imp.md", "IMPORTED")
+
+	l := newLoaderConfig(b, []string{"/a.md"}, 0, 50, nil)
+	content, err := l.load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(content, "IMPORTED") {
+		t.Fatal("imports of a truncated file must be skipped")
+	}
+}
+
+func TestLoader_OmittedNoticeListsFiles(t *testing.T) {
+	// When the cumulative budget is exhausted, the remaining top-level files are
+	// listed in the summary line with cleaned paths.
+	b := newMemBackend()
+	b.set("/a.md", strings.Repeat("A", 1000))
+	b.set("/b.md", "B")
+	b.set("/c.md", "C")
+
+	l := newLoaderConfig(b, []string{"/a.md", "/b/../b.md", "/c.md"}, 600, 0, nil)
+	content, err := l.load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(content, "2 more file(s) not loaded due to the total byte limit") {
+		t.Fatalf("expected omitted-files summary line, got %q", content)
+	}
+	if !strings.Contains(content, "/b.md") || !strings.Contains(content, "/c.md") {
+		t.Fatalf("summary should list cleaned paths /b.md and /c.md, got %q", content)
+	}
+	if strings.Contains(content, "/b/../b.md") {
+		t.Fatal("summary should use the cleaned path, not the raw one")
+	}
+}
+
+func TestTruncateBytes_RuneBoundary(t *testing.T) {
+	// A cut landing inside a multibyte rune backs up to the rune boundary.
+	got := truncateBytes(strings.Repeat("好", 4), 10) // each 好 is 3 bytes; 10 lands mid-rune
+	if want := strings.Repeat("好", 3); got != want {
+		t.Fatalf("expected %q (rune boundary), got %q", want, got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated result is not valid UTF-8: %q", got)
+	}
+
+	if got := truncateBytes("abc", 10); got != "abc" {
+		t.Fatalf("content shorter than max should be unchanged, got %q", got)
+	}
+	if got := truncateBytes("abcdef", 3); got != "abc" {
+		t.Fatalf("ascii cut on boundary should be exact, got %q", got)
+	}
+}
+
 func TestFormatContent_Empty(t *testing.T) {
 	// formatContent with nil/empty slice should return empty string.
-	if got := formatContent(nil); got != "" {
+	if got := formatContent(nil, nil); got != "" {
 		t.Fatalf("expected empty string for nil, got %q", got)
 	}
-	if got := formatContent([]loadedFile{}); got != "" {
+	if got := formatContent([]loadedFile{}, nil); got != "" {
 		t.Fatalf("expected empty string for empty slice, got %q", got)
 	}
 }
@@ -1038,7 +1183,7 @@ func TestLoader_ExactOutput(t *testing.T) {
 	b.set("/project/CLAUDE.md", "this is project claude.md\n\n- git workflow @git/git-instructions.md")
 	b.set("/project/git/git-instructions.md", "this is git-instructions.md")
 
-	l := newLoaderConfig(b, []string{"/project/CLAUDE.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/project/CLAUDE.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1070,7 +1215,7 @@ func TestLoader_MissingFileSkipped(t *testing.T) {
 	b.set("/good.md", "GOOD CONTENT")
 	// /missing.md is not set
 
-	l := newLoaderConfig(b, []string{"/missing.md", "/good.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/missing.md", "/good.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got %v", err)
@@ -1083,7 +1228,7 @@ func TestLoader_MissingFileSkipped(t *testing.T) {
 func TestLoader_AllMissingFilesSkipped(t *testing.T) {
 	b := newMemBackend()
 
-	l := newLoaderConfig(b, []string{"/missing1.md", "/missing2.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/missing1.md", "/missing2.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error for missing files, got %v", err)
@@ -1099,7 +1244,7 @@ func TestLoader_CircularImportSkipped(t *testing.T) {
 	b.set("/b.md", "B content @/a.md")
 
 	// Circular import in collectImports is logged via onWarning and skipped.
-	l := newLoaderConfig(b, []string{"/a.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/a.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -1123,7 +1268,7 @@ func TestLoader_DepthExceededSkipped(t *testing.T) {
 	b.set("/l5.md", "@/l6.md")
 	b.set("/l6.md", "DEEP")
 
-	l := newLoaderConfig(b, []string{"/l0.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/l0.md"}, 0, 0, nil)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error for depth exceeded, got %v", err)
@@ -1143,7 +1288,7 @@ func TestLoader_OnLoadWarningCallback(t *testing.T) {
 		warnings = append(warnings, fmt.Errorf("%s: %w", filePath, err))
 	}
 
-	l := newLoaderConfig(b, []string{"/missing.md", "/good.md"}, 0, onWarning)
+	l := newLoaderConfig(b, []string{"/missing.md", "/good.md"}, 0, 0, onWarning)
 	content, err := l.load(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -1267,7 +1412,7 @@ func TestLoader_ImportIOError(t *testing.T) {
 		// /broken.md is NOT in the map, so Read returns I/O error (not ErrNotExist)
 	}
 
-	l := newLoaderConfig(b, []string{"/main.md"}, 0, nil)
+	l := newLoaderConfig(b, []string{"/main.md"}, 0, 0, nil)
 	_, err := l.load(context.Background())
 	if err == nil {
 		t.Fatal("expected error from I/O failure on imported file")

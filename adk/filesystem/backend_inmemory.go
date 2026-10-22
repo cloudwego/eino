@@ -20,8 +20,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	vpath "path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +82,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 				// The path itself is a file
 				if !seen[normalizedFilePath] {
 					result = append(result, FileInfo{
-						Path:       filepath.Base(normalizedFilePath),
+						Path:       vpath.Base(normalizedFilePath),
 						IsDir:      false,
 						Size:       int64(entry.content.Len()),
 						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
@@ -132,6 +133,9 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 	for _, info := range dirInfo {
 		result = append(result, *info)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Path < result[j].Path
+	})
 
 	return result, nil
 }
@@ -238,7 +242,9 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 		collector := newGrepCollector()
 		entry := b.files[filteredFiles[0]]
 		collector.processFile(filteredFiles[0], entry.content.String(), re, req)
-		return collector.buildResults(b, req)
+		matches := collector.buildResults(b, req)
+		sortGrepMatches(matches)
+		return matches, nil
 	}
 
 	matches, err := b.grepFilesInParallel(filteredFiles, re, req)
@@ -249,8 +255,18 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 	if req.BeforeLines > 0 || req.AfterLines > 0 {
 		matches = b.applyContext(matches, req)
 	}
+	sortGrepMatches(matches)
 
 	return matches, nil
+}
+
+func sortGrepMatches(matches []GrepMatch) {
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Path != matches[j].Path {
+			return matches[i].Path < matches[j].Path
+		}
+		return matches[i].Line < matches[j].Line
+	})
 }
 
 func (b *InMemoryBackend) grepFilesInParallel(filteredFiles []string, re *regexp.Regexp, req *GrepRequest) ([]GrepMatch, error) {
@@ -387,7 +403,7 @@ func (b *InMemoryBackend) filterByGlob(files []string, searchPath string, globPa
 				matchPath = strings.TrimPrefix(filePath, searchPath+"/")
 			}
 		} else {
-			matchPath = filepath.Base(filePath)
+			matchPath = vpath.Base(filePath)
 		}
 
 		matched, err := doublestar.Match(globPattern, matchPath)
@@ -406,7 +422,7 @@ func (b *InMemoryBackend) filterByFileType(files []string, fileType string) []st
 	var result []string
 
 	for _, filePath := range files {
-		ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
+		ext := strings.TrimPrefix(vpath.Ext(filePath), ".")
 		if matchFileType(ext, fileType) {
 			result = append(result, filePath)
 		}
@@ -635,6 +651,9 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 			})
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Path < result[j].Path
+	})
 
 	return result, nil
 }
@@ -780,17 +799,18 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 }
 
 // normalizePath normalizes a file path by ensuring it starts with "/" and removing trailing slashes.
-func normalizePath(path string) string {
-	if path == "" {
+func normalizePath(filePath string) string {
+	if filePath == "" {
 		return "/"
 	}
 
+	filePath = strings.ReplaceAll(filePath, "\\", "/")
 	// Ensure path starts with "/"
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	if !strings.HasPrefix(filePath, "/") {
+		filePath = "/" + filePath
 	}
 
-	return filepath.Clean(path)
+	return vpath.Clean(filePath)
 }
 
 type grepCollector struct {
@@ -854,8 +874,8 @@ func (c *grepCollector) findSingleLineMatches(filePath, content string, re *rege
 	return fileMatches
 }
 
-func (c *grepCollector) buildResults(b *InMemoryBackend, req *GrepRequest) ([]GrepMatch, error) {
-	return c.buildContentResult(b, req), nil
+func (c *grepCollector) buildResults(b *InMemoryBackend, req *GrepRequest) []GrepMatch {
+	return c.buildContentResult(b, req)
 }
 
 func (c *grepCollector) buildContentResult(b *InMemoryBackend, req *GrepRequest) []GrepMatch {
