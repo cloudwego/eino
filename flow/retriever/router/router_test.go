@@ -132,3 +132,40 @@ func TestRRF(t *testing.T) {
 		t.Fatal("rrf fail")
 	}
 }
+
+func TestRouterDefaultRouter(t *testing.T) {
+	// When config.Router is nil, NewRetriever should use a default router
+	// that routes to all registered retrievers.
+	// Previously, a bug caused config.Router (nil) to be used directly
+	// instead of the locally-assigned default function, leading to
+	// nil pointer dereference on Retrieve.
+	ctx := context.Background()
+	r, err := NewRetriever(ctx, &Config{
+		Retrievers: map[string]retriever.Retriever{
+			"1": &mockRetriever{},
+			"2": &mockRetriever{},
+		},
+		// Router is intentionally nil — should default to all-retrievers routing
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := callbacks.NewHandlerBuilder().
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			return ctx
+		}).
+		OnErrorFn(func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+			t.Fatal(err)
+			return ctx
+		}).Build()
+	ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{}, handler)
+
+	result, err := r.Retrieve(ctx, "1 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) == 0 {
+		t.Fatal("expected non-empty results from default router")
+	}
+}
