@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -1766,6 +1767,75 @@ func TestInMemoryBackend_GrepRaw_WithContext(t *testing.T) {
 			t.Error("Expected at least 1 match")
 		}
 	})
+}
+
+func TestInMemoryBackend_ApplyContextWithPendingWriter(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		before int
+		after  int
+		want   []string
+	}{
+		{name: "before", before: 1, want: []string{"before", "target"}},
+		{name: "after", after: 1, want: []string{"target", "after"}},
+		{name: "both", before: 1, after: 1, want: []string{"before", "target", "after"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := NewInMemoryBackend()
+			ctx := context.Background()
+			const filePath = "/context.txt"
+			if err := backend.Write(ctx, &WriteRequest{FilePath: filePath, Content: "before\ntarget\nafter"}); err != nil {
+				t.Fatal(err)
+			}
+
+			// GrepRaw holds this read lock while expanding context lines.
+			backend.mu.RLock()
+			writerDone := make(chan error, 1)
+			go func() {
+				writerDone <- backend.Write(ctx, &WriteRequest{FilePath: filePath, Content: "updated"})
+			}()
+			defer func() {
+				backend.mu.RUnlock()
+				select {
+				case err := <-writerDone:
+					if err != nil {
+						t.Error(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Error("writer did not complete after releasing the read lock")
+				}
+			}()
+
+			// A queued writer blocks new readers. Wait for that condition rather
+			// than relying on a sleep to trigger the recursive RLock deadlock.
+			deadline := time.Now().Add(5 * time.Second)
+			for backend.mu.TryRLock() {
+				backend.mu.RUnlock()
+				if time.Now().After(deadline) {
+					t.Fatal("writer did not queue behind the read lock")
+				}
+				runtime.Gosched()
+			}
+
+			result := make(chan []GrepMatch, 1)
+			go func() {
+				result <- backend.applyContext([]GrepMatch{{Path: normalizePath(filePath), Line: 2, Content: "target"}},
+					&GrepRequest{BeforeLines: tt.before, AfterLines: tt.after})
+			}()
+			select {
+			case matches := <-result:
+				var got []string
+				for _, match := range matches {
+					got = append(got, match.Content)
+				}
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("context = %v, want %v", got, tt.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("context expansion blocked behind a writer while holding the read lock")
+			}
+		})
+	}
 }
 
 func TestInMemoryBackend_GrepRaw_Multiline(t *testing.T) {
