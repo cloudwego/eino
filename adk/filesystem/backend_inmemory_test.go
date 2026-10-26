@@ -1768,6 +1768,60 @@ func TestInMemoryBackend_GrepRaw_WithContext(t *testing.T) {
 	})
 }
 
+func TestInMemoryBackend_GrepRaw_MultilineDotAll(t *testing.T) {
+	cases := []struct {
+		name            string
+		pattern         string
+		multiline       bool
+		caseInsensitive bool
+		wantMatch       bool
+	}{
+		{name: "single line", pattern: "start.*end"},
+		{name: "multiline", pattern: "start.*end", multiline: true, wantMatch: true},
+		{name: "case sensitive", pattern: "START.*END", multiline: true},
+		{name: "case insensitive", pattern: "START.*END", multiline: true, caseInsensitive: true, wantMatch: true},
+		{name: "explicit dotall", pattern: "(?s)start.*end", multiline: true, wantMatch: true},
+		{name: "explicit dotall opt out", pattern: "(?-s)start.*end", multiline: true},
+	}
+	for _, fileCount := range []int{1, 2} {
+		t.Run(fmt.Sprintf("%d files", fileCount), func(t *testing.T) {
+			ctx := context.Background()
+			backend := NewInMemoryBackend()
+			var expected []GrepMatch
+			for i := 0; i < fileCount; i++ {
+				path := fmt.Sprintf("/file%d.txt", i)
+				if err := backend.Write(ctx, &WriteRequest{FilePath: path, Content: "start\nmiddle line\nend"}); err != nil {
+					t.Fatal(err)
+				}
+				expected = append(expected,
+					GrepMatch{Path: path, Line: 1, Content: "start"},
+					GrepMatch{Path: path, Line: 2, Content: "middle line"},
+					GrepMatch{Path: path, Line: 3, Content: "end"},
+				)
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					matches, err := backend.GrepRaw(ctx, &GrepRequest{
+						Pattern: tc.pattern, EnableMultiline: tc.multiline, CaseInsensitive: tc.caseInsensitive,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !tc.wantMatch {
+						if len(matches) != 0 {
+							t.Errorf("Expected no matches, got %v", matches)
+						}
+						return
+					}
+					if !reflect.DeepEqual(expected, matches) {
+						t.Errorf("Expected %v, got %v", expected, matches)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestInMemoryBackend_GrepRaw_Multiline(t *testing.T) {
 	backend := NewInMemoryBackend()
 	ctx := context.Background()
