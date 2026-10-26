@@ -118,7 +118,7 @@ type GrepRequest struct {
 	// CaseInsensitive enables case insensitive search.
 	CaseInsensitive bool
 
-	// EnableMultiline enables multiline mode where patterns can span lines.
+	// EnableMultiline enables multiline mode where patterns can span lines and "." matches newlines.
 	// Default: false (patterns match within single lines only).
 	EnableMultiline bool
 
