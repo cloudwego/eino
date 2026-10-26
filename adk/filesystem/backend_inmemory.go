@@ -747,14 +747,24 @@ func (c *grepCollector) findMultilineMatches(filePath, content string, re *regex
 	var fileMatches []GrepMatch
 	matches := re.FindAllStringIndex(content, -1)
 	lines := strings.Split(content, "\n")
+	lastLineNum := 0
 
 	for _, match := range matches {
 		matchStart := match[0]
 		matchEnd := match[1]
+		// Match ends are exclusive; a trailing newline belongs to the previous line.
+		if matchEnd > matchStart && content[matchEnd-1] == '\n' {
+			matchEnd--
+		}
 		startLineNum := 1 + strings.Count(content[:matchStart], "\n")
 		endLineNum := 1 + strings.Count(content[:matchEnd], "\n")
 
+		// Multiple matches may share a line; content results contain each line once.
+		if startLineNum <= lastLineNum {
+			startLineNum = lastLineNum + 1
+		}
 		for lineNum := startLineNum; lineNum <= endLineNum && lineNum <= len(lines); lineNum++ {
+			lastLineNum = lineNum
 			fileMatches = append(fileMatches, GrepMatch{
 				Path:    filePath,
 				Line:    lineNum,
