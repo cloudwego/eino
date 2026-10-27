@@ -25,6 +25,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -211,7 +212,7 @@ func (b *TypedFinalizerBuilder[M]) PreserveSkills(config *PreserveSkillsConfig) 
 		}
 
 		preserved := makeUserMsg[M](skillText)
-		setMsgExtra(preserved, extraKeyContentType, string(contentTypeSkills))
+		internal.SetMessageExtra(preserved, extraKeyContentType, string(contentTypeSkills))
 		return []M{preserved, summary}, nil
 	})
 	return b
