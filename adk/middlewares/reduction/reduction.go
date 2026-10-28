@@ -557,13 +557,13 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultStreamableTruncation(
 	//
 	// Source error after truncation:
 	//   input : C1 -------- C2(crosses limit) -------- C3 -------- ERR
-	//   output: C1 -------- [swallow C2,C3] ---------- replay(C2+C3 tail) -- ERR
+	//   output: C1 -------- [swallow C2,C3] ---------- prefix(C2)+notice -- ERR
 	//
 	// Before truncation, chunks are forwarded unchanged. Once the limit is reached,
 	// the wrapper keeps reading and accumulating full output but suppresses chunks.
-	// On clean EOF, it offloads full output and emits one final truncation notice.
-	// On source error, it replays the original content swallowed since the truncation
-	// point, then surfaces the original source error via the outer convert layer.
+	// On clean EOF or on a source error, it offloads full output and emits one final
+	// truncation notice, so MaxLengthForTrunc always bounds the stream. A source error
+	// is surfaced after the notice via the outer convert layer.
 	convertHandler := func(chunk string) (string, error) {
 		if chunk == "" {
 			return "", schema.ErrNoValue
@@ -598,12 +598,6 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultStreamableTruncation(
 	}
 
 	eofHandler := func() (any, error) {
-		if sourceErr != nil {
-			if fullOutput.Len() > curSize {
-				return fullOutput.String()[curSize:], nil
-			}
-			return nil, io.EOF
-		}
 		if !reachedLimit {
 			return nil, io.EOF
 		}
@@ -774,7 +768,6 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultEnhancedStreamableTruncatio
 ) *schema.StreamReader[*schema.ToolResult] {
 	var (
 		chunks                   []*schema.ToolResult
-		replayChunks             []*schema.ToolResult
 		fullLength               int
 		reachedLimit             bool
 		truncTextPrefix          *schema.ToolResult
@@ -790,17 +783,16 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultEnhancedStreamableTruncatio
 	//
 	// Source error after truncation:
 	//   input : C1 -------- C2(crosses limit) -------- C3 -------- ERR
-	//   output: C1 -------- [swallow C2,C3] ---------- replay(C2+C3) -- ERR
+	//   output: C1 -------- [swallow C2,C3] ---------- prefix(C2)+notice -- ERR
 	//
-	// Replay uses one merged ToolResult because WithOnEOF can inject only one
-	// value. As in the string stream wrapper, the outer convert layer surfaces
-	// the original source error on the following Recv.
+	// As in the string stream wrapper, the notice is emitted on both clean EOF and
+	// source error, and the outer convert layer surfaces the original source error
+	// on the following Recv.
 	convertHandler := func(chunk *schema.ToolResult) (*schema.ToolResult, error) {
 		chunks = append(chunks, chunk)
 		chunkLength := toolResultTextLength(chunk)
 		if reachedLimit {
 			fullLength += chunkLength
-			replayChunks = append(replayChunks, chunk)
 			return nil, schema.ErrNoValue
 		}
 		if fullLength+chunkLength < t.config.MaxLengthForTrunc {
@@ -809,7 +801,6 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultEnhancedStreamableTruncatio
 		}
 
 		reachedLimit = true
-		replayChunks = append(replayChunks, chunk)
 		truncTextPrefix = toolResultTextPrefix(chunk, t.config.MaxLengthForTrunc-fullLength)
 		fullLength += chunkLength
 		truncTriggeredToolResult = &schema.ToolResult{Parts: flattenToolResultParts(chunks)}
@@ -825,13 +816,6 @@ func (t *typedToolReductionMiddleware[M]) wrapDefaultEnhancedStreamableTruncatio
 	}
 
 	eofHandler := func() (any, error) {
-		if sourceErr != nil {
-			replay := &schema.ToolResult{Parts: flattenToolResultParts(replayChunks)}
-			if len(replay.Parts) > 0 {
-				return replay, nil
-			}
-			return nil, io.EOF
-		}
 		if !reachedLimit {
 			return nil, io.EOF
 		}
