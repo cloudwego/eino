@@ -274,6 +274,8 @@ func TestFilesystemBackend_Get(t *testing.T) {
 
 		skill, err := backend.Get(ctx, "non-existent")
 		assert.Error(t, err)
+		assert.ErrorIs(t, err, ErrSkillNotFound)
+		assert.EqualError(t, err, "skill not found: non-existent")
 		assert.Empty(t, skill)
 		assert.Contains(t, err.Error(), "skill not found")
 	})
