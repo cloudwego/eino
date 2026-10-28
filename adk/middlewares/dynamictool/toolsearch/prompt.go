@@ -17,6 +17,14 @@
 package toolsearch
 
 const (
+	customSearchDescription = `Finds deferred tools using the configured search strategy and makes their complete schema definitions available for subsequent calls.
+
+Use "select:Read,Edit,Grep" to load exact tool names from the deferred tool list. Otherwise, provide a search query; up to max_results registered tools are returned in ranked order. Search query syntax is defined by the configured strategy.`
+
+	customSearchDescriptionChinese = `使用配置的搜索策略查找延迟加载的工具，并提供完整的 schema 定义，供后续调用使用。
+
+使用 "select:Read,Edit,Grep" 按延迟加载工具列表中的名称精确加载工具。其他输入作为搜索 query，按排名返回至多 max_results 个已注册工具。搜索 query 的语法由配置的策略定义。`
+
 	toolDescription = `Fetches full schema definitions for deferred tools so they can be called.
 
 Deferred tools appear by name in <system-reminder> messages. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' complete JSONSchema definitions inside a <functions> block. Once a tool's schema appears in that result, it is callable exactly like any tool defined at the top of the prompt.
