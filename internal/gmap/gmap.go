@@ -112,6 +112,17 @@ func Clone[K comparable, V any, M ~map[K]V](m M) M {
 	return cloneWithoutNilCheck(m)
 }
 
+// SetCoW returns a shallow copy of m with key set to value, replacing any
+// existing value. A nil input produces a new map; the input map is never modified.
+func SetCoW[K comparable, V any](m map[K]V, key K, value V) map[K]V {
+	cloned := make(map[K]V, len(m)+1)
+	for k, v := range m {
+		cloned[k] = v
+	}
+	cloned[key] = value
+	return cloned
+}
+
 func cloneWithoutNilCheck[K comparable, V any, M ~map[K]V](m M) M {
 	r := make(M, len(m))
 	for k, v := range m {

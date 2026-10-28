@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -44,7 +45,7 @@ func TestInsert(t *testing.T) {
 		assert.Equal(t, schema.System, got[2].Role)
 		assert.Equal(t, "<reminder>", got[2].Content)
 		assert.Equal(t, true, got[2].Extra[testExtraKey])
-		assert.Equal(t, true, got[2].Extra[adk.MessageExtraKeySystemReminder])
+		assert.True(t, internal.IsSystemReminder(got[2]))
 	})
 
 	t.Run("after a final assistant answer", func(t *testing.T) {

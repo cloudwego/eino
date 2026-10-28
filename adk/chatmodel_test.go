@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -2556,7 +2557,7 @@ func TestDefaultGenModelInput_PreservesLeadingSystem(t *testing.T) {
 
 	t.Run("preserves leading system reminder", func(t *testing.T) {
 		reminder := schema.SystemMessage("<reminder>")
-		reminder.Extra = map[string]any{MessageExtraKeySystemReminder: true}
+		internal.MarkSystemReminder(reminder)
 		got, err := defaultGenModelInput(ctx, "fresh instruction", &AgentInput{
 			Messages: []*schema.Message{
 				reminder,

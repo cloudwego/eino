@@ -38,9 +38,8 @@
 //     the current skills (stored via Insert's extra argument, read back via
 //     LatestExtra) against the digest carried by the last skill message.
 //
-// Inserted messages are tagged with adk.MessageExtraKeySystemReminder so the
-// framework's genModelInput preserves them instead of stripping a non-leading system
-// message as a stale instruction.
+// Inserted messages are marked as middleware reminders so they can be recognized
+// independently of their configured role.
 package systemreminder
 
 import (
@@ -51,9 +50,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Insert builds a mid-conversation system reminder carrying section (tagged with extraKey and
-// adk.MessageExtraKeySystemReminder, plus any entries in extra), inserts it at
-// insertIndex, and emits a MessageInserted session event so it is reconstructed in
+// Insert builds a mid-conversation reminder carrying section, tagged with extraKey
+// and any entries in extra, and emits a MessageInserted session event so it is reconstructed in
 // place on the next turn. TypedSendEvent is a no-op outside a Runner session. The
 // input slice is not mutated; the updated slice is returned.
 func Insert[M adk.MessageType](ctx context.Context, messages []M, extraKey, section string, extra map[string]any) []M {
@@ -108,7 +106,7 @@ func LatestExtra[M adk.MessageType](messages []M, extraKey, valueKey string) (an
 		if !hasExtraKey(messages[i], extraKey) {
 			continue
 		}
-		extra := messageExtra(messages[i])
+		extra := internal.GetMessageExtra(messages[i])
 		if extra == nil {
 			return nil, false
 		}
@@ -165,18 +163,8 @@ func isSystemMessage[M adk.MessageType](msg M) bool {
 	return false
 }
 
-func messageExtra[M adk.MessageType](msg M) map[string]any {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Extra
-	case *schema.AgenticMessage:
-		return v.Extra
-	}
-	return nil
-}
-
 func hasExtraKey[M adk.MessageType](msg M, key string) bool {
-	extra := messageExtra(msg)
+	extra := internal.GetMessageExtra(msg)
 	if extra == nil {
 		return false
 	}
@@ -185,43 +173,38 @@ func hasExtraKey[M adk.MessageType](msg M, key string) bool {
 }
 
 // newReminderMessage builds a mid-conversation reminder message carrying
-// content, tagged with extraKey (so it is identifiable in history) and
-// adk.MessageExtraKeySystemReminder (so the framework preserves it). Its role follows the
-// configured internal.GetReminderMessageRole() (System by default, User for models that
+// content, tagged with extraKey so it is identifiable in history. Its role follows the
+// configured reminder role (System by default, User for models that
 // reject non-leading system messages). Any entries in extra are merged into the message
 // Extra — used by skill to stash the MD5 digest of the current skill list for later diffing.
 func newReminderMessage[M adk.MessageType](extraKey, content string, extra map[string]any) M {
-	var zero M
-	buildExtra := func() map[string]any {
-		e := map[string]any{extraKey: true, adk.MessageExtraKeySystemReminder: true}
-		for k, v := range extra {
-			e[k] = v
-		}
-		return e
-	}
+	var reminder M
 	asUser := internal.GetReminderMessageRole() == internal.ReminderMessageRoleUser
-	switch any(zero).(type) {
+	switch any(reminder).(type) {
 	case *schema.Message:
 		msg := schema.SystemMessage(content)
 		if asUser {
 			msg.Role = schema.User
 		}
-		msg.Extra = buildExtra()
-		return any(msg).(M)
+		msg.Extra = extra
+		reminder = any(msg).(M)
 	case *schema.AgenticMessage:
 		msg := schema.SystemAgenticMessage(content)
 		if asUser {
 			msg.Role = schema.AgenticRoleTypeUser
 		}
-		msg.Extra = buildExtra()
-		return any(msg).(M)
+		msg.Extra = extra
+		reminder = any(msg).(M)
+	default:
+		panic("unreachable")
 	}
-	panic("unreachable")
+	internal.MarkSystemReminder(reminder)
+	internal.SetMessageExtra(reminder, extraKey, true)
+	return reminder
 }
 
 // NormalizeReminderRoles rewrites the role of every mid-conversation reminder message
-// (tagged adk.MessageExtraKeySystemReminder) to the configured
-// internal.GetReminderMessageRole(). Middlewares call this from BeforeModelRewriteState so
+// to the configured reminder role. Middlewares call this from BeforeModelRewriteState so
 // reminders reconstructed from history — persisted under a role that may differ from the
 // current config — match the current setting before the model call.
 //
@@ -232,7 +215,7 @@ func NormalizeReminderRoles[M adk.MessageType](messages []M) []M {
 	asUser := internal.GetReminderMessageRole() == internal.ReminderMessageRoleUser
 	var result []M
 	for i, msg := range messages {
-		if !hasExtraKey(msg, adk.MessageExtraKeySystemReminder) {
+		if !internal.IsSystemReminder(msg) {
 			continue
 		}
 		cp, changed := withReminderRole(msg, asUser)

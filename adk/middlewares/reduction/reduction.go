@@ -34,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1569,30 +1570,13 @@ func isToolResultOnlyMsg[M adk.MessageType](msg M) bool {
 
 // getMsgClearedFlagGeneric checks if a message has the cleared flag set.
 func getMsgClearedFlagGeneric[M adk.MessageType](msg M) bool {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return getMsgClearedFlag(m)
-	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			return false
-		}
-		v, ok := m.Extra[msgClearedFlag].(bool)
-		return ok && v
-	}
-	return false
+	v, ok := internal.GetMessageExtra(msg)[msgClearedFlag].(bool)
+	return ok && v
 }
 
 // setMsgClearedFlagGeneric sets the cleared flag on a message.
 func setMsgClearedFlagGeneric[M adk.MessageType](msg M) {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		setMsgClearedFlag(m)
-	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			m.Extra = make(map[string]any)
-		}
-		m.Extra[msgClearedFlag] = true
-	}
+	internal.SetMessageExtra(msg, msgClearedFlag, true)
 }
 
 // getToolCallsGeneric extracts tool call info from an assistant message.
@@ -1752,18 +1736,18 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 									t := *rb.Text
 									rbCopy.Text = &t
 								}
-								rbCopy.Extra = cloneStringAnyMap(rb.Extra)
+								rbCopy.Extra = gmap.Clone(rb.Extra)
 								ftr.Content[k] = &rbCopy
 							}
 						}
 					}
 					cb.FunctionToolResult = &ftr
 				}
-				cb.Extra = cloneStringAnyMap(block.Extra)
+				cb.Extra = gmap.Clone(block.Extra)
 				copied.ContentBlocks[j] = &cb
 			}
 		}
-		copied.Extra = cloneStringAnyMap(msg.Extra)
+		copied.Extra = gmap.Clone(msg.Extra)
 		resp[i] = copied
 	}
 	return resp
@@ -1792,7 +1776,7 @@ func copyMessages(msgs []*schema.Message) []*schema.Message {
 		if msg.ToolCalls != nil {
 			copied.ToolCalls = append(make([]schema.ToolCall, 0, len(msg.ToolCalls)), msg.ToolCalls...)
 		}
-		copied.Extra = cloneStringAnyMap(msg.Extra)
+		copied.Extra = gmap.Clone(msg.Extra)
 		resp[i] = copied
 	}
 	return resp
@@ -2108,10 +2092,7 @@ func getMsgClearedFlag(msg *schema.Message) (offloaded bool) {
 }
 
 func setMsgClearedFlag(msg *schema.Message) {
-	if msg.Extra == nil {
-		msg.Extra = make(map[string]any)
-	}
-	msg.Extra[msgClearedFlag] = true
+	internal.SetMessageExtra(msg, msgClearedFlag, true)
 }
 
 func toolResultFromMessage(msg *schema.Message) (result *schema.ToolResult, fromContent bool, err error) {
@@ -2138,7 +2119,7 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 		return schema.ToolOutputPart{
 			Type:  schema.ToolPartTypeText,
 			Text:  msgPart.Text,
-			Extra: cloneStringAnyMap(msgPart.Extra),
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeImageURL:
 		return schema.ToolOutputPart{
@@ -2146,7 +2127,7 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 			Image: &schema.ToolOutputImage{
 				MessagePartCommon: cloneMessagePartCommon(msgPart.Image.MessagePartCommon),
 			},
-			Extra: cloneStringAnyMap(msgPart.Extra),
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeAudioURL:
 		return schema.ToolOutputPart{
@@ -2154,7 +2135,7 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 			Audio: &schema.ToolOutputAudio{
 				MessagePartCommon: cloneMessagePartCommon(msgPart.Audio.MessagePartCommon),
 			},
-			Extra: cloneStringAnyMap(msgPart.Extra),
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeVideoURL:
 		return schema.ToolOutputPart{
@@ -2162,7 +2143,7 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 			Video: &schema.ToolOutputVideo{
 				MessagePartCommon: cloneMessagePartCommon(msgPart.Video.MessagePartCommon),
 			},
-			Extra: cloneStringAnyMap(msgPart.Extra),
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeFileURL:
 		return schema.ToolOutputPart{
@@ -2170,7 +2151,7 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 			File: &schema.ToolOutputFile{
 				MessagePartCommon: cloneMessagePartCommon(msgPart.File.MessagePartCommon),
 			},
-			Extra: cloneStringAnyMap(msgPart.Extra),
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	default:
 		return schema.ToolOutputPart{}, fmt.Errorf("unknown msg part type: %v", msgPart.Type)
@@ -2181,7 +2162,7 @@ func cloneMessagePartCommon(common schema.MessagePartCommon) schema.MessagePartC
 	common.URL = cloneStringPtr(common.URL)
 	common.Base64Data = cloneStringPtr(common.Base64Data)
 	common.FileID = cloneStringPtr(common.FileID)
-	common.Extra = cloneStringAnyMap(common.Extra)
+	common.Extra = gmap.Clone(common.Extra)
 	return common
 }
 
@@ -2191,17 +2172,6 @@ func cloneStringPtr(value *string) *string {
 	}
 	cloned := *value
 	return &cloned
-}
-
-func cloneStringAnyMap(source map[string]any) map[string]any {
-	if source == nil {
-		return nil
-	}
-	cloned := make(map[string]any, len(source))
-	for key, value := range source {
-		cloned[key] = value
-	}
-	return cloned
 }
 
 // toolResultToOutputParts converts a FunctionToolResult's Content blocks to ToolOutputPart slice.
@@ -2215,7 +2185,7 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 			parts = append(parts, schema.ToolOutputPart{
 				Type:  schema.ToolPartTypeText,
 				Text:  block.Text.Text,
-				Extra: cloneStringAnyMap(block.Extra),
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.Image != nil {
 			parts = append(parts, schema.ToolOutputPart{
@@ -2226,7 +2196,7 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 					FileID:     strPtr(block.Image.FileID),
 					MIMEType:   block.Image.MIMEType,
 				}},
-				Extra: cloneStringAnyMap(block.Extra),
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.Audio != nil {
 			parts = append(parts, schema.ToolOutputPart{
@@ -2237,7 +2207,7 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 					FileID:     strPtr(block.Audio.FileID),
 					MIMEType:   block.Audio.MIMEType,
 				}},
-				Extra: cloneStringAnyMap(block.Extra),
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.Video != nil {
 			parts = append(parts, schema.ToolOutputPart{
@@ -2248,7 +2218,7 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 					FileID:     strPtr(block.Video.FileID),
 					MIMEType:   block.Video.MIMEType,
 				}},
-				Extra: cloneStringAnyMap(block.Extra),
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.File != nil {
 			parts = append(parts, schema.ToolOutputPart{
@@ -2259,7 +2229,7 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 					FileID:     strPtr(block.File.FileID),
 					MIMEType:   block.File.MIMEType,
 				}},
-				Extra: cloneStringAnyMap(block.Extra),
+				Extra: gmap.Clone(block.Extra),
 			})
 		}
 	}
@@ -2276,7 +2246,7 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 			newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 				Type:  schema.FunctionToolResultContentBlockTypeText,
 				Text:  &schema.UserInputText{Text: part.Text},
-				Extra: cloneStringAnyMap(part.Extra),
+				Extra: gmap.Clone(part.Extra),
 			})
 		case schema.ToolPartTypeImage:
 			if part.Image != nil {
@@ -2288,7 +2258,7 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 						FileID:     ptrStr(part.Image.FileID),
 						MIMEType:   part.Image.MIMEType,
 					},
-					Extra: cloneStringAnyMap(part.Extra),
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeAudio:
@@ -2301,7 +2271,7 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 						FileID:     ptrStr(part.Audio.FileID),
 						MIMEType:   part.Audio.MIMEType,
 					},
-					Extra: cloneStringAnyMap(part.Extra),
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeVideo:
@@ -2314,7 +2284,7 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 						FileID:     ptrStr(part.Video.FileID),
 						MIMEType:   part.Video.MIMEType,
 					},
-					Extra: cloneStringAnyMap(part.Extra),
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeFile:
@@ -2327,7 +2297,7 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 						FileID:     ptrStr(part.File.FileID),
 						MIMEType:   part.File.MIMEType,
 					},
-					Extra: cloneStringAnyMap(part.Extra),
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		}

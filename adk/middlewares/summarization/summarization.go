@@ -30,6 +30,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -1062,7 +1063,7 @@ func isMarkedRuntimeGeneratedSystemMessage[M adk.MessageType](msg M) bool {
 	if !isSystemRole(msg) {
 		return false
 	}
-	extra := getMsgExtra(msg)
+	extra := internal.GetMessageExtra(msg)
 	if extra == nil {
 		return false
 	}
@@ -1264,32 +1265,6 @@ func estimateAgenticMessageTokens(msg *schema.AgenticMessage) int {
 	return estimateTokenCount(totalLen) + multimodalTokens
 }
 
-func getMsgExtra[M adk.MessageType](msg M) map[string]any {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return m.Extra
-	case *schema.AgenticMessage:
-		return m.Extra
-	default:
-		panic("unreachable")
-	}
-}
-
-func setMsgExtra[M adk.MessageType](msg M, key string, value any) {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
-	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
-	}
-}
-
 func makeSystemMsg[M adk.MessageType](text string) M {
 	var zero M
 	switch any(zero).(type) {
@@ -1316,12 +1291,12 @@ func makeUserMsg[M adk.MessageType](text string) M {
 
 func newTypedSummaryMessage[M adk.MessageType](content string) M {
 	msg := makeUserMsg[M](content)
-	setMsgExtra(msg, extraKeyContentType, string(contentTypeSummary))
+	internal.SetMessageExtra(msg, extraKeyContentType, string(contentTypeSummary))
 	return msg
 }
 
 func typedGetContentType[M adk.MessageType](msg M) summarizationContentType {
-	extra := getMsgExtra(msg)
+	extra := internal.GetMessageExtra(msg)
 	if extra == nil {
 		return ""
 	}
@@ -1333,7 +1308,7 @@ func typedGetContentType[M adk.MessageType](msg M) summarizationContentType {
 }
 
 func isInternalUserMessage[M adk.MessageType](msg M) bool {
-	return typedGetContentType(msg) == contentTypeSummary || isPreservedMessage(msg)
+	return internal.IsSystemReminder(msg) || typedGetContentType(msg) == contentTypeSummary || isPreservedMessage(msg)
 }
 
 func isPreservedMessage[M adk.MessageType](msg M) bool {

@@ -279,11 +279,6 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 
 const extraKeyRuntimeGeneratedSystemMessage = "_eino_adk_runtime_generated_system_message"
 
-// MessageExtraKeySystemReminder marks a system message as a middleware-injected
-// "system reminder" (e.g. the available-skills / available-agent-types / tool-search
-// reminders).
-const MessageExtraKeySystemReminder = "_eino_adk_system_reminder"
-
 func ensureGeneratedMessageIDs[M MessageType](messages []M) {
 	for _, msg := range messages {
 		EnsureMessageID(msg)
@@ -298,31 +293,6 @@ func isSystemRoleMessage[M MessageType](msg M) bool {
 		return m.Role == schema.AgenticRoleTypeSystem
 	}
 	return false
-}
-
-func getMessageExtra[M MessageType](msg M) map[string]any {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return m.Extra
-	case *schema.AgenticMessage:
-		return m.Extra
-	}
-	return nil
-}
-
-func setMessageExtraField[M MessageType](msg M, key string, value any) {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
-	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			m.Extra = map[string]any{}
-		}
-		m.Extra[key] = value
-	}
 }
 
 func markRuntimeGeneratedLeadingSystem[M MessageType](inputMsgs, generatedMsgs []M) {
@@ -343,11 +313,11 @@ func markRuntimeGeneratedLeadingSystem[M MessageType](inputMsgs, generatedMsgs [
 		}
 		id := GetMessageID(msg)
 		if id == "" {
-			setMessageExtraField(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+			internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
 			continue
 		}
 		if _, ok := inputIDs[id]; !ok {
-			setMessageExtraField(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+			internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
 		} else {
 			break
 		}

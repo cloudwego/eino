@@ -29,6 +29,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	adkfs "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/schema"
 )
@@ -440,41 +441,6 @@ func extractJSON(s string) string {
 	return ""
 }
 
-func getMsgExtra[M adk.MessageType](msg M) map[string]any {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		if m == nil {
-			return nil
-		}
-		return m.Extra
-	case *schema.AgenticMessage:
-		if m == nil {
-			return nil
-		}
-		return m.Extra
-	default:
-		panic("unreachable")
-	}
-}
-
-func copyAndSetMsgExtra[M adk.MessageType](msg M, key string, value any) {
-	existing := getMsgExtra(msg)
-	newExtra := make(map[string]any, len(existing)+1)
-	for k, v := range existing {
-		newExtra[k] = v
-	}
-	newExtra[key] = value
-
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		m.Extra = newExtra
-	case *schema.AgenticMessage:
-		m.Extra = newExtra
-	default:
-		panic("unreachable")
-	}
-}
-
 func makeUserMsg[M adk.MessageType](text string) M {
 	var zero M
 	switch any(zero).(type) {
@@ -612,7 +578,7 @@ func isTopicMemoryMessage[M adk.MessageType](m M) bool {
 	if isNilMessage(m) || !isUserRole(m) {
 		return false
 	}
-	if extra := getMsgExtra(m); extra != nil {
+	if extra := internal.GetMessageExtra(m); extra != nil {
 		if v, ok := extra[memoryExtraKey]; ok {
 			if isTopicMemoryExtra(v) {
 				return true
@@ -627,7 +593,7 @@ func isMemoryIndexMessage[M adk.MessageType](m M) bool {
 	if isNilMessage(m) || !isUserRole(m) {
 		return false
 	}
-	if extra := getMsgExtra(m); extra != nil {
+	if extra := internal.GetMessageExtra(m); extra != nil {
 		if v, ok := extra[memoryExtraKey]; ok {
 			if isMemoryIndexExtra(v) {
 				return true
@@ -663,13 +629,15 @@ func isMemoryIndexExtra(v any) bool {
 
 func newMemoryMessage[M adk.MessageType](content string) M {
 	msg := makeUserMsg[M](content)
-	copyAndSetMsgExtra(msg, memoryExtraKey, &memoryExtra{Type: "memory"})
+	meta := &memoryExtra{Type: "memory"}
+	internal.SetMessageExtra(msg, memoryExtraKey, meta)
 	return msg
 }
 
 func newMemoryIndexMessage[M adk.MessageType](content string) M {
 	msg := makeUserMsg[M](content)
-	copyAndSetMsgExtra(msg, memoryExtraKey, &memoryExtra{Type: "memory_index"})
+	meta := &memoryExtra{Type: "memory_index"}
+	internal.SetMessageExtra(msg, memoryExtraKey, meta)
 	return msg
 }
 
@@ -685,7 +653,7 @@ func ensureMemoryMsgUnchanged[M adk.MessageType](state *adk.TypedChatModelAgentS
 		if !isTopicMemoryMessage(m) {
 			continue
 		}
-		extra := getMsgExtra(m)
+		extra := internal.GetMessageExtra(m)
 		if userMessageTextContent(m) != expectedContent || extra == nil || extra[memoryExtraKey] == nil {
 			out.Messages[i] = newMemoryMessage[M](expectedContent)
 			changed = true
@@ -735,7 +703,7 @@ func isPathWithinMemoryDir(memDir string, filePath string) bool {
 func getWriteCursorFromMessages[M adk.MessageType](msgs []M) int {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
-		extra := getMsgExtra(m)
+		extra := internal.GetMessageExtra(m)
 		if isNilMessage(m) || extra == nil {
 			continue
 		}
@@ -774,10 +742,11 @@ func markWriteCursor[M adk.MessageType](state *adk.TypedChatModelAgentState[M], 
 		return state
 	}
 
-	copyAndSetMsgExtra(last, memoryExtraKey, &memoryExtra{
+	meta := &memoryExtra{
 		Type:   "write_cursor",
 		Cursor: cursor,
-	})
+	}
+	internal.SetMessageExtra(last, memoryExtraKey, meta)
 
 	return state
 }
