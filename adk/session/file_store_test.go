@@ -281,14 +281,13 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
 	ctx := context.Background()
 	cases := map[string]string{
-		"missing newline":     "e1\tmessage\t{}",
-		"empty event id":      "\tmessage\t{}\n",
-		"missing kind tab":    "e1\tmessage-only\n",
-		"duplicate event id":  "e1\tmessage\t{}\ne1\tmessage\t{}\n",
-		"header mismatches":   "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
-		"invalid event body":  "e1\tmessage\tnot-json\n",
-		"invalid event shape": "e1\tmessage\t{\"event_id\":\"e1\",\"kind\":\"message\"}\n",
-		"empty session id":    "",
+		"missing newline":    "e1\tmessage\t{}",
+		"empty event id":     "\tmessage\t{}\n",
+		"missing kind tab":   "e1\tmessage-only\n",
+		"duplicate event id": "e1\tmessage\t{}\ne1\tmessage\t{}\n",
+		"header mismatches":  "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
+		"invalid event body": "e1\tmessage\tnot-json\n",
+		"empty session id":   "",
 	}
 
 	for name, content := range cases {

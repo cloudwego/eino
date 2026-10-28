@@ -37,18 +37,17 @@ func SetLanguage(lang Language) error {
 	return internal.SetLanguage(lang)
 }
 
-// ReminderMessageRole represents the message role used for mid-conversation reminder
-// (system-reminder) messages injected by ADK middlewares.
+// ReminderMessageRole represents the process-wide message role used for
+// mid-conversation reminders (system-reminder messages) injected by ADK middlewares.
 //
-// Changing it via SetReminderMessageRole is not just a setting for future messages — it
-// affects BOTH:
-//   - the role of newly injected reminders (built with the current role), and
-//   - the role of reminders already in the current session: every model call re-projects
-//     the reminders found in the session's history to the current role, so a mid-session
-//     switch also rewrites reminders from earlier turns.
+// SetReminderMessageRole changes the role for all agent instances and sessions in
+// the process. It controls newly injected reminders. When the built-in reminder
+// middlewares prepare model input, they also normalize existing reminders in that
+// session's history to the current role. Changing the setting does not rewrite
+// previously persisted session events.
 //
-// The scope is one session — reminders persist across turns via MessageInserted events. A
-// new session starts fresh and does not inherit a prior session's reminders.
+// Reminder messages themselves persist within their originating session; a new
+// session does not inherit another session's reminders.
 type ReminderMessageRole = internal.ReminderMessageRole
 
 const (
@@ -59,8 +58,9 @@ const (
 	ReminderMessageRoleUser ReminderMessageRole = internal.ReminderMessageRoleUser
 )
 
-// SetReminderMessageRole sets the role for mid-conversation reminder messages injected by
-// ADK middlewares. The default is ReminderMessageRoleSystem if not explicitly set.
+// SetReminderMessageRole sets the process-wide role for mid-conversation reminders
+// injected by ADK middlewares. It affects all agent instances and sessions.
+// The default is ReminderMessageRoleSystem if not explicitly set.
 func SetReminderMessageRole(r ReminderMessageRole) error {
 	return internal.SetReminderMessageRole(r)
 }

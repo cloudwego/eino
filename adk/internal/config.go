@@ -89,8 +89,8 @@ const (
 
 var reminderMessageRole atomic.Value
 
-// SetReminderMessageRole sets the role for mid-conversation reminder messages injected by
-// ADK middlewares. The default is ReminderMessageRoleSystem if not explicitly set.
+// SetReminderMessageRole sets the process-wide role for mid-conversation reminders
+// injected by ADK middlewares. The default is ReminderMessageRoleSystem.
 func SetReminderMessageRole(r ReminderMessageRole) error {
 	if r != ReminderMessageRoleSystem &&
 		r != ReminderMessageRoleUser {
