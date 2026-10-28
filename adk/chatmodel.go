@@ -89,7 +89,7 @@ func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAg
 			if err := prepareSessionEventEnvelope(ctx, &se, gen, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
 				event.Err = err
 			}
-		} else if err := ValidateEmittedSessionEventKind(&se); err != nil {
+		} else if err := validateSessionEvent(&se); err != nil {
 			event.Err = err
 		}
 		event.SessionEventVariant.Event = &se

@@ -180,7 +180,8 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.se.EventID = uuid.NewString()
-			require.NoError(t, NormalizeSessionEventKind(tc.se))
+			tc.se.Kind = tc.kind
+			require.NoError(t, validateSessionEvent(tc.se))
 			assert.Equal(t, tc.kind, tc.se.Kind)
 
 			data, err := encodeSessionEvent(tc.se)
@@ -200,24 +201,24 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 
 func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	t.Run("empty kind rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := validateSessionEvent(&SessionEvent[*schema.Message]{
 			Extension: &SessionExtensionEvent{},
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must set kind")
+		assert.Contains(t, err.Error(), "must set non-empty Kind")
 	})
 
 	t.Run("non extension kind rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := validateSessionEvent(&SessionEvent[*schema.Message]{
 			Kind:      SessionEventKind("outcome.started"),
 			Extension: &SessionExtensionEvent{},
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must start with")
+		assert.Contains(t, err.Error(), "unknown session event kind")
 	})
 
 	t.Run("built in kind rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := validateSessionEvent(&SessionEvent[*schema.Message]{
 			Kind:      SessionEventMessage,
 			Extension: &SessionExtensionEvent{},
 		})
@@ -226,7 +227,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	})
 
 	t.Run("built in payload cannot use extension namespace", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := validateSessionEvent(&SessionEvent[*schema.Message]{
 			Kind:    SessionEventKind("x.message"),
 			Message: schema.UserMessage("hello"),
 		})
@@ -235,7 +236,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	})
 
 	t.Run("one active payload invariant", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := validateSessionEvent(&SessionEvent[*schema.Message]{
 			Kind:      SessionEventKind("x.outcome.started"),
 			Message:   schema.UserMessage("hello"),
 			Extension: &SessionExtensionEvent{},
@@ -251,7 +252,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 			Kind:      SessionEventKind("x.outcome.grading"),
 			Extension: &SessionExtensionEvent{Data: &sessionTimelineExtensionPayload{Attempt: 1}},
 		}
-		require.NoError(t, NormalizeSessionEventKind(se))
+		require.NoError(t, validateSessionEvent(se))
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
 		decoded, err := decodeSessionEvent[*schema.Message](data)
@@ -301,6 +302,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) {
 	se := &SessionEvent[*schema.Message]{
 		EventID: uuid.NewString(),
+		Kind:    SessionEventInterrupt,
 		Interrupt: &InterruptEvent{
 			Contexts: []*InterruptContext{
 				{
@@ -311,7 +313,7 @@ func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) 
 			},
 		},
 	}
-	require.NoError(t, NormalizeSessionEventKind(se))
+	require.NoError(t, validateSessionEvent(se))
 	require.Equal(t, SessionEventInterrupt, se.Kind)
 
 	data, err := encodeSessionEvent(se)
@@ -770,6 +772,7 @@ func TestTypedSendEventOutsideExecutionIsNoop(t *testing.T) {
 func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
 	se := &SessionEvent[*schema.Message]{
 		EventID: uuid.NewString(),
+		Kind:    SessionEventSpanModelRequestStart,
 		Span: &SpanEvent{
 			SpanID:    uuid.NewString(),
 			Kind:      SpanKindModel,
@@ -779,7 +782,7 @@ func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
 		},
 	}
 
-	err := NormalizeSessionEventKind(se)
+	err := validateSessionEvent(se)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one of Model or Tool")
 }
@@ -875,7 +878,7 @@ func TestModelSpanEndCarriesAssistantUsage(t *testing.T) {
 	assert.True(t, spanEnd.Span.Model.Accepted)
 }
 
-func TestSessionTimeline_EmittedKindIsDerivedBeforeSend(t *testing.T) {
+func TestSessionTimeline_EmittedKindIsPreservedBeforeSend(t *testing.T) {
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 		generator:              gen,
@@ -885,6 +888,7 @@ func TestSessionTimeline_EmittedKindIsDerivedBeforeSend(t *testing.T) {
 	sendSessionTimelineEvent(ctx, &SessionEvent[*schema.Message]{
 		EventID:   uuid.NewString(),
 		Timestamp: newEventTimestamp(),
+		Kind:      SessionEventSessionStatusRunning,
 		Lifecycle: &LifecycleEvent{
 			State: SessionRunStateRunning,
 		},
