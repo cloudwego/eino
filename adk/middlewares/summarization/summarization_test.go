@@ -29,6 +29,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
@@ -257,7 +258,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		}
 
 		runtimeSys := schema.SystemMessage("runtime generated system")
-		setMsgExtra(runtimeSys, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(runtimeSys, extraKeyRuntimeGeneratedSystemMessage, true)
 
 		state := &adk.ChatModelAgentState{
 			Messages: []adk.Message{
@@ -1287,7 +1288,7 @@ func TestSetGetContentType(t *testing.T) {
 		Content: "test",
 	}
 
-	setMsgExtra(msg, extraKeyContentType, string(contentTypeSummary))
+	internal.SetMessageExtra(msg, extraKeyContentType, string(contentTypeSummary))
 
 	ct := typedGetContentType(msg)
 	assert.Equal(t, contentTypeSummary, ct)
@@ -1300,9 +1301,9 @@ func TestSetGetExtra(t *testing.T) {
 			Content: "test",
 		}
 
-		setMsgExtra(msg, "key", "value")
+		internal.SetMessageExtra(msg, "key", "value")
 
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		v, ok := extra["key"].(string)
 		assert.True(t, ok)
 		assert.Equal(t, "value", v)
@@ -1314,7 +1315,7 @@ func TestSetGetExtra(t *testing.T) {
 			Content: "test",
 		}
 
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		assert.Nil(t, extra)
 	})
 }
@@ -1538,7 +1539,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 			Role:    schema.User,
 			Content: "summary",
 		}
-		setMsgExtra(summaryMsg, extraKeyContentType, string(contentTypeSummary))
+		internal.SetMessageExtra(summaryMsg, extraKeyContentType, string(contentTypeSummary))
 
 		msgs := []adk.Message{
 			summaryMsg,
@@ -2329,11 +2330,11 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 
 	t.Run("getMsgExtra_setMsgExtra", func(t *testing.T) {
 		msg := smakeUserMsg[M]("test")
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		assert.Nil(t, extra)
 
-		setMsgExtra(msg, "key1", "value1")
-		extra = getMsgExtra(msg)
+		internal.SetMessageExtra(msg, "key1", "value1")
+		extra = internal.GetMessageExtra(msg)
 		assert.Equal(t, "value1", extra["key1"])
 	})
 
@@ -2377,7 +2378,7 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 		assert.False(t, isPreservedMessage(summaryMsg))
 
 		skillsMsg := makeUserMsg[M]("skills content")
-		setMsgExtra(skillsMsg, extraKeyContentType, string(contentTypeSkills))
+		internal.SetMessageExtra(skillsMsg, extraKeyContentType, string(contentTypeSkills))
 		assert.True(t, isInternalUserMessage(skillsMsg))
 		assert.True(t, isPreservedMessage(skillsMsg))
 
@@ -2435,7 +2436,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 
 	foundSummary := false
 	for _, msg := range newState.Messages {
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		if extra != nil {
 			if ct, ok := extra[extraKeyContentType]; ok && ct == string(contentTypeSummary) {
 				foundSummary = true
@@ -2604,7 +2605,7 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("single marked system message stripped", func(t *testing.T) {
 		sys := schema.SystemMessage("runtime system")
-		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
 		msgs := []*schema.Message{
 			sys,
 			schema.UserMessage("hello"),
@@ -2617,9 +2618,9 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("multiple marked system messages stripped", func(t *testing.T) {
 		sys1 := schema.SystemMessage("runtime 1")
-		setMsgExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
 		sys2 := schema.SystemMessage("runtime 2")
-		setMsgExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
 		msgs := []*schema.Message{
 			sys1,
 			sys2,
@@ -2632,7 +2633,7 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("mixed marked and unmarked - only prefix stripped", func(t *testing.T) {
 		marked := schema.SystemMessage("runtime")
-		setMsgExtra(marked, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(marked, extraKeyRuntimeGeneratedSystemMessage, true)
 		unmarked := schema.SystemMessage("durable")
 		msgs := []*schema.Message{
 			marked,
@@ -2647,7 +2648,7 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("non-leading system message preserved", func(t *testing.T) {
 		sys := schema.SystemMessage("mid-system")
-		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
 		msgs := []*schema.Message{
 			schema.UserMessage("first"),
 			sys,
@@ -2661,9 +2662,9 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("only marked system messages - empty result", func(t *testing.T) {
 		sys1 := schema.SystemMessage("runtime 1")
-		setMsgExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
 		sys2 := schema.SystemMessage("runtime 2")
-		setMsgExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
 		msgs := []*schema.Message{sys1, sys2}
 		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
 		assert.Len(t, result, 0)
@@ -2671,7 +2672,7 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("agentic messages - marked stripped", func(t *testing.T) {
 		sys := schema.SystemAgenticMessage("runtime system")
-		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
 		msgs := []*schema.AgenticMessage{
 			sys,
 			schema.UserAgenticMessage("hello"),
@@ -2694,7 +2695,7 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 
 	t.Run("returns a new slice, not the original slice", func(t *testing.T) {
 		sys := schema.SystemMessage("runtime")
-		setMsgExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
 		user := schema.UserMessage("hello")
 		assistant := schema.AssistantMessage("resp", nil)
 		msgs := []*schema.Message{sys, user, assistant}
@@ -2710,7 +2711,7 @@ func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
 func TestIsMarkedRuntimeGeneratedSystemMessage(t *testing.T) {
 	t.Run("marked system message", func(t *testing.T) {
 		msg := schema.SystemMessage("test")
-		setMsgExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
 		assert.True(t, isMarkedRuntimeGeneratedSystemMessage(msg))
 	})
 
@@ -2721,7 +2722,7 @@ func TestIsMarkedRuntimeGeneratedSystemMessage(t *testing.T) {
 
 	t.Run("non-system message with marker", func(t *testing.T) {
 		msg := schema.UserMessage("test")
-		setMsgExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
 		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
 	})
 
@@ -2733,7 +2734,7 @@ func TestIsMarkedRuntimeGeneratedSystemMessage(t *testing.T) {
 
 	t.Run("marker with wrong type", func(t *testing.T) {
 		msg := schema.SystemMessage("test")
-		setMsgExtra(msg, extraKeyRuntimeGeneratedSystemMessage, "yes")
+		internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, "yes")
 		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
 	})
 }

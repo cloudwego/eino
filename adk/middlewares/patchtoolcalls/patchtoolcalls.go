@@ -24,6 +24,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -589,7 +590,7 @@ func rewriteAgenticResultBlocks(msg *schema.AgenticMessage, scope *toolResultSco
 			adk.EnsureMessageID(msg)
 			cp := *msg
 			cp.ContentBlocks = blocks
-			cp.Extra = copyStringAnyMap(msg.Extra)
+			cp.Extra = gmap.Clone(msg.Extra)
 			rewrite.message = &cp
 			rewrite.updated = true
 		}
@@ -799,21 +800,7 @@ func isOutOfRunContextError(err error) bool {
 }
 
 func markSyntheticAgenticToolResult(msg *schema.AgenticMessage) {
-	if msg.Extra == nil {
-		msg.Extra = make(map[string]any, 1)
-	}
-	msg.Extra[syntheticAgenticToolResultMarker] = true
-}
-
-func copyStringAnyMap(src map[string]any) map[string]any {
-	if src == nil {
-		return nil
-	}
-	dst := make(map[string]any, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
+	internal.SetMessageExtra(msg, syntheticAgenticToolResultMarker, true)
 }
 
 func createPatchedToolMessage(ctx context.Context, cfg Config, tc schema.ToolCall) (*schema.Message, error) {

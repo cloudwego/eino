@@ -35,6 +35,7 @@ import (
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	"github.com/cloudwego/eino/adk/internal/agenttool"
 	foregroundcoord "github.com/cloudwego/eino/adk/internal/foreground"
+	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -620,12 +621,7 @@ func (e *Executor[M]) sessionConfigForTask(taskID string) *adk.SessionConfig[M] 
 				return nil, err
 			}
 		}
-		result := make(map[string]any, len(extra)+1)
-		for key, value := range extra {
-			result[key] = value
-		}
-		result[taskIDEventExtraKey] = taskID
-		return result, nil
+		return gmap.SetCoW(extra, taskIDEventExtraKey, any(taskID)), nil
 	}
 	return config
 }
