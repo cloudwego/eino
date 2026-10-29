@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/slongfield/pyfmt"
-
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/backgroundtask"
 	backgroundlocal "github.com/cloudwego/eino/adk/backgroundtask/local"
@@ -46,11 +44,13 @@ type TypedConfig[M adk.MessageType] struct {
 
 	// ToolName overrides the name of the agent-spawning tool.
 	// When empty, defaults to "agent".
+	// The built-in prompt, description, and reminder use the effective tool name.
 	ToolName string
 
 	// ToolDescriptionGenerator overrides the default agent tool description generator.
 	// The generator receives the list of sub-agents and should return a complete tool
-	// description string. When nil, defaultAgentToolDescription is used.
+	// description string, which is used verbatim. When nil, defaultAgentToolDescription
+	// is used.
 	ToolDescriptionGenerator func(ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error)
 
 	// SystemPrompt overrides the default system prompt injected by BeforeAgent.
@@ -83,13 +83,13 @@ type FormatReminderOutput struct {
 }
 
 // BackgroundConfig enables background-task execution for the standard
-// *schema.Message agent tool.
+// *schema.Message sub-agent tool.
 type BackgroundConfig = TypedBackgroundConfig[*schema.Message]
 
-// TypedBackgroundConfig enables background-task execution for the agent tool.
+// TypedBackgroundConfig enables background-task execution for the sub-agent tool.
 //
 // When set, ALL agent runs (foreground and background) are managed by the Manager,
-// making them visible via Get/List, and the Agent tool gains a run_in_background
+// making them visible via Get/List, and the sub-agent tool gains a run_in_background
 // parameter.
 type TypedBackgroundConfig[M adk.MessageType] struct {
 	Local   *TypedLocalBackgroundConfig[M]
@@ -140,9 +140,9 @@ type TranscriptFormat[M adk.MessageType] func(
 
 // New creates a ChatModelAgentMiddleware that injects sub-agent tools into the agent context.
 //
-// The middleware injects an Agent tool for spawning sub-agents. When Background
+// The middleware injects a tool for spawning sub-agents. When Background
 // is configured, agent runs are tracked by the shared background-task Manager and
-// the Agent tool gains a run_in_background parameter. The task_output/task_stop
+// the tool gains a run_in_background parameter. The task_output/task_stop
 // control tools are NOT injected here; wire the backgroundtask control middleware
 // (adk/middlewares/backgroundtask) once, bound to the same Manager.
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
@@ -174,26 +174,25 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		toolName = agentToolName
 	}
 
-	descGen := defaultAgentToolDescription[M]
-	if config.ToolDescriptionGenerator != nil {
-		descGen = config.ToolDescriptionGenerator
+	descGen := config.ToolDescriptionGenerator
+	useDefaultDescription := descGen == nil
+	if useDefaultDescription {
+		descGen = defaultAgentToolDescription[M]
 	}
 	// The sub-agent set is fixed at construction, so the description is computed once.
 	desc, err := descGen(ctx, config.SubAgents)
 	if err != nil {
 		return nil, err
 	}
-
-	backgroundPrompt := ""
-	if config.Background != nil {
-		backgroundPrompt = internal.SelectPrompt(internal.I18nPrompts{
-			English: agentToolBackgroundPrompt,
-			Chinese: agentToolBackgroundPromptChinese,
-		})
-	}
-	desc, err = pyfmt.Fmt(desc, map[string]any{"background_prompt": backgroundPrompt})
-	if err != nil {
-		return nil, err
+	if useDefaultDescription {
+		backgroundPrompt := ""
+		if config.Background != nil {
+			backgroundPrompt = internal.SelectPrompt(internal.I18nPrompts{
+				English: agentToolBackgroundPrompt,
+				Chinese: agentToolBackgroundPromptChinese,
+			})
+		}
+		desc = renderBuiltInDescription(desc, backgroundPrompt, toolName)
 	}
 
 	// With a Manager, the tool exposes run_in_background and routes through the
@@ -227,10 +226,10 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	if config.SystemPrompt != nil {
 		instruction = *config.SystemPrompt
 	} else {
-		instruction = internal.SelectPrompt(internal.I18nPrompts{
+		instruction = renderBuiltInToolText(internal.SelectPrompt(internal.I18nPrompts{
 			English: agentToolPrompt,
 			Chinese: agentToolPromptChinese,
-		})
+		}), toolName)
 	}
 
 	entries := make([]agentTypeEntry, 0, len(config.SubAgents))
@@ -242,7 +241,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 	}
 	reminder := ""
 	if len(entries) > 0 {
-		reminder = buildAgentTypesSectionFromEntries(entries)
+		reminder = buildAgentTypesSectionForTool(entries, toolName)
 	}
 	if config.CustomFormatReminder != nil {
 		out, ferr := config.CustomFormatReminder(ctx, &FormatReminderInput[M]{SubAgents: config.SubAgents})
@@ -296,16 +295,33 @@ func (m *typedSubagentMiddleware[M]) BeforeModelRewriteState(ctx context.Context
 const agentTypesReminderExtraKey = "__eino_subagent_available_agent_types__"
 
 func buildAgentTypesSectionFromEntries(entries []agentTypeEntry) string {
+	return buildAgentTypesSectionForTool(entries, agentToolName)
+}
+
+func buildAgentTypesSectionForTool(entries []agentTypeEntry, toolName string) string {
 	preamble := internal.SelectPrompt(internal.I18nPrompts{
 		English: availableAgentTypesPreamble,
 		Chinese: availableAgentTypesPreambleChinese,
 	})
 	var builder strings.Builder
-	builder.WriteString(preamble)
+	builder.WriteString(renderBuiltInToolText(preamble, toolName))
 	for _, entry := range entries {
 		_, _ = fmt.Fprintf(&builder, "\n- %s: %s", entry.Name, entry.Description)
 	}
 	return builder.String()
+}
+
+func renderBuiltInDescription(description, backgroundPrompt, toolName string) string {
+	description = strings.ReplaceAll(
+		description,
+		"{background_prompt}",
+		renderBuiltInToolText(backgroundPrompt, toolName),
+	)
+	return renderBuiltInToolText(description, toolName)
+}
+
+func renderBuiltInToolText(text, toolName string) string {
+	return strings.ReplaceAll(text, "{tool_name}", toolName)
 }
 
 type agentTypeEntry struct {
