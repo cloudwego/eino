@@ -3275,7 +3275,7 @@ func (m *mockSessionStore) AppendEventsForSession(_ context.Context, sessionID s
 		if event == nil || event.EventID == "" {
 			return ErrInvalidEventID
 		}
-		if err := NormalizeSessionEventKind(event); err != nil {
+		if err := validateSessionEvent(event); err != nil {
 			return err
 		}
 		data, err := encodeSessionEvent(event)

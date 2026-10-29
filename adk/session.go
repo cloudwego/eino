@@ -77,6 +77,9 @@ const (
 // SessionEventStore is the provider-facing interface for a typed append-only
 // session event log. Runner coordinates process-local single-writer access for
 // a session before calling AppendEvents.
+// Runner validates each event's explicit Kind and payload before calling
+// AppendEvents. Store implementations preserve the supplied events and enforce
+// storage constraints such as EventID uniqueness.
 type SessionEventStore[M MessageType] interface {
 	LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
@@ -148,6 +151,7 @@ type SessionEvent[M MessageType] struct {
 	// occurrence time, not the SessionEventStore persistence time.
 	Timestamp time.Time `json:"timestamp,omitempty"`
 
+	// Kind must be explicitly set and match the event payload before sending or storing.
 	Kind SessionEventKind `json:"kind,omitempty"`
 
 	// Extra carries event-envelope data. Application keys share the map with
@@ -347,8 +351,7 @@ type SpanEvent struct {
 	Err    string `json:"err,omitempty"`
 
 	// Model and Tool are mutually exclusive: exactly one must be non-nil for
-	// every Span-carrying SessionEvent. ClassifySessionEvent enforces this
-	// invariant.
+	// every Span-carrying SessionEvent.
 	Model *ModelSpanMeta `json:"model,omitempty"`
 	Tool  *ToolSpanMeta  `json:"tool,omitempty"`
 }
@@ -639,7 +642,7 @@ func decodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
 }
 
 func encodeSessionEventWithSerializer[M MessageType](event *SessionEvent[M], serializer schema.Serializer) ([]byte, error) {
-	if err := NormalizeSessionEventKind(event); err != nil {
+	if err := validateSessionEvent(event); err != nil {
 		return nil, err
 	}
 	return normalizeSerializer(serializer).Marshal(event)
@@ -650,7 +653,7 @@ func decodeSessionEventWithSerializer[M MessageType](data []byte, serializer sch
 	if err := normalizeSerializer(serializer).Unmarshal(data, &event); err != nil {
 		return nil, err
 	}
-	if err := NormalizeSessionEventKind(&event); err != nil {
+	if err := validateSessionEvent(&event); err != nil {
 		return nil, err
 	}
 	return &event, nil
@@ -695,7 +698,7 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		if err != nil {
 			return nil, err
 		}
-		if err := ValidateEmittedSessionEventKind(&se); err != nil {
+		if err := validateSessionEvent(&se); err != nil {
 			return nil, err
 		}
 		return &se, nil
@@ -758,9 +761,9 @@ func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M])
 	return nil
 }
 
-// ClassifySessionEvent derives the canonical event kind from the single active
+// classifySessionEvent derives the canonical event kind from the single active
 // payload carried by event.
-func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKind, error) {
+func classifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKind, error) {
 	if event == nil {
 		return "", errors.New("nil session event")
 	}
@@ -923,40 +926,23 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 	}
 }
 
-// NormalizeSessionEventKind fills an empty Kind from the active payload and
-// rejects mismatches between Kind and payload shape.
-//
-// Unknown kinds (kinds not in the known set and not prefixed with "x.") with
-// no recognized payload are tolerated as a forward/backward compatibility
-// mechanism: legacy data (e.g. pre-refactor "turn_end") and events written by
-// newer code with kinds we don't yet understand are accepted as-is rather than
-// failing replay.
-func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
-	if event != nil && event.Kind != "" && !isKnownSessionEventKind(event.Kind) && countActiveSessionEventPayloads(event) == 0 {
-		return nil
-	}
-	kind, err := ClassifySessionEvent(event)
-	if err != nil {
-		return err
-	}
-	if event.Kind != "" && event.Kind != kind {
-		return fmt.Errorf("session event kind %q does not match payload %q", event.Kind, kind)
-	}
-	event.Kind = kind
-	return nil
-}
-
-// ValidateEmittedSessionEventKind enforces that runtime-emitted session events
-// carry an explicit Kind matching their active payload.
-func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) error {
+// validateSessionEvent requires an explicit, known Kind matching the active payload.
+func validateSessionEvent[M MessageType](event *SessionEvent[M]) error {
 	if event == nil {
 		return errors.New("nil session event")
 	}
 	if event.Kind == "" {
-		return errors.New("emitted session event must set non-empty Kind")
+		return errors.New("session event must set non-empty Kind")
 	}
-	if err := NormalizeSessionEventKind(event); err != nil {
+	if !isKnownSessionEventKind(event.Kind) {
+		return fmt.Errorf("unknown session event kind %q", event.Kind)
+	}
+	kind, err := classifySessionEvent(event)
+	if err != nil {
 		return err
+	}
+	if event.Kind != kind {
+		return fmt.Errorf("session event kind %q does not match payload %q", event.Kind, kind)
 	}
 	return nil
 }
@@ -1052,7 +1038,7 @@ func prepareSessionEventEnvelope[M MessageType](
 			return errors.New("session event draft must set non-empty Kind")
 		}
 	} else {
-		if err := NormalizeSessionEventKind(event); err != nil {
+		if err := validateSessionEvent(event); err != nil {
 			return err
 		}
 	}
@@ -1073,7 +1059,7 @@ func prepareSessionEventEnvelope[M MessageType](
 	if opts.AllowPayloadlessDraft {
 		return nil
 	}
-	return ValidateEmittedSessionEventKind(event)
+	return validateSessionEvent(event)
 }
 
 // assignSessionEventID assigns the EventID of a draft SessionEvent[M] using

@@ -92,9 +92,6 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, sessionID string, eve
 		if _, dup := idx[e.EventID]; dup {
 			return adk.ErrDuplicateEventID
 		}
-		if err := adk.NormalizeSessionEventKind(e); err != nil {
-			return err
-		}
 		data, err := s.serializer.Marshal(e)
 		if err != nil {
 			return err
@@ -229,9 +226,6 @@ func (s *InMemoryStore[M]) currentTailLocked(sessionID string) string {
 func (s *InMemoryStore[M]) decodeEvent(data []byte, eventID string, kind adk.SessionEventKind) (*adk.SessionEvent[M], error) {
 	var event adk.SessionEvent[M]
 	if err := s.serializer.Unmarshal(data, &event); err != nil {
-		return nil, err
-	}
-	if err := adk.NormalizeSessionEventKind(&event); err != nil {
 		return nil, err
 	}
 	if event.EventID != eventID || event.Kind != kind {

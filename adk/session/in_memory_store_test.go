@@ -165,9 +165,6 @@ func TestInMemoryStoreValidationReplayAndReversePagination(t *testing.T) {
 	err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{testMessageEvent("e1", "duplicate existing")})
 	require.ErrorIs(t, err, adk.ErrDuplicateEventID)
 
-	err = store.AppendEvents(ctx, "s2", []*adk.SessionEvent[*schema.Message]{{EventID: "invalid-kind"}})
-	require.Error(t, err)
-
 	reverseEmpty, err := store.LoadEvents(ctx, "empty", &adk.LoadSessionEventsRequest{Reverse: true})
 	require.NoError(t, err)
 	assert.Empty(t, reverseEmpty.Events)

@@ -86,7 +86,39 @@ func (h *localSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSession
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	kinds := make(map[SessionEventKind]bool, len(req.Kinds))
+	for _, kind := range req.Kinds {
+		kinds[kind] = true
+	}
+	pageRequest := *req
+	// Validate stored events before applying the caller's kind filter.
+	pageRequest.Kinds = nil
+	loaded := &LoadSessionEventsResult[M]{}
+	for {
+		page, err := h.store.LoadEvents(ctx, h.sessionID, &pageRequest)
+		if err != nil {
+			return nil, err
+		}
+		if page == nil {
+			return loaded, nil
+		}
+		for i, event := range page.Events {
+			if err := validateSessionEvent(event); err != nil {
+				return nil, fmt.Errorf("adk: load session %q event at index %d after %q: %w", h.sessionID, i, pageRequest.After, err)
+			}
+			if len(kinds) == 0 || kinds[event.Kind] {
+				loaded.Events = append(loaded.Events, event)
+			}
+		}
+		loaded.Next = page.Next
+		if page.Next == "" || (req.Limit > 0 && len(loaded.Events) >= req.Limit) {
+			return loaded, nil
+		}
+		pageRequest.After = page.Next
+		if req.Limit > 0 {
+			pageRequest.Limit = req.Limit - len(loaded.Events)
+		}
+	}
 }
 
 func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*SessionEvent[M]) error {
@@ -97,6 +129,11 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*Sess
 	}
 	h.mu.Unlock()
 
+	for _, event := range events {
+		if err := validateSessionEvent(event); err != nil {
+			return fmt.Errorf("adk: append session %q event: %w", h.sessionID, err)
+		}
+	}
 	if err := h.store.AppendEvents(ctx, h.sessionID, events); err != nil {
 		return err
 	}

@@ -503,7 +503,7 @@ func appendRunnerSessionControlEvent[M MessageType](
 	if state == nil || !state.enabled || state.sessionHandle == nil || event == nil {
 		return nil
 	}
-	if err := ValidateEmittedSessionEventKind(event); err != nil {
+	if err := validateSessionEvent(event); err != nil {
 		return err
 	}
 	err := state.sessionHandle.appendEvents(ctx, []*SessionEvent[M]{event})
@@ -896,7 +896,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			return nil
 		}
 		stampOwnTurnID(se)
-		if err := ValidateEmittedSessionEventKind(se); err != nil {
+		if err := validateSessionEvent(se); err != nil {
 			setPersistErr(err)
 			return err
 		}
@@ -916,7 +916,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				setPersistErr(err)
 				return false
 			}
-		} else if err := ValidateEmittedSessionEventKind(se); err != nil {
+		} else if err := validateSessionEvent(se); err != nil {
 			setPersistErr(err)
 			return false
 		}
@@ -1018,6 +1018,13 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			sessionState != nil && sessionState.enabled &&
 			event.SessionEventVariant.SessionID != "" &&
 			event.SessionEventVariant.SessionID != sessionState.sessionID
+		if foreignEvent && event.SessionEventVariant.Event != nil {
+			if err := validateSessionEvent(event.SessionEventVariant.Event); err != nil {
+				err = fmt.Errorf("adk: session %q received invalid event %q from session %q: %w", sessionState.sessionID, event.SessionEventVariant.Event.EventID, event.SessionEventVariant.SessionID, err)
+				setPersistErr(err)
+				event.Err = err
+			}
+		}
 		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
 			if event.SessionEventVariant.Event.EventID == "" {
 				gen := DefaultSessionEventIDGenerator[M]
@@ -1036,7 +1043,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 					event.Err = err
 				}
 				event.SessionEventVariant.Event = &se
-			} else if err := ValidateEmittedSessionEventKind(event.SessionEventVariant.Event); err != nil {
+			} else if err := validateSessionEvent(event.SessionEventVariant.Event); err != nil {
 				setPersistErr(err)
 				event.Err = err
 			}

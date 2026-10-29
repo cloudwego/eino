@@ -136,9 +136,6 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events 
 			return adk.ErrDuplicateEventID
 		}
 		seen[e.EventID] = struct{}{}
-		if normalizeErr := adk.NormalizeSessionEventKind(e); normalizeErr != nil {
-			return normalizeErr
-		}
 		data, marshalErr := s.serializer.Marshal(e)
 		if marshalErr != nil {
 			return marshalErr
@@ -442,9 +439,6 @@ func readFileEventAt(f *os.File, offset int64, lineNo int) (fileEvent, error) {
 func (s *FileStore[M]) decodeFileEvent(src fileEvent) (*adk.SessionEvent[M], error) {
 	var event adk.SessionEvent[M]
 	if err := s.serializer.Unmarshal(src.data, &event); err != nil {
-		return nil, err
-	}
-	if err := adk.NormalizeSessionEventKind(&event); err != nil {
 		return nil, err
 	}
 	if event.EventID != src.eventID || event.Kind != src.kind {
