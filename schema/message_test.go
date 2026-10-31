@@ -2268,3 +2268,85 @@ func TestConvToolOutputPartToMessageInputPart(t *testing.T) {
 		assert.ErrorContains(t, err, "unknown tool part type")
 	})
 }
+
+func TestConcatToolResultsRepeatedNonTextParts(t *testing.T) {
+	first := MessagePartCommon{URL: generic.PtrOf("https://example.com/first")}
+	second := MessagePartCommon{URL: generic.PtrOf("https://example.com/second")}
+	tests := []struct {
+		partType ToolPartType
+		parts    []ToolOutputPart
+	}{
+		{
+			partType: ToolPartTypeImage,
+			parts: []ToolOutputPart{
+				{Type: ToolPartTypeImage, Image: &ToolOutputImage{MessagePartCommon: first}},
+				{Type: ToolPartTypeImage, Image: &ToolOutputImage{MessagePartCommon: second}},
+			},
+		},
+		{
+			partType: ToolPartTypeAudio,
+			parts: []ToolOutputPart{
+				{Type: ToolPartTypeAudio, Audio: &ToolOutputAudio{MessagePartCommon: first}},
+				{Type: ToolPartTypeAudio, Audio: &ToolOutputAudio{MessagePartCommon: second}},
+			},
+		},
+		{
+			partType: ToolPartTypeVideo,
+			parts: []ToolOutputPart{
+				{Type: ToolPartTypeVideo, Video: &ToolOutputVideo{MessagePartCommon: first}},
+				{Type: ToolPartTypeVideo, Video: &ToolOutputVideo{MessagePartCommon: second}},
+			},
+		},
+		{
+			partType: ToolPartTypeFile,
+			parts: []ToolOutputPart{
+				{Type: ToolPartTypeFile, File: &ToolOutputFile{MessagePartCommon: first}},
+				{Type: ToolPartTypeFile, File: &ToolOutputFile{MessagePartCommon: second}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.partType), func(t *testing.T) {
+			t.Run("same_chunk", func(t *testing.T) {
+				result, err := ConcatToolResults([]*ToolResult{{Parts: tt.parts}})
+				assert.NoError(t, err)
+				assert.Equal(t, &ToolResult{Parts: tt.parts}, result)
+			})
+
+			t.Run("with_text_and_empty_chunks", func(t *testing.T) {
+				prefix := ToolOutputPart{Type: ToolPartTypeText, Text: "before"}
+				middle := ToolOutputPart{Type: ToolPartTypeText, Text: "between"}
+				suffix := ToolOutputPart{Type: ToolPartTypeText, Text: "after"}
+				chunks := []*ToolResult{
+					nil,
+					{Parts: []ToolOutputPart{prefix}},
+					{},
+					{Parts: []ToolOutputPart{tt.parts[0], middle, tt.parts[1]}},
+					{Parts: []ToolOutputPart{suffix}},
+				}
+
+				result, err := ConcatToolResults(chunks)
+				assert.NoError(t, err)
+				assert.Equal(t, &ToolResult{Parts: []ToolOutputPart{
+					prefix, tt.parts[0], middle, tt.parts[1], suffix,
+				}}, result)
+			})
+
+			t.Run("cross_chunk_conflict", func(t *testing.T) {
+				chunks := []*ToolResult{
+					nil,
+					{Parts: tt.parts},
+					{},
+					nil,
+					{Parts: tt.parts[:1]},
+				}
+
+				result, err := ConcatToolResults(chunks)
+				assert.Nil(t, result)
+				assert.EqualError(t, err, "conflicting "+string(tt.partType)+" parts found in chunk 1 and chunk 4: "+
+					"non-text modality parts cannot appear in multiple chunks")
+			})
+		})
+	}
+}
