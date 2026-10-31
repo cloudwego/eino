@@ -1016,6 +1016,46 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 	})
 }
 
+type unorderedQueryBackend struct {
+	filesystem.Backend
+}
+
+func (b *unorderedQueryBackend) GrepRaw(context.Context, *filesystem.GrepRequest) ([]filesystem.GrepMatch, error) {
+	return []filesystem.GrepMatch{
+		{Path: "/z/a.txt", Line: 2, Content: "second"},
+		{Path: "/a/b.txt", Line: 1, Content: "first"},
+	}, nil
+}
+
+func (b *unorderedQueryBackend) GlobInfo(context.Context, *filesystem.GlobInfoRequest) ([]filesystem.FileInfo, error) {
+	return []filesystem.FileInfo{
+		{Path: "/z/a.txt"},
+		{Path: "/a/b.txt"},
+	}, nil
+}
+
+func TestGrepToolSortsCustomBackendResultsByFullPath(t *testing.T) {
+	backend := &unorderedQueryBackend{}
+
+	grepTool, err := newGrepTool(backend, "", "")
+	assert.NoError(t, err)
+	result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "content"}`)
+	assert.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(result), "\n")
+	assert.Len(t, lines, 2)
+	assert.Contains(t, lines[0], "/a/b.txt")
+	assert.Contains(t, lines[1], "/z/a.txt")
+}
+
+func TestGlobToolSortsCustomBackendResultsByFullPath(t *testing.T) {
+	backend := &unorderedQueryBackend{}
+	globTool, err := newGlobTool(backend, "", "")
+	assert.NoError(t, err)
+	result, err := invokeTool(t, globTool, `{"pattern": "**/*.txt"}`)
+	assert.NoError(t, err)
+	assert.Equal(t, "/a/b.txt\n/z/a.txt", result)
+}
+
 func TestApplyPagination(t *testing.T) {
 	t.Run("basic pagination", func(t *testing.T) {
 		items := []string{"a", "b", "c", "d", "e"}
