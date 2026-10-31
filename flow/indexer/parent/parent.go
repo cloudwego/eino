@@ -120,42 +120,31 @@ func (p *parentIndexer) Store(ctx context.Context, docs []*schema.Document, opts
 	if len(subDocs) == 0 {
 		return nil, fmt.Errorf("doc transformer returned no documents")
 	}
-	currentID := subDocs[0].ID
-	startIdx := 0
-	for i, subDoc := range subDocs {
+	groups := make(map[string][]*schema.Document)
+	var parentIDs []string
+	for _, subDoc := range subDocs {
 		if subDoc.MetaData == nil {
 			subDoc.MetaData = make(map[string]any)
 		}
 		subDoc.MetaData[p.parentIDKey] = subDoc.ID
-
-		if subDoc.ID == currentID {
-			continue
+		if _, ok := groups[subDoc.ID]; !ok {
+			parentIDs = append(parentIDs, subDoc.ID)
 		}
+		groups[subDoc.ID] = append(groups[subDoc.ID], subDoc)
+	}
 
-		// generate new doc id
-		subIDs, err_ := p.subIDGenerator(ctx, subDocs[startIdx].ID, i-startIdx)
-		if err_ != nil {
-			return nil, err_
+	for _, parentID := range parentIDs {
+		group := groups[parentID]
+		subIDs, err := p.subIDGenerator(ctx, parentID, len(group))
+		if err != nil {
+			return nil, err
 		}
-		if len(subIDs) != i-startIdx {
+		if len(subIDs) != len(group) {
 			return nil, fmt.Errorf("generated sub IDs' num is unexpected")
 		}
-		for j := startIdx; j < i; j++ {
-			subDocs[j].ID = subIDs[j-startIdx]
+		for i, subDoc := range group {
+			subDoc.ID = subIDs[i]
 		}
-		startIdx = i
-		currentID = subDoc.ID
-	}
-	// generate new doc id
-	subIDs, err := p.subIDGenerator(ctx, subDocs[startIdx].ID, len(subDocs)-startIdx)
-	if err != nil {
-		return nil, err
-	}
-	if len(subIDs) != len(subDocs)-startIdx {
-		return nil, fmt.Errorf("generated sub IDs' num is unexpected")
-	}
-	for j := startIdx; j < len(subDocs); j++ {
-		subDocs[j].ID = subIDs[j-startIdx]
 	}
 
 	return p.indexer.Store(ctx, subDocs, opts...)
