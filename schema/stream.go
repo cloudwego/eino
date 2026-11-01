@@ -690,6 +690,10 @@ func WithOnEOF(fn func() (any, error)) ConvertOption {
 //	// Recv yields "val_1", "val_2", "val_3"
 func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error), opts ...ConvertOption) *StreamReader[D] {
 	c := func(a any) (D, error) {
+		if a == nil {
+			var zero T
+			return convert(zero)
+		}
 		return convert(a.(T))
 	}
 
