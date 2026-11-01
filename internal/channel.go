@@ -78,6 +78,9 @@ func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	}
 
 	val := ch.buffer[0]
+	// Release references held by the consumed slot in the backing array.
+	var zero T
+	ch.buffer[0] = zero
 	ch.buffer = ch.buffer[1:]
 	return val, true
 }
