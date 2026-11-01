@@ -17,6 +17,7 @@
 package internal
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -111,6 +112,33 @@ func TestUnboundedChan_ReceiveFromClosed(t *testing.T) {
 	val, ok = ch.Receive()
 	if ok {
 		t.Error("receive from closed, empty channel should return ok=false")
+	}
+}
+
+func TestUnboundedChan_ReceiveReleasesReferences(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closed=%t", closed), func(t *testing.T) {
+			ch := NewUnboundedChan[*int]()
+			first, second := 1, 2
+			ch.Send(&first)
+			ch.Send(&second)
+			// Keep the backing array visible to check retention deterministically,
+			// without depending on GC timing or finalizers.
+			backing := ch.buffer
+			if closed {
+				ch.Close()
+			}
+
+			for i, want := range []*int{&first, &second} {
+				got, ok := ch.Receive()
+				if !ok || got != want {
+					t.Fatalf("Receive() = (%v, %t), want (%v, true)", got, ok, want)
+				}
+				if backing[i] != nil {
+					t.Fatalf("buffer retains received value at index %d", i)
+				}
+			}
+		})
 	}
 }
 
