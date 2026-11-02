@@ -257,7 +257,7 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 		toPaths           = splitFieldPath(to)
 		originalDestValue = destValue
 		parentMap         reflect.Value
-		parentKey         string
+		parentKey         reflect.Value
 	)
 
 	for {
@@ -290,7 +290,7 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 				destValue.SetMapIndex(key, toSet)
 
 				if parentMap.IsValid() {
-					parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
+					parentMap.SetMapIndex(parentKey, destValue)
 				}
 
 				return originalDestValue
@@ -309,7 +309,7 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 			}
 
 			if parentMap.IsValid() {
-				parentMap.SetMapIndex(reflect.ValueOf(parentKey), ptrValue)
+				parentMap.SetMapIndex(parentKey, ptrValue)
 			}
 
 			return originalDestValue
@@ -328,6 +328,9 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 
 		if destValue.Kind() == reflect.Map {
 			keyValue := reflect.ValueOf(path)
+			if keyType := destValue.Type().Key(); keyType != strType {
+				keyValue = keyValue.Convert(keyType)
+			}
 			valueValue := destValue.MapIndex(keyValue)
 			if !valueValue.IsValid() {
 				valueValue = newInstanceByType(destValue.Type().Elem())
@@ -335,11 +338,11 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 			}
 
 			if parentMap.IsValid() {
-				parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
+				parentMap.SetMapIndex(parentKey, destValue)
 			}
 
 			parentMap = destValue
-			parentKey = path
+			parentKey = keyValue
 			destValue = valueValue
 
 			continue
@@ -354,9 +357,9 @@ func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 		instantiateIfNeeded(field)
 
 		if parentMap.IsValid() {
-			parentMap.SetMapIndex(reflect.ValueOf(parentKey), ptrValue)
+			parentMap.SetMapIndex(parentKey, ptrValue)
 			parentMap = reflect.Value{}
-			parentKey = ""
+			parentKey = reflect.Value{}
 		}
 
 		destValue = field

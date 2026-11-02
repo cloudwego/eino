@@ -655,6 +655,78 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 	})
 }
 
+func TestWorkflowNestedNamedMapKeys(t *testing.T) {
+	type outerKey string
+	type innerKey string
+	type value struct {
+		Text string
+	}
+	type nestedValue struct {
+		Values map[innerKey]string
+	}
+
+	t.Run("leaf map key", func(t *testing.T) {
+		testWorkflowNamedMapKeys(t, FieldPath{"inner"}, map[innerKey]string{"inner": "hello"})
+	})
+	t.Run("nested map keys", func(t *testing.T) {
+		testWorkflowNamedMapKeys(t, FieldPath{"outer", "inner"}, map[outerKey]map[innerKey]string{
+			"outer": {"inner": "hello"},
+		})
+	})
+	t.Run("map struct field", func(t *testing.T) {
+		testWorkflowNamedMapKeys(t, FieldPath{"outer", "Text"}, map[outerKey]value{
+			"outer": {Text: "hello"},
+		})
+	})
+	t.Run("map pointer field", func(t *testing.T) {
+		testWorkflowNamedMapKeys(t, FieldPath{"outer", "Text"}, map[outerKey]*value{
+			"outer": {Text: "hello"},
+		})
+	})
+	t.Run("map struct map field", func(t *testing.T) {
+		testWorkflowNamedMapKeys(t, FieldPath{"outer", "Values", "inner"}, map[outerKey]nestedValue{
+			"outer": {Values: map[innerKey]string{"inner": "hello"}},
+		})
+	})
+}
+
+func testWorkflowNamedMapKeys[T any](t *testing.T, path FieldPath, want T) {
+	t.Helper()
+	ctx := context.Background()
+	wf := NewWorkflow[string, T]()
+	wf.End().AddInput(START, ToFieldPath(path))
+	r, err := wf.Compile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("invoke", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			out, invokeErr := r.Invoke(ctx, "hello")
+			if invokeErr != nil {
+				t.Fatal(invokeErr)
+			}
+			assert.Equal(t, want, out)
+		})
+	})
+	t.Run("transform", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			stream, transformErr := r.Transform(ctx, schema.StreamReaderFromArray([]string{"hello"}))
+			if transformErr != nil {
+				t.Fatal(transformErr)
+			}
+			defer stream.Close()
+			out, recvErr := stream.Recv()
+			if recvErr != nil {
+				t.Fatal(recvErr)
+			}
+			assert.Equal(t, want, out)
+			_, recvErr = stream.Recv()
+			assert.Equal(t, io.EOF, recvErr)
+		})
+	})
+}
+
 func TestWorkflowCompile(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
