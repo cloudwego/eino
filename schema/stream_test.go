@@ -28,6 +28,68 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMergedStreamClosePropagatesBeforeNextChunk(t *testing.T) {
+	identity := func(value int) (int, error) { return value, nil }
+	for _, tc := range []struct {
+		name  string
+		merge func(*StreamReader[int]) *StreamReader[int]
+	}{
+		{name: "converted", merge: func(source *StreamReader[int]) *StreamReader[int] {
+			return MergeStreamReaders([]*StreamReader[int]{
+				StreamReaderWithConvert(source, identity), StreamReaderFromArray([]int{}),
+			})
+		}},
+		{name: "named converted", merge: func(source *StreamReader[int]) *StreamReader[int] {
+			return MergeNamedStreamReaders(map[string]*StreamReader[int]{
+				"source": StreamReaderWithConvert(source, identity), "empty": StreamReaderFromArray([]int{}),
+			})
+		}},
+		{name: "copied", merge: func(source *StreamReader[int]) *StreamReader[int] {
+			return MergeStreamReaders(source.Copy(2))
+		}},
+		{name: "nested named", merge: func(source *StreamReader[int]) *StreamReader[int] {
+			nested := MergeStreamReaders([]*StreamReader[int]{source, StreamReaderFromArray([]int{})})
+			return MergeNamedStreamReaders(map[string]*StreamReader[int]{
+				"source": nested, "empty": StreamReaderFromArray([]int{}),
+			})
+		}},
+	} {
+		for _, automatic := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/automatic=%t", tc.name, automatic), func(t *testing.T) {
+				source, writer := Pipe[int](0)
+				defer writer.Close()
+				merged := tc.merge(source)
+				if automatic {
+					merged.SetAutomaticClose()
+				}
+				merged.Close()
+				if closed := writer.Send(1, nil); !closed {
+					t.Fatal("merged Close did not propagate to the upstream writer")
+				}
+			})
+		}
+	}
+}
+
+func TestMergedConvertedStreamCloseAfterEOF(t *testing.T) {
+	source, writer := Pipe[int](1)
+	writer.Send(1, nil)
+	writer.Close()
+	converted := StreamReaderWithConvert(source, func(value int) (int, error) { return value, nil })
+	merged := MergeStreamReaders([]*StreamReader[int]{converted, StreamReaderFromArray([]int{})})
+	value, err := merged.Recv()
+	if value != 1 || err != nil {
+		t.Fatalf("Recv = (%d, %v), want (1, nil)", value, err)
+	}
+	_, err = merged.Recv()
+	if err != io.EOF {
+		t.Fatalf("final Recv = %v, want EOF", err)
+	}
+	// The forwarding goroutine and receiver may both finish. The source must
+	// still be closed only once.
+	merged.Close()
+}
+
 func TestStream(t *testing.T) {
 	s := newStream[int](0)
 
