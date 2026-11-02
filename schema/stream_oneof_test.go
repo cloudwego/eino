@@ -322,3 +322,54 @@ func TestWithOnEOF_MultipleRecvAfterEOF(t *testing.T) {
 		}
 	}
 }
+
+func TestWithOnEOF_DoesNotReadPastTerminalCallback(t *testing.T) {
+	callbackErr := errors.New("terminal validation failed")
+	for _, tc := range []struct {
+		name  string
+		value any
+		err   error
+		want  string
+	}{
+		{name: "value", value: "final", want: "final"},
+		{name: "error", err: callbackErr},
+		{name: "EOF", err: io.EOF},
+		{name: "zero value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamCalls, callbackCalls := 0, 0
+			upstream := schema.StreamReaderWithConvert(
+				schema.StreamReaderFromArray([]string{"stop", "must not be read"}),
+				func(value string) (string, error) {
+					upstreamCalls++
+					if value == "stop" {
+						return "", io.EOF
+					}
+					return value, nil
+				},
+			)
+			sr := schema.StreamReaderWithConvert(upstream,
+				func(value string) (string, error) { return value, nil },
+				schema.WithOnEOF(func() (any, error) {
+					callbackCalls++
+					return tc.value, tc.err
+				}),
+			)
+			defer sr.Close()
+
+			value, err := sr.Recv()
+			if value != tc.want || !errors.Is(err, tc.err) {
+				t.Fatalf("callback result = (%q, %v), want (%q, %v)", value, err, tc.want, tc.err)
+			}
+			for i := 0; i < 3; i++ {
+				value, err = sr.Recv()
+				if value != "" || !errors.Is(err, io.EOF) {
+					t.Fatalf("Recv after callback = (%q, %v), want zero value and EOF", value, err)
+				}
+			}
+			if callbackCalls != 1 || upstreamCalls != 1 {
+				t.Fatalf("callback calls = %d, upstream calls = %d; want one each", callbackCalls, upstreamCalls)
+			}
+		})
+	}
+}
