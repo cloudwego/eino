@@ -379,6 +379,11 @@ type stream[T any] struct {
 
 	automaticClose bool
 	closedFlag     *uint32 // 0 = not closed, 1 = closed, only used when automaticClose is set
+
+	// onRecvClose, when set, is called once the receiver side has been marked
+	// closed. Bridges created by toStream use it to forward the close signal to
+	// the reader they forward from, without waiting for another chunk to arrive.
+	onRecvClose func()
 }
 
 type streamItem[T any] struct {
@@ -433,11 +438,20 @@ func (s *stream[T]) closeRecv() {
 	if s.automaticClose {
 		if atomic.CompareAndSwapUint32(s.closedFlag, 0, 1) {
 			close(s.closed)
+			s.notifyRecvClose()
 		}
 		return
 	}
 
 	close(s.closed)
+	s.notifyRecvClose()
+}
+
+// notifyRecvClose runs the receiver-close hook, if the stream has one.
+func (s *stream[T]) notifyRecvClose() {
+	if s.onRecvClose != nil {
+		s.onRecvClose()
+	}
 }
 
 // StreamReaderFromArray creates a StreamReader from a given slice of elements.
@@ -747,6 +761,14 @@ type reader[T any] interface {
 func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 	ret := newStream[T](5)
 
+	// The reading goroutine below is blocked in r.recv(), so it cannot observe
+	// the bridge being closed until another chunk arrives. Closing the source
+	// from the receiver-close path propagates the signal immediately; the once
+	// keeps the forwarding goroutine's deferred close from closing it twice.
+	var closeSourceOnce sync.Once
+	closeSource := func() { closeSourceOnce.Do(r.close) }
+	ret.onRecvClose = closeSource
+
 	go func() {
 		defer func() {
 			panicErr := recover()
@@ -758,7 +780,7 @@ func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 			}
 
 			ret.closeSend()
-			r.close()
+			closeSource()
 		}()
 
 		for {
