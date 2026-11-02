@@ -33,6 +33,45 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestWorkflowNilWholeOutput(t *testing.T) {
+	t.Run("interface", testWorkflowNilWholeOutput[any])
+	t.Run("map", testWorkflowNilWholeOutput[map[string]string])
+	t.Run("slice", testWorkflowNilWholeOutput[[]string])
+	t.Run("pointer", testWorkflowNilWholeOutput[*string])
+}
+
+func testWorkflowNilWholeOutput[O any](t *testing.T) {
+	ctx := context.Background()
+	wf := NewWorkflow[map[string]any, O]()
+	wf.End().AddInput(START, FromField("value"))
+	r, err := wf.Compile(ctx)
+	if !assert.NoError(t, err) {
+		return
+	}
+	input := map[string]any{"value": nil}
+	t.Run("invoke", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			out, invokeErr := r.Invoke(ctx, input)
+			assert.NoError(t, invokeErr)
+			assert.Nil(t, out)
+		})
+	})
+	t.Run("transform", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			out, transformErr := r.Transform(ctx, schema.StreamReaderFromArray([]map[string]any{input}))
+			if !assert.NoError(t, transformErr) {
+				return
+			}
+			defer out.Close()
+			chunk, recvErr := out.Recv()
+			assert.NoError(t, recvErr)
+			assert.Nil(t, chunk)
+			_, recvErr = out.Recv()
+			assert.ErrorIs(t, recvErr, io.EOF)
+		})
+	})
+}
+
 func TestWorkflow(t *testing.T) {
 	ctx := context.Background()
 
