@@ -107,7 +107,12 @@ func ConcatItems[T any](items []T) (T, error) {
 		return t, err
 	}
 
-	return cv.Interface().(T), nil
+	value := cv.Interface()
+	if value == nil {
+		var zero T
+		return zero, nil
+	}
+	return value.(T), nil
 }
 
 func concatMaps(ms reflect.Value) (reflect.Value, error) {
