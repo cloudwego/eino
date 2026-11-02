@@ -29,21 +29,48 @@ import (
 // input key is reported as a type mismatch instead of panicking while the
 // error message is being built.
 func TestInputKeyedStreamNilMapValue(t *testing.T) {
-	ctx := context.Background()
+	newGraph := func(t *testing.T, node *Lambda) Runnable[map[string]any, string] {
+		g := NewGraph[map[string]any, string]()
+		require.NoError(t, g.AddLambdaNode("n", node, WithInputKey("x")))
+		require.NoError(t, g.AddEdge(START, "n"))
+		require.NoError(t, g.AddEdge("n", END))
 
-	g := NewGraph[map[string]any, string]()
-	require.NoError(t, g.AddLambdaNode("n", InvokableLambda(
-		func(_ context.Context, in string) (string, error) { return in, nil },
-	), WithInputKey("x")))
-	require.NoError(t, g.AddEdge(START, "n"))
-	require.NoError(t, g.AddEdge("n", END))
+		r, err := g.Compile(context.Background())
+		require.NoError(t, err)
+		return r
+	}
 
-	r, err := g.Compile(ctx)
-	require.NoError(t, err)
+	input := func() *schema.StreamReader[map[string]any] {
+		return schema.StreamReaderFromArray([]map[string]any{{"x": nil}})
+	}
 
-	input := schema.StreamReaderFromArray([]map[string]any{{"x": nil}})
-	_, err = r.Transform(ctx, input)
-	require.Error(t, err)
-	require.NotContains(t, err.Error(), "panic error")
-	require.Contains(t, err.Error(), "value type[<nil>] isn't expected type[string]")
+	t.Run("invokable consumer", func(t *testing.T) {
+		r := newGraph(t, InvokableLambda(
+			func(_ context.Context, in string) (string, error) { return in, nil },
+		))
+
+		_, err := r.Transform(context.Background(), input())
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "panic error")
+		require.Contains(t, err.Error(), "value type[<nil>] isn't expected type[string]")
+	})
+
+	t.Run("stream passthrough", func(t *testing.T) {
+		r := newGraph(t, TransformableLambda(
+			func(_ context.Context, in *schema.StreamReader[string]) (*schema.StreamReader[string], error) {
+				return in, nil
+			},
+		))
+
+		out, err := r.Transform(context.Background(), input())
+		require.NoError(t, err)
+		defer out.Close()
+
+		var recvErr error
+		require.NotPanics(t, func() {
+			_, recvErr = out.Recv()
+		})
+		require.Error(t, recvErr)
+		require.Contains(t, recvErr.Error(), "value type[<nil>] isn't expected type[string]")
+	})
 }
