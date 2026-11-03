@@ -18,26 +18,9 @@ package adk
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
-)
-
-// TurnLoopResumeDecision is returned by GenResume to choose what to do with a
-// pending runner checkpoint.
-type TurnLoopResumeDecision int
-
-const (
-	// TurnLoopResumeDecisionResume resumes the suspended runner checkpoint.
-	TurnLoopResumeDecisionResume TurnLoopResumeDecision = iota
-	// TurnLoopResumeDecisionStartNewTurn abandons the checkpoint and starts a
-	// fresh Runner.Run turn using GenResumeResult.Input.
-	TurnLoopResumeDecisionStartNewTurn
-)
-
-var (
-	ErrTurnLoopStopped = errors.New("adk: turn loop stopped")
 )
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
@@ -58,8 +41,7 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	//     checkpoints with no persisted ResumeItems, or persisted ResumeItems for
 	//     checkpoints that already had accepted resume items).
 	//
-	// It returns a GenResumeResult choosing whether to resume the suspended
-	// runner checkpoint or abandon it and start a fresh turn.
+	// It returns the resume parameters and the items to consume or keep buffered.
 	GenResume func(ctx context.Context, loop *TurnLoop[T, M], interruptedItems, unhandledItems, newItems []T) (*GenResumeResult[T, M], error)
 
 	// PrepareAgent returns an Agent configured to handle the consumed items.
@@ -165,13 +147,6 @@ type GenResumeResult[T any, M MessageType] struct {
 
 	// ResumeParams are optional parameters for resuming an interrupted agent.
 	ResumeParams *ResumeParams
-
-	// Decision selects whether to resume the suspended checkpoint or abandon it
-	// and start a fresh turn. The zero value resumes for compatibility.
-	Decision TurnLoopResumeDecision
-
-	// Input is required when Decision is TurnLoopResumeDecisionStartNewTurn.
-	Input *TypedAgentInput[M]
 
 	// Consumed are the items selected for this resumed turn.
 	// They are removed from the buffer and passed to PrepareAgent.

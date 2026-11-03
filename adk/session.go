@@ -189,8 +189,13 @@ type SessionEventVariant[M MessageType] struct {
 }
 
 // MessageStreamRef identifies a streaming message whose content is available
-// through Output.MessageOutput.MessageStream. The Runner uses the same EventID
-// for the corresponding SessionEvent.
+// through Output.MessageOutput.MessageStream.
+//
+// With session persistence and WithTimelineEvents enabled, the Runner may emit
+// a message or message_stream_incomplete event after the stream ends, using the
+// same EventID. Consumers should use that event to update the message content.
+// A corresponding event is not guaranteed, including when session persistence
+// is disabled or the stream yields no chunks.
 type MessageStreamRef struct {
 	EventID   string
 	TurnID    string
