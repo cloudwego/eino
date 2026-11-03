@@ -163,27 +163,52 @@ func forwardEventsAndAppendTransfer(iter *AsyncIterator[*AgentEvent],
 	sendTransferEvents(generator, toAgentNames)
 }
 
+// newIsolatedSession copies the parent session's shared map and mutex, tolerating
+// a nil parent: the wrapper's Run can be entered with a context that carries no
+// run context yet, in which case the existing nil-Values guards below still apply.
+func newIsolatedSession(parentSession *runSession) *runSession {
+	isolated := &runSession{}
+	if parentSession != nil {
+		isolated.Values = parentSession.Values
+		isolated.valuesMtx = parentSession.valuesMtx
+	}
+	if isolated.valuesMtx == nil {
+		isolated.valuesMtx = &sync.Mutex{}
+	}
+	if isolated.Values == nil {
+		isolated.Values = make(map[string]any)
+	}
+	return isolated
+}
+
+// runCtxRootInput and runCtxRunPath read the parent run context's fields,
+// tolerating a nil parent the same way getRunCtx callers elsewhere do.
+func runCtxRootInput(parentRunCtx *runContext) *AgentInput {
+	if parentRunCtx == nil {
+		return nil
+	}
+	return parentRunCtx.RootInput
+}
+
+func runCtxRunPath(parentRunCtx *runContext) []RunStep {
+	if parentRunCtx == nil {
+		return nil
+	}
+	return parentRunCtx.RunPath
+}
+
 func runFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, input *AgentInput,
 	toAgentNames []string, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	parentSession := getSession(ctx)
 	parentRunCtx := getRunCtx(ctx)
 
-	isolatedSession := &runSession{
-		Values:    parentSession.Values,
-		valuesMtx: parentSession.valuesMtx,
-	}
-	if isolatedSession.valuesMtx == nil {
-		isolatedSession.valuesMtx = &sync.Mutex{}
-	}
-	if isolatedSession.Values == nil {
-		isolatedSession.Values = make(map[string]any)
-	}
+	isolatedSession := newIsolatedSession(parentSession)
 
 	ctx = setRunCtx(ctx, &runContext{
 		Session:   isolatedSession,
-		RootInput: parentRunCtx.RootInput,
-		RunPath:   parentRunCtx.RunPath,
+		RootInput: runCtxRootInput(parentRunCtx),
+		RunPath:   runCtxRunPath(parentRunCtx),
 	})
 
 	iter := fa.Run(ctx, input, options...)
@@ -205,22 +230,13 @@ func resumeFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, info
 	parentSession := getSession(ctx)
 	parentRunCtx := getRunCtx(ctx)
 
-	isolatedSession := &runSession{
-		Values:    parentSession.Values,
-		valuesMtx: parentSession.valuesMtx,
-		Events:    state.EventList,
-	}
-	if isolatedSession.valuesMtx == nil {
-		isolatedSession.valuesMtx = &sync.Mutex{}
-	}
-	if isolatedSession.Values == nil {
-		isolatedSession.Values = make(map[string]any)
-	}
+	isolatedSession := newIsolatedSession(parentSession)
+	isolatedSession.Events = state.EventList
 
 	ctx = setRunCtx(ctx, &runContext{
 		Session:   isolatedSession,
-		RootInput: parentRunCtx.RootInput,
-		RunPath:   parentRunCtx.RunPath,
+		RootInput: runCtxRootInput(parentRunCtx),
+		RunPath:   runCtxRunPath(parentRunCtx),
 	})
 
 	iter := fa.Resume(ctx, info, opts...)
