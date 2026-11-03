@@ -37,27 +37,44 @@ type mergeOptions struct {
 
 // the caller should ensure len(vs) > 1
 func mergeValues(vs []any, opts *mergeOptions) (any, error) {
-	v0 := reflect.ValueOf(vs[0])
-	t0 := v0.Type()
+	// A nil interface value carries no reflect type, and reflect.Value.Type
+	// panics on the zero Value it produces. Locate the first value that does
+	// carry a type to select the merge strategy; nil values are forwarded to
+	// the merge function as typed zeros for it to interpret.
+	primaryIdx := -1
+	for i, v := range vs {
+		if v != nil {
+			primaryIdx = i
+			break
+		}
+	}
+	if primaryIdx < 0 {
+		return nil, fmt.Errorf("(mergeValues) unsupported values: " +
+			"every fan-in value is nil, so no merge type can be determined")
+	}
+	t0 := reflect.TypeOf(vs[primaryIdx])
 
 	if fn := internal.GetMergeFunc(t0); fn != nil {
 		return fn(vs)
 	}
 
 	// merge StreamReaders
-	if s, ok := vs[0].(streamReader); ok {
+	if s, ok := vs[primaryIdx].(streamReader); ok {
 		t := s.getChunkType()
 		if internal.GetMergeFunc(t) == nil {
 			return nil, fmt.Errorf("(mergeValues | stream type)"+
 				" unsupported chunk type: %v", t)
 		}
 
-		ss := make([]streamReader, len(vs)-1)
-		for i := 0; i < len(ss); i++ {
-			sri, ok_ := vs[i+1].(streamReader)
+		ss := make([]streamReader, 0, len(vs)-1)
+		for i, v := range vs {
+			if i == primaryIdx {
+				continue
+			}
+			sri, ok_ := v.(streamReader)
 			if !ok_ {
 				return nil, fmt.Errorf("(mergeStream) unexpected type. "+
-					"expect: %v, got: %v", t0, reflect.TypeOf(vs[i]))
+					"expect: %v, got: %v", t0, reflect.TypeOf(v))
 			}
 
 			if st := sri.getChunkType(); st != t {
@@ -65,7 +82,7 @@ func mergeValues(vs []any, opts *mergeOptions) (any, error) {
 					"expect: %v, got: %v", t, st)
 			}
 
-			ss[i] = sri
+			ss = append(ss, sri)
 		}
 
 		if opts != nil && opts.streamMergeWithSourceEOF {
