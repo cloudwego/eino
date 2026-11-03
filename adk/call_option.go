@@ -64,10 +64,11 @@ func withEnableSessionEvents() AgentRunOption {
 	})
 }
 
-// WithTimelineEvents exposes the first-class SessionEvent timeline envelope on
-// live AgentEvents. Without this option, lifecycle/span/observation-only events
-// are still produced for managed-session persistence but are stripped from the
-// user-facing stream.
+// WithTimelineEvents exposes SessionEventVariant on live AgentEvents.
+// Without this option, SessionEventVariant and standalone session events, such as
+// model/tool call start and end events and session running/idle status events,
+// are hidden from the caller. They are still collected for managed-session
+// persistence. Ordinary agent output remains visible.
 func WithTimelineEvents() AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.enableTimelineEvents = true

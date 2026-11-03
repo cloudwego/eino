@@ -31,10 +31,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-const (
-	defaultLoadPageSize          = 100
-	defaultSessionAcquireTimeout = 5 * time.Second
-)
+const defaultLoadPageSize = 100
 
 // ErrInvalidEventID is returned by AppendEvents when a SessionEvent has an
 // empty EventID. Protocol-level: persisters MUST NOT retry.
@@ -75,8 +72,9 @@ const (
 )
 
 // SessionEventStore is the provider-facing interface for a typed append-only
-// session event log. Runner coordinates process-local single-writer access for
-// a session before calling AppendEvents.
+// session event log. Concurrent Run, Resume, or Rollback operations using the
+// same store instance and session are rejected with ErrSessionBusy. Callers must
+// serialize operations across store instances and processes.
 type SessionEventStore[M MessageType] interface {
 	LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
 	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
@@ -190,11 +188,9 @@ type SessionEventVariant[M MessageType] struct {
 	MessageStreamRef *MessageStreamRef
 }
 
-// MessageStreamRef carries the durable identity metadata for a streaming
-// message whose content remains in Output.MessageOutput.MessageStream. It is
-// carried by SessionEventVariant for live events. The runner later reuses this
-// identity when it drains its persistence copy of the stream and writes the
-// resulting message as a SessionEvent.
+// MessageStreamRef identifies a streaming message whose content is available
+// through Output.MessageOutput.MessageStream. The Runner uses the same EventID
+// for the corresponding SessionEvent.
 type MessageStreamRef struct {
 	EventID   string
 	TurnID    string
@@ -538,7 +534,7 @@ func DefaultSessionEventIDGenerator[M MessageType](_ context.Context, _ *Session
 	return uuid.NewString(), nil
 }
 
-// SessionConfig tunes managed-session admission and event identity.
+// SessionConfig customizes session event identity and metadata.
 type SessionConfig[M MessageType] struct {
 	// EventIDGenerator decides the EventID of every SessionEvent[M] produced
 	// by the runner / wrappers. The generator sees the fully-populated draft
@@ -555,12 +551,6 @@ type SessionConfig[M MessageType] struct {
 	// EventIDGenerator runs, so custom generators can inspect the final Extra map.
 	// Returned keys prefixed with "_eino_" are rejected.
 	EventExtraProvider SessionEventExtraProvider[M]
-	// SessionAcquireTimeout bounds how long Runner may wait to acquire any session
-	// handle before failing the current Run/Resume/Rollback attempt.
-	//
-	// It applies to the process-local admission path used by the built-in
-	// session store.
-	SessionAcquireTimeout time.Duration
 }
 
 type reconstructedSessionState[M MessageType] struct {
@@ -972,8 +962,7 @@ func isSessionDurableBoundaryKind(kind SessionEventKind) bool {
 
 func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[M] {
 	normalized := SessionConfig[M]{
-		EventIDGenerator:      DefaultSessionEventIDGenerator[M],
-		SessionAcquireTimeout: defaultSessionAcquireTimeout,
+		EventIDGenerator: DefaultSessionEventIDGenerator[M],
 	}
 	if cfg == nil {
 		return normalized
@@ -983,9 +972,6 @@ func normalizeSessionConfig[M MessageType](cfg *SessionConfig[M]) SessionConfig[
 	}
 	if cfg.EventExtraProvider != nil {
 		normalized.EventExtraProvider = cfg.EventExtraProvider
-	}
-	if cfg.SessionAcquireTimeout > 0 {
-		normalized.SessionAcquireTimeout = cfg.SessionAcquireTimeout
 	}
 	return normalized
 }
@@ -1499,7 +1485,7 @@ func RollbackSession[M MessageType](
 			opt(&cfg)
 		}
 	}
-	openResult, err := openRunnerSession[M](ctx, store, sessionID, normalizeSessionConfig[M](nil))
+	openResult, err := openRunnerSession[M](ctx, store, sessionID)
 	if err != nil {
 		return err
 	}

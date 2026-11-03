@@ -1112,9 +1112,6 @@ func TestAttack_RunClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
 		SessionID:       sessionID,
 		SessionStore:    service,
 		CheckPointStore: store,
-		SessionConfig: &SessionConfig[*schema.Message]{
-			SessionAcquireTimeout: time.Millisecond,
-		},
 	})
 	iter := runner.Query(ctx, "first")
 	var firstErrs []error
@@ -1835,20 +1832,16 @@ func TestSessionPersister_DirectAppendNoRetryAndLatch(t *testing.T) {
 func TestNormalizeSessionConfig_Variations(t *testing.T) {
 	cfg := normalizeSessionConfig[*schema.Message](nil)
 	assert.NotNil(t, cfg.EventIDGenerator)
-	assert.Equal(t, defaultSessionAcquireTimeout, cfg.SessionAcquireTimeout)
 
 	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{})
 	assert.NotNil(t, cfg.EventIDGenerator)
-	assert.Equal(t, defaultSessionAcquireTimeout, cfg.SessionAcquireTimeout)
 
 	customGen := func(context.Context, *SessionEvent[*schema.Message]) (string, error) {
 		return "custom-id", nil
 	}
 	cfg = normalizeSessionConfig(&SessionConfig[*schema.Message]{
-		EventIDGenerator:      customGen,
-		SessionAcquireTimeout: 200 * time.Millisecond,
+		EventIDGenerator: customGen,
 	})
-	assert.Equal(t, 200*time.Millisecond, cfg.SessionAcquireTimeout)
 	id, err := cfg.EventIDGenerator(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "custom-id", id)
