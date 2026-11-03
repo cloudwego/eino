@@ -25,7 +25,6 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sync"
-	"time"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
@@ -269,52 +268,12 @@ func isNilCheckPointStore(store CheckPointStore) bool {
 	}
 }
 
-func openRunnerSession[M MessageType](
-	ctx context.Context,
-	store SessionEventStore[M],
-	sessionID string,
-	cfg SessionConfig[M],
-) (*openSessionResult[M], error) {
+func openRunnerSession[M MessageType](ctx context.Context, store SessionEventStore[M], sessionID string) (*openSessionResult[M], error) {
 	if store == nil {
 		return nil, errors.New("adk: session store is nil")
 	}
-	deadline := timeNow().Add(cfg.SessionAcquireTimeout)
-	var lastErr error
-	for {
-		result, err := openLocalSession(ctx, store, &openSessionRequest{
-			sessionID: sessionID,
-		})
-		if err == nil {
-			if result == nil || result.handle == nil {
-				return nil, ErrSessionBusy
-			}
-			return result, nil
-		}
-		if !errors.Is(err, ErrSessionBusy) {
-			return nil, err
-		}
-		lastErr = err
-		if !timeNow().Before(deadline) {
-			return nil, lastErr
-		}
-		wait := 10 * time.Millisecond
-		var busy *SessionBusyError
-		if errors.As(err, &busy) && busy.ExpiresAt.After(timeNow()) {
-			until := time.Until(busy.ExpiresAt)
-			if until < wait {
-				wait = until
-			}
-		}
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-}
-
-func timeNow() time.Time {
-	return time.Now()
+	req := &openSessionRequest{sessionID: sessionID}
+	return openLocalSession(ctx, store, req)
 }
 
 func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
@@ -338,7 +297,7 @@ func prepareRunnerSessionRun[M MessageType]( //nolint:revive // argument-limit
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &reconstructedSessionState[M]{}
-	openResult, err := openRunnerSession[M](ctx, sessionStore, sessionID, state.sessionConfig)
+	openResult, err := openRunnerSession[M](ctx, sessionStore, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +366,7 @@ func prepareRunnerSessionResume[M MessageType]( //nolint:revive // argument-limi
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
 	state.latestState = &reconstructedSessionState[M]{}
-	openResult, err := openRunnerSession[M](ctx, sessionStore, sessionID, state.sessionConfig)
+	openResult, err := openRunnerSession[M](ctx, sessionStore, sessionID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1159,7 +1118,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 								setPersistErr(err)
 								continue
 							}
-							_ = persistSessionEvent(draft)
+							sendTimelineEvent(draft)
 						}
 						continue
 					}
@@ -1178,7 +1137,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 						setPersistErr(err)
 						continue
 					}
-					_ = persistSessionEvent(draft)
+					sendTimelineEvent(draft)
 				} else {
 					// Non-streaming events go through toSessionEvent directly.
 					se, err := toSessionEventCheckedWithGenerator(event)
