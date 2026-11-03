@@ -995,7 +995,14 @@ func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx co
 	}
 }
 
+func recoverToolCallPanic(task *toolCallTask) {
+	if panicErr := recover(); panicErr != nil {
+		task.err = safe.NewPanicErr(panicErr, debug.Stack())
+	}
+}
+
 func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...tool.Option) {
+	defer recoverToolCallPanic(task)
 	if task.executed {
 		return
 	}
@@ -1038,6 +1045,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 }
 
 func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...tool.Option) {
+	defer recoverToolCallPanic(task)
 	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
 		Name:      task.name,
 		Type:      task.meta.componentImplType,
@@ -1105,12 +1113,6 @@ func parallelRunToolCall(ctx context.Context,
 		wg.Add(1)
 		go func(ctx_ context.Context, t *toolCallTask, opts ...tool.Option) {
 			defer wg.Done()
-			defer func() {
-				panicErr := recover()
-				if panicErr != nil {
-					t.err = safe.NewPanicErr(panicErr, debug.Stack())
-				}
-			}()
 			run(ctx_, t, opts...)
 		}(ctx, &tasks[i], opts...)
 	}
