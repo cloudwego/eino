@@ -595,7 +595,8 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 
 		msg, streamErr := typedConsumeStream(checkCopy)
 
-		if errors.Is(streamErr, ErrStreamCanceled) {
+		_, interrupted := compose.ExtractInterruptInfo(streamErr)
+		if interrupted || errors.Is(streamErr, ErrStreamCanceled) {
 			signal.ch <- retryVerdict{WillRetry: false}
 			returnCopy.Close()
 			return nil, streamErr
@@ -740,6 +741,9 @@ func (r *typedRetryModelWrapper[M]) streamLegacy(ctx context.Context, input []M,
 		}
 
 		returnCopy.Close()
+		if _, ok := compose.ExtractInterruptInfo(streamErr); ok {
+			return nil, streamErr
+		}
 		if errors.Is(streamErr, ErrStreamCanceled) {
 			return nil, streamErr
 		}
