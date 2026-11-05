@@ -34,10 +34,33 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// SearchFunc searches for dynamic tools and returns their names in ranked order.
+// The query is trimmed and maxResults is positive (default: 5). The middleware
+// ignores unknown names, removes duplicates while preserving rank, and applies
+// maxResults after filtering. Returning no names produces an empty search result;
+// errors are propagated without falling back to keyword search.
+//
+// The function is shared across agent runs. Implementations must respect ctx
+// cancellation and be safe for concurrent calls. Resources remain caller-owned.
+// Applications can capture their search index in the function; the middleware
+// resolves names only against Config.DynamicTools. Custom query syntax, including
+// the meaning of a leading "+", is defined by the implementation.
+type SearchFunc func(ctx context.Context, query string, maxResults int) ([]string, error)
+
 // Config is the configuration for the tool search middleware.
 type Config struct {
 	// DynamicTools is a list of tools that can be dynamically searched and loaded by the agent.
 	DynamicTools []tool.BaseTool
+
+	// SearchFunc optionally replaces keyword search for requests executed by this
+	// middleware. When nil, the built-in keyword search is used. Queries beginning
+	// with "select:" always use the existing exact-name selection and bypass this
+	// function, including its result limit. SearchFunc controls ranking, not access:
+	// every registered dynamic tool remains available through exact-name selection.
+	//
+	// This also applies to client-executed search when UseModelToolSearch is true,
+	// but cannot customize retrieval performed entirely on the model provider's server.
+	SearchFunc SearchFunc
 
 	// UseModelToolSearch indicates whether the ChatModel natively supports tool search.
 	//
@@ -125,6 +148,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.Typed
 		dynamicToolInfos:   dynamicToolInfos,
 		useModelToolSearch: config.UseModelToolSearch,
 		reminder:           reminder,
+		searchFunc:         config.SearchFunc,
 	}, nil
 }
 
@@ -162,6 +186,7 @@ type typedMiddleware[M adk.MessageType] struct {
 	dynamicToolInfos   []*schema.ToolInfo
 	useModelToolSearch bool
 	reminder           string
+	searchFunc         SearchFunc
 }
 
 func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedChatModelAgentContext[M]) (context.Context, *adk.TypedChatModelAgentContext[M], error) {
@@ -172,10 +197,10 @@ func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.TypedC
 	nRunCtx := *runCtx
 	nRunCtx.Tools = make([]tool.BaseTool, len(runCtx.Tools), len(runCtx.Tools)+1+len(m.dynamicTools))
 	copy(nRunCtx.Tools, runCtx.Tools)
-	nRunCtx.Tools = append(nRunCtx.Tools, newToolSearchTool(m.mapOfDynamicTools, m.useModelToolSearch))
+	nRunCtx.Tools = append(nRunCtx.Tools, newToolSearchTool(m.mapOfDynamicTools, m.useModelToolSearch, m.searchFunc))
 	nRunCtx.Tools = append(nRunCtx.Tools, m.dynamicTools...)
 	if m.useModelToolSearch {
-		nRunCtx.ToolSearchTool = getToolSearchToolInfo()
+		nRunCtx.ToolSearchTool = getToolSearchToolInfo(m.searchFunc != nil)
 	}
 
 	return ctx, &nRunCtx, nil
@@ -316,11 +341,11 @@ func extractToolSearchResult[M adk.MessageType](msg M, toolName string) (string,
 	return "", false
 }
 
-func newToolSearchTool(tools map[string]*schema.ToolInfo, useModelToolSearch bool) tool.BaseTool {
+func newToolSearchTool(tools map[string]*schema.ToolInfo, useModelToolSearch bool, searchFunc SearchFunc) tool.BaseTool {
 	if useModelToolSearch {
-		return &modelToolSearchTool{tools: tools}
+		return &modelToolSearchTool{tools: tools, searchFunc: searchFunc}
 	}
-	return &toolSearchTool{tools: tools}
+	return &toolSearchTool{tools: tools, searchFunc: searchFunc}
 }
 
 type toolSearchArgs struct {
@@ -333,15 +358,16 @@ type toolSearchResult struct {
 }
 
 type toolSearchTool struct {
-	tools map[string]*schema.ToolInfo
+	tools      map[string]*schema.ToolInfo
+	searchFunc SearchFunc
 }
 
 func (t *toolSearchTool) Info(_ context.Context) (*schema.ToolInfo, error) {
-	return getToolSearchToolInfo(), nil
+	return getToolSearchToolInfo(t.searchFunc != nil), nil
 }
 
-func (t *toolSearchTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	matches, err := search(argumentsInJSON, t.tools)
+func (t *toolSearchTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	matches, err := search(ctx, argumentsInJSON, t.tools, t.searchFunc)
 	if err != nil {
 		return "", err
 	}
@@ -357,15 +383,16 @@ func (t *toolSearchTool) InvokableRun(_ context.Context, argumentsInJSON string,
 }
 
 type modelToolSearchTool struct {
-	tools map[string]*schema.ToolInfo
+	tools      map[string]*schema.ToolInfo
+	searchFunc SearchFunc
 }
 
 func (t *modelToolSearchTool) Info(_ context.Context) (*schema.ToolInfo, error) {
-	return getToolSearchToolInfo(), nil
+	return getToolSearchToolInfo(t.searchFunc != nil), nil
 }
 
-func (t *modelToolSearchTool) InvokableRun(_ context.Context, argumentsInJSON *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
-	ret, err := search(argumentsInJSON.Text, t.tools)
+func (t *modelToolSearchTool) InvokableRun(ctx context.Context, argumentsInJSON *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+	ret, err := search(ctx, argumentsInJSON.Text, t.tools, t.searchFunc)
 	if err != nil {
 		return nil, err
 	}
@@ -385,17 +412,26 @@ const (
 	defaultMaxResults  = 5
 )
 
-func getToolSearchToolInfo() *schema.ToolInfo {
+func getToolSearchToolInfo(customSearch bool) *schema.ToolInfo {
+	description := internal.SelectPrompt(internal.I18nPrompts{
+		English: toolDescription,
+		Chinese: toolDescriptionChinese,
+	})
+	queryDescription := "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or keywords to search."
+	if customSearch {
+		description = internal.SelectPrompt(internal.I18nPrompts{
+			English: customSearchDescription,
+			Chinese: customSearchDescriptionChinese,
+		})
+		queryDescription = "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or a search query."
+	}
 	return &schema.ToolInfo{
 		Name: toolSearchToolName,
-		Desc: internal.SelectPrompt(internal.I18nPrompts{
-			English: toolDescription,
-			Chinese: toolDescriptionChinese,
-		}),
+		Desc: description,
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"query": {
 				Type:     schema.String,
-				Desc:     "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or keywords to search.",
+				Desc:     queryDescription,
 				Required: true,
 			},
 			"max_results": {
@@ -407,7 +443,7 @@ func getToolSearchToolInfo() *schema.ToolInfo {
 	}
 }
 
-func search(argumentsInJSON string, tools map[string]*schema.ToolInfo) ([]*schema.ToolInfo, error) {
+func search(ctx context.Context, argumentsInJSON string, tools map[string]*schema.ToolInfo, searchFunc SearchFunc) ([]*schema.ToolInfo, error) {
 	var args toolSearchArgs
 	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tool search arguments: %w", err)
@@ -440,6 +476,8 @@ func search(argumentsInJSON string, tools map[string]*schema.ToolInfo) ([]*schem
 				matches = append(matches, name)
 			}
 		}
+	} else if searchFunc != nil {
+		return customSearch(ctx, query, maxResults, tools, searchFunc)
 	} else {
 		matches = keywordSearch(query, maxResults, tools)
 	}
@@ -453,6 +491,34 @@ func search(argumentsInJSON string, tools map[string]*schema.ToolInfo) ([]*schem
 		ret = append(ret, ti)
 	}
 	return ret, nil
+}
+
+func customSearch(ctx context.Context, query string, maxResults int, tools map[string]*schema.ToolInfo, searchFunc SearchFunc) ([]*schema.ToolInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	names, err := searchFunc(ctx, query, maxResults)
+	if err != nil {
+		return nil, fmt.Errorf("tool search failed: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	matches := make([]*schema.ToolInfo, 0, intMin(maxResults, len(names)))
+	seen := make(map[string]bool, cap(matches))
+	for _, name := range names {
+		info, ok := tools[name]
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		matches = append(matches, info)
+		if len(matches) == maxResults {
+			break
+		}
+	}
+	return matches, nil
 }
 
 func intMax(a, b int) int {

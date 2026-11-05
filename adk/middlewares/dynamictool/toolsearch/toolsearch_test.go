@@ -152,7 +152,7 @@ func TestSearch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := search(tt.json, tools)
+			got, err := search(context.Background(), tt.json, tools, nil)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -513,7 +513,7 @@ func TestBeforeModelRewriteState_Mode1_Initialization(t *testing.T) {
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 			ti("dynamic_tool_a", "Dynamic tool A"),
 			ti("dynamic_tool_b", "Dynamic tool B"),
 		},
@@ -556,7 +556,7 @@ func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 		},
 	}
 
@@ -596,7 +596,7 @@ func TestBeforeModelRewriteState_Mode2_DeferredToolInfos(t *testing.T) {
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 			ti("dynamic_tool_a", "Dynamic tool A"),
 			ti("dynamic_tool_b", "Dynamic tool B"),
 		},
@@ -651,7 +651,7 @@ func TestBeforeModelRewriteState_Mode1_MultipleToolSearchResultsAcrossTurns(t *t
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 		},
 	}
 
@@ -690,7 +690,7 @@ func TestBeforeModelRewriteState_Mode1_MalformedJSONInToolSearchResult(t *testin
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 		},
 	}
 
@@ -728,7 +728,7 @@ func TestBeforeModelRewriteState_Mode1_NonExistentToolInForwardSelection(t *test
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 		},
 	}
 
@@ -793,7 +793,7 @@ func TestBeforeModelRewriteState_Mode1_DoubleInitWithoutComposeContext(t *testin
 		},
 		ToolInfos: []*schema.ToolInfo{
 			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
+			getToolSearchToolInfo(false),
 			ti("dynamic_tool_a", "Dynamic tool A"),
 		},
 	}
@@ -833,7 +833,7 @@ func TestBeforeModelRewriteState_ToolInfosSliceMutation(t *testing.T) {
 	// Create ToolInfos with excess capacity so append could mutate in place.
 	originalToolInfos := make([]*schema.ToolInfo, 2, 10)
 	originalToolInfos[0] = ti("static_tool", "Static tool")
-	originalToolInfos[1] = getToolSearchToolInfo()
+	originalToolInfos[1] = getToolSearchToolInfo(false)
 
 	originalLen := len(originalToolInfos)
 
