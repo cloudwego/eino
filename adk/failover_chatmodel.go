@@ -22,12 +22,30 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+// failoverStreamResult publishes the consumed stream's terminal error to its event
+// copy, including concatenation errors that are only detected after clean EOF.
+type failoverStreamResult struct {
+	done chan struct{}
+	err  error
+	once sync.Once
+}
+
+func (r *failoverStreamResult) complete(err error) {
+	r.once.Do(func() {
+		r.err = err
+		close(r.done)
+	})
+}
+
+type failoverStreamResultKey struct{}
 
 type failoverCurrentModelKey struct{}
 
@@ -323,8 +341,12 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, lastSuccess)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
+		result := &failoverStreamResult{done: make(chan struct{})}
+		defer result.complete(errors.New("failover stream processing did not complete"))
+		modelCtx = context.WithValue(modelCtx, failoverStreamResultKey{}, result)
 		stream, err := f.inner.Stream(modelCtx, input, opts...)
 		if err != nil {
+			result.complete(err)
 			lastErr = err
 			var zero M
 			if !f.needFailover(ctx, zero, err) {
@@ -337,6 +359,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 			returnCopy := copies[1]
 
 			outMsg, streamErr := typedConsumeStream(checkCopy)
+			result.complete(streamErr)
 			if streamErr != nil {
 				lastOutputMessage = outMsg
 				lastErr = streamErr
@@ -378,8 +401,12 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 
 		modelCtx := typedSetFailoverCurrentModel(ctx, currentModel)
 		modelCtx = withFailoverHasMoreAttempts(modelCtx, attempt < f.config.MaxRetries)
+		result := &failoverStreamResult{done: make(chan struct{})}
+		defer result.complete(errors.New("failover stream processing did not complete"))
+		modelCtx = context.WithValue(modelCtx, failoverStreamResultKey{}, result)
 		stream, err := f.inner.Stream(modelCtx, currentInput, opts...)
 		if err != nil {
+			result.complete(err)
 			lastErr = err
 			var zero M
 			lastOutputMessage = zero
@@ -415,6 +442,7 @@ func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ..
 		returnCopy := copies[1]
 
 		outMsg, streamErr := typedConsumeStream(checkCopy)
+		result.complete(streamErr)
 		if streamErr != nil {
 			lastOutputMessage = outMsg
 			lastErr = streamErr
@@ -458,11 +486,11 @@ func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error
 			}
 			chunks = append(chunks, chunk)
 		}
-		msg, _ := schema.ConcatMessages(chunks)
+		msg, concatErr := schema.ConcatMessages(chunks)
 		if msg != nil {
-			return any(msg).(M), nil
+			return any(msg).(M), concatErr
 		}
-		return zero, nil
+		return zero, concatErr
 	case *schema.StreamReader[*schema.AgenticMessage]:
 		chunks := make([]*schema.AgenticMessage, 0)
 		for {
@@ -479,11 +507,11 @@ func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error
 			}
 			chunks = append(chunks, chunk)
 		}
-		msg, _ := schema.ConcatAgenticMessages(chunks)
+		msg, concatErr := schema.ConcatAgenticMessages(chunks)
 		if msg != nil {
-			return any(msg).(M), nil
+			return any(msg).(M), concatErr
 		}
-		return zero, nil
+		return zero, concatErr
 	default:
 		panic("unreachable: unknown MessageType")
 	}

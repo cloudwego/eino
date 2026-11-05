@@ -380,6 +380,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	}
 
 	var opts []schema.ConvertOption
+	var onEOF func() (any, error)
 
 	var retryWrapper func(error) error
 	if m.modelRetryConfig != nil {
@@ -414,7 +415,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 					return err
 				})
 
-				opts = append(opts, schema.WithOnEOF(func() (any, error) {
+				onEOF = func() (any, error) {
 					verdict := readVerdict()
 					if verdict.WillRetry {
 						return nil, &WillRetryError{
@@ -425,7 +426,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 						}
 					}
 					return nil, io.EOF
-				}))
+				}
 			}
 		} else {
 			retryWrapper = wrapWithCancelGuard(
@@ -440,6 +441,32 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	// meaning stream errors should be wrapped as WillRetryError so the flow layer
 	// skips them. On the final attempt it is false, so the error propagates normally.
 	failoverHasMore := getFailoverHasMoreAttempts(ctx)
+
+	if result, _ := ctx.Value(failoverStreamResultKey{}).(*failoverStreamResult); result != nil {
+		retryEOF := onEOF
+		onEOF = func() (any, error) {
+			if retryEOF != nil {
+				if value, err := retryEOF(); err != io.EOF {
+					return value, err
+				}
+			}
+			select {
+			case <-result.done:
+				if result.err != nil {
+					if hasFailover && failoverHasMore && !errors.Is(result.err, ErrStreamCanceled) {
+						return nil, &WillRetryError{ErrStr: result.err.Error(), err: result.err}
+					}
+					return nil, result.err
+				}
+				return nil, io.EOF
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	if onEOF != nil {
+		opts = append(opts, schema.WithOnEOF(onEOF))
+	}
 
 	if retryWrapper == nil && !(hasFailover && failoverHasMore) {
 		return opts
