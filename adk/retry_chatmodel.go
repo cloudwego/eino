@@ -474,6 +474,9 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 }
 
 func (r *typedRetryModelWrapper[M]) contextAwareSleep(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if delay <= 0 {
 		return nil
 	}
