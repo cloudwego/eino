@@ -135,6 +135,98 @@ func testStreamConcatErrors[M MessageType](t *testing.T, broken []M, healthy M, 
 		}
 	})
 	for _, cached := range []bool{true, false} {
+		for _, readError := range []bool{false, true} {
+			t.Run(fmt.Sprintf("retry_declines_failover_accepts/cached=%v/read_error=%v", cached, readError), func(t *testing.T) {
+				primary := &concatErrorModel[M]{first: broken, healthy: healthy}
+				backup := &concatErrorModel[M]{first: []M{healthy}, healthy: healthy}
+				wantErr := concatErr
+				if readError {
+					wantErr = errors.New("provider read failed")
+					primary.terminal = wantErr
+				}
+				iter, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+				defer generator.Close()
+				execCtx := &typedChatModelAgentExecCtx[M]{generator: generator}
+				if cached {
+					execCtx.failoverLastSuccessModel = primary
+				}
+				ctx := withTypedChatModelAgentExecCtx(context.Background(), execCtx)
+				config := &ModelFailoverConfig[M]{MaxRetries: 2,
+					ShouldFailover: func(_ context.Context, _ M, err error) bool {
+						require.EqualError(t, err, wantErr.Error())
+						return true
+					},
+					GetFailoverModel: func(_ context.Context, input *FailoverContext[M]) (model.BaseModel[M], []M, error) {
+						if !cached && input.FailoverAttempt == 1 {
+							return primary, nil, nil
+						}
+						return backup, nil, nil
+					},
+				}
+				retryConfig := &TypedModelRetryConfig[M]{ShouldRetry: func(context.Context, *TypedRetryContext[M]) *TypedRetryDecision[M] { return &TypedRetryDecision[M]{} }}
+				inner := &typedEventSenderModel[M]{inner: &typedFailoverProxyModel[M]{}, modelFailoverConfig: config, modelRetryConfig: retryConfig}
+				retry := newTypedRetryModelWrapper[M](inner, retryConfig)
+				sr, err := newFailoverModelWrapper[M](retry, config).Stream(ctx, nil)
+				require.NoError(t, err)
+				got, err := concatReturnedStream(sr, concat)
+				require.NoError(t, err)
+				require.Equal(t, healthy, got)
+				require.Equal(t, 1, primary.calls)
+				require.Equal(t, 1, backup.calls)
+				event, ok := iter.Next()
+				require.True(t, ok)
+				_, eventErr := concatReturnedStream(event.Output.MessageOutput.MessageStream, concat)
+				var willRetry *WillRetryError
+				require.ErrorAs(t, eventErr, &willRetry, "outer failover approved recovery despite inner retry declining")
+				event, ok = iter.Next()
+				require.True(t, ok)
+				got, eventErr = concatReturnedStream(event.Output.MessageOutput.MessageStream, concat)
+				require.NoError(t, eventErr)
+				require.Equal(t, healthy, got)
+			})
+		}
+	}
+	for _, cached := range []bool{true, false} {
+		for _, readError := range []bool{false, true} {
+			t.Run(fmt.Sprintf("declined/cached=%v/read_error=%v", cached, readError), func(t *testing.T) {
+				primary := &concatErrorModel[M]{first: broken, healthy: healthy}
+				wantErr := concatErr
+				if readError {
+					wantErr = errors.New("provider read failed")
+					primary.terminal = wantErr
+				}
+				iter, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+				defer generator.Close()
+				execCtx := &typedChatModelAgentExecCtx[M]{generator: generator}
+				if cached {
+					execCtx.failoverLastSuccessModel = primary
+				}
+				ctx := withTypedChatModelAgentExecCtx(context.Background(), execCtx)
+				config := &ModelFailoverConfig[M]{MaxRetries: 2,
+					ShouldFailover: func(_ context.Context, _ M, err error) bool {
+						require.EqualError(t, err, wantErr.Error())
+						return false
+					},
+					GetFailoverModel: func(_ context.Context, input *FailoverContext[M]) (model.BaseModel[M], []M, error) {
+						require.False(t, cached)
+						require.Equal(t, uint(1), input.FailoverAttempt)
+						return primary, nil, nil
+					},
+				}
+				inner := &typedEventSenderModel[M]{inner: &typedFailoverProxyModel[M]{}, modelFailoverConfig: config}
+				_, err := newFailoverModelWrapper[M](inner, config).Stream(ctx, nil)
+				require.EqualError(t, err, wantErr.Error())
+				require.Equal(t, 1, primary.calls)
+				event, ok := iter.Next()
+				require.True(t, ok)
+				_, eventErr := concatReturnedStream(event.Output.MessageOutput.MessageStream, concat)
+				require.EqualError(t, eventErr, wantErr.Error())
+				var willRetry *WillRetryError
+				require.False(t, errors.As(eventErr, &willRetry), "declined failure must remain terminal to history consumers")
+			})
+		}
+	}
+	for _, cached := range []bool{true, false} {
 		for _, backupFails := range []bool{false, true} {
 			t.Run(fmt.Sprintf("failover/cached=%v/backup_fails=%v", cached, backupFails), func(t *testing.T) {
 				primary := &concatErrorModel[M]{first: broken, healthy: healthy}
@@ -202,9 +294,10 @@ func testStreamConcatErrors[M MessageType](t *testing.T, broken []M, healthy M, 
 }
 
 type concatErrorModel[M MessageType] struct {
-	first   []M
-	healthy M
-	calls   int
+	first    []M
+	healthy  M
+	calls    int
+	terminal error
 }
 
 func (m *concatErrorModel[M]) Generate(context.Context, []M, ...model.Option) (M, error) {
@@ -214,6 +307,16 @@ func (m *concatErrorModel[M]) Generate(context.Context, []M, ...model.Option) (M
 
 func (m *concatErrorModel[M]) Stream(context.Context, []M, ...model.Option) (*schema.StreamReader[M], error) {
 	m.calls++
+	if m.terminal != nil {
+		sr, sw := schema.Pipe[M](len(m.first) + 1)
+		for _, chunk := range m.first {
+			sw.Send(chunk, nil)
+		}
+		var zero M
+		sw.Send(zero, m.terminal)
+		sw.Close()
+		return sr, nil
+	}
 	if m.calls == 1 {
 		return schema.StreamReaderFromArray(m.first), nil
 	}

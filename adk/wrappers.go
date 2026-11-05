@@ -438,8 +438,8 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	hasFailover := m.modelFailoverConfig != nil
 	// failoverHasMoreAttempts is set by failoverModelWrapper before each inner call.
 	// It is true when additional failover attempts remain after the current one,
-	// meaning stream errors should be wrapped as WillRetryError so the flow layer
-	// skips them. On the final attempt it is false, so the error propagates normally.
+	// providing a capacity check. The consumed result also records whether policy
+	// actually approved another attempt; declined errors must remain terminal.
 	failoverHasMore := getFailoverHasMoreAttempts(ctx)
 
 	if result, _ := ctx.Value(failoverStreamResultKey{}).(*failoverStreamResult); result != nil {
@@ -453,7 +453,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 			select {
 			case <-result.done:
 				if result.err != nil {
-					if hasFailover && failoverHasMore && !errors.Is(result.err, ErrStreamCanceled) {
+					if result.willRetry {
 						return nil, &WillRetryError{ErrStr: result.err.Error(), err: result.err}
 					}
 					return nil, result.err
@@ -481,11 +481,21 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 			}
 		}
 		// Retry won't handle this error (either exhausted or not configured), but
-		// failover still has more attempts remaining. Wrap it as WillRetryError so
-		// the flow layer skips this event from the failed attempt.
+		// failover still has capacity. When a runtime verdict is available, only
+		// skip this event if policy actually approved another attempt.
 		if hasFailover && failoverHasMore {
 			if errors.Is(err, ErrStreamCanceled) {
 				return err
+			}
+			if result, _ := ctx.Value(failoverStreamResultKey{}).(*failoverStreamResult); result != nil {
+				select {
+				case <-result.done:
+					if !result.willRetry {
+						return err
+					}
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 			return &WillRetryError{ErrStr: err.Error(), err: err}
 		}
