@@ -474,6 +474,12 @@ func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx co
 }
 
 func (r *typedRetryModelWrapper[M]) contextAwareSleep(ctx context.Context, delay time.Duration) error {
+	// Check cancellation before the zero-delay fast path: a zero-backoff retry
+	// still needs to observe caller cancellation, or a cancelled run keeps
+	// dispatching model calls until MaxRetries is exhausted (issue #1448).
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if delay <= 0 {
 		return nil
 	}
