@@ -871,3 +871,40 @@ func TestChainWithNodeKey(t *testing.T) {
 	})
 
 }
+
+func TestChainInvokeStreamedToolResultWithRepeatedImages(t *testing.T) {
+	firstURL := "https://example.com/first.png"
+	secondURL := "https://example.com/second.png"
+	images := []schema.ToolOutputPart{
+		{
+			Type: schema.ToolPartTypeImage,
+			Image: &schema.ToolOutputImage{
+				MessagePartCommon: schema.MessagePartCommon{URL: &firstURL},
+			},
+		},
+		{
+			Type: schema.ToolPartTypeImage,
+			Image: &schema.ToolOutputImage{
+				MessagePartCommon: schema.MessagePartCommon{URL: &secondURL},
+			},
+		},
+	}
+	text := schema.ToolOutputPart{Type: schema.ToolPartTypeText, Text: "two images"}
+	chain := NewChain[string, *schema.ToolResult]()
+	chain.AppendLambda(StreamableLambda(func(ctx context.Context, input string) (*schema.StreamReader[*schema.ToolResult], error) {
+		return schema.StreamReaderFromArray([]*schema.ToolResult{
+			{Parts: images},
+			{Parts: []schema.ToolOutputPart{text}},
+		}), nil
+	}))
+
+	ctx := context.Background()
+	runnable, err := chain.Compile(ctx)
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	result, err := runnable.Invoke(ctx, "")
+	assert.NoError(t, err)
+	assert.Equal(t, &schema.ToolResult{Parts: []schema.ToolOutputPart{images[0], images[1], text}}, result)
+}

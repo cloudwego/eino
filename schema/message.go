@@ -1206,8 +1206,8 @@ func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
 
 		for _, part := range chunk.Parts {
 			if part.Type != ToolPartTypeText {
-				// This restricts non-text modal content only appear once.
-				if prevChunkIdx, exists := nonTextPartTypes[part.Type]; exists {
+				// Each non-text part type may only appear in one chunk.
+				if prevChunkIdx, exists := nonTextPartTypes[part.Type]; exists && prevChunkIdx != chunkIdx {
 					return nil, fmt.Errorf("conflicting %s parts found in chunk %d and chunk %d: "+
 						"non-text modality parts cannot appear in multiple chunks", part.Type, prevChunkIdx, chunkIdx)
 				}
