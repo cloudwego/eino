@@ -423,6 +423,8 @@ type TypedAgentEvent[M MessageType] struct {
 
 	Action *AgentAction
 
+	// Err reports an execution error. Agents must report errors that terminate
+	// execution here so the Runner can recognize the failure.
 	Err error
 
 	// SessionEventVariant is the first-class live session envelope. Event carries

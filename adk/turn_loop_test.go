@@ -2020,8 +2020,6 @@ func TestTurnLoop_RestoredPendingResumeDistinguishesLegacyAndAcceptedResumeItems
 			GenInput:     genInputConsumeAll,
 			GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, resumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 				return &GenResumeResult[string, *schema.Message]{
-					Decision: TurnLoopResumeDecisionStartNewTurn,
-					Input:    &AgentInput{},
 					Consumed: interruptedItems,
 				}, nil
 			},
@@ -2043,9 +2041,8 @@ func TestTurnLoop_RestoredPendingResumeDistinguishesLegacyAndAcceptedResumeItems
 		loop.config.GenResume = func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, gotUnhandledItems, gotResumeItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			unhandledItems = append([]string{}, gotUnhandledItems...)
 			resumeItems = append([]string{}, gotResumeItems...)
+			loop.Stop()
 			return &GenResumeResult[string, *schema.Message]{
-				Decision: TurnLoopResumeDecisionStartNewTurn,
-				Input:    &AgentInput{},
 				Consumed: interruptedItems,
 			}, nil
 		}
