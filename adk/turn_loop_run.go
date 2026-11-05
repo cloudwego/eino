@@ -92,48 +92,26 @@ func (l *TurnLoop[T, M]) planTurn(
 	if resumeResult.RunCtx != nil {
 		turnCtx = resumeResult.RunCtx
 	}
-	switch resumeResult.Decision {
-	case TurnLoopResumeDecisionResume:
-		if resumeResult.Input != nil {
-			return nil, errors.New("GenResumeResult.Input must be nil when resuming")
-		}
-		if len(pr.resumeBytes) == 0 {
-			return nil, errors.New("resume checkpoint is empty")
-		}
-		resumeCheckpointID := pr.resumeCheckpointID
-		if resumeCheckpointID == "" {
-			resumeCheckpointID = bridgeCheckpointID
-		}
-		return &turnPlan[T, M]{
-			turnCtx:   turnCtx,
-			remaining: resumeResult.Remaining,
-			spec: &turnRunSpec[T, M]{
-				runCtx:             resumeResult.RunCtx,
-				runOpts:            resumeResult.RunOpts,
-				resumeParams:       resumeResult.ResumeParams,
-				isResume:           true,
-				consumed:           resumeResult.Consumed,
-				resumeCheckpointID: resumeCheckpointID,
-				resumeBytes:        pr.resumeBytes,
-			},
-		}, nil
-	case TurnLoopResumeDecisionStartNewTurn:
-		if resumeResult.Input == nil {
-			return nil, errors.New("GenResumeResult.Input is nil for fresh turn")
-		}
-		return &turnPlan[T, M]{
-			turnCtx:   turnCtx,
-			remaining: resumeResult.Remaining,
-			spec: &turnRunSpec[T, M]{
-				runCtx:   resumeResult.RunCtx,
-				input:    resumeResult.Input,
-				runOpts:  resumeResult.RunOpts,
-				consumed: resumeResult.Consumed,
-			},
-		}, nil
-	default:
-		return nil, fmt.Errorf("unknown GenResume decision: %d", resumeResult.Decision)
+	if len(pr.resumeBytes) == 0 {
+		return nil, errors.New("resume checkpoint is empty")
 	}
+	resumeCheckpointID := pr.resumeCheckpointID
+	if resumeCheckpointID == "" {
+		resumeCheckpointID = bridgeCheckpointID
+	}
+	return &turnPlan[T, M]{
+		turnCtx:   turnCtx,
+		remaining: resumeResult.Remaining,
+		spec: &turnRunSpec[T, M]{
+			runCtx:             resumeResult.RunCtx,
+			runOpts:            resumeResult.RunOpts,
+			resumeParams:       resumeResult.ResumeParams,
+			isResume:           true,
+			consumed:           resumeResult.Consumed,
+			resumeCheckpointID: resumeCheckpointID,
+			resumeBytes:        pr.resumeBytes,
+		},
+	}, nil
 }
 
 type turnExecution[T any, M MessageType] struct {
@@ -277,7 +255,7 @@ func (l *TurnLoop[T, M]) planTurnOrAbort(ctx context.Context, next *turnLoopNext
 
 	if l.stopCtrl.isCommitted() {
 		l.abortPlanningTurn()
-		if next.isResume && plan.spec.isResume {
+		if next.isResume {
 			l.restorePendingResume(next.pr)
 			return nil, true
 		}
@@ -297,16 +275,13 @@ func (l *TurnLoop[T, M]) prepareAgentOrAbort(
 	if err != nil {
 		l.abortPlanningTurn()
 		l.pushBackAfterAbort(next)
-		if next.isResume && !plan.spec.isResume {
-			l.loadCheckpointID = ""
-		}
 		l.runErr = err
 		return nil, true
 	}
 
 	if l.stopCtrl.isCommitted() {
 		l.abortPlanningTurn()
-		if next.isResume && plan.spec.isResume {
+		if next.isResume {
 			l.restorePendingResume(next.pr)
 			return nil, true
 		}
@@ -359,18 +334,6 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		agent, exit := l.prepareAgentOrAbort(ctx, plan, next)
 		if exit {
 			return
-		}
-
-		if next.isResume && !plan.spec.isResume && l.loadCheckpointID != "" {
-			checkpointID := l.loadCheckpointID
-			if err := l.deleteTurnLoopCheckpoint(ctx, checkpointID); err != nil {
-				l.abortPlanningTurn()
-				l.pushBackAfterAbort(next)
-				l.loadCheckpointID = ""
-				l.runErr = fmt.Errorf("failed to abandon checkpoint[%s] before fresh turn: %w", checkpointID, err)
-				return
-			}
-			l.loadCheckpointID = ""
 		}
 
 		l.buffer.PushFront(plan.remaining)
