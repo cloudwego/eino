@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package dream
+package automemory
 
 import (
 	"context"
@@ -29,13 +29,11 @@ import (
 )
 
 type grepSessionHistoryInput struct {
-	Query string `json:"query" jsonschema:"required,description=the narrow term to search in current session history"`
+	Query string `json:"query" jsonschema:"required,description=the narrow term to search in allowed session histories"`
 	Limit int    `json:"limit,omitempty" jsonschema:"description=maximum number of matching lines to return"`
 }
 
 type dreamRunMeta struct {
-	MemoryDirectory  string
-	SessionID        string
 	SearchSessionIDs []string
 }
 
@@ -134,13 +132,7 @@ func resolveSearchSessionIDs(meta *dreamRunMeta) []string {
 	if meta == nil {
 		return nil
 	}
-	if len(meta.SearchSessionIDs) > 0 {
-		return meta.SearchSessionIDs
-	}
-	if meta.SessionID != "" {
-		return []string{meta.SessionID}
-	}
-	return nil
+	return meta.SearchSessionIDs
 }
 
 func appendMatchingSessionHistoryLines(dst []string, sessionID, message, query string, limit int, includeSessionPrefix bool) []string {

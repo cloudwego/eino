@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -107,6 +108,8 @@ func requireWriteCursor(t *testing.T, msgs []*schema.Message, cursor int) {
 		meta, ok := msg.Extra[memoryExtraKey].(*memoryExtra)
 		if ok && meta != nil && meta.Type == "write_cursor" {
 			require.EqualValues(t, cursor, meta.Cursor)
+			require.NotEmpty(t, meta.AnchorMessageID)
+			require.Equal(t, adk.GetMessageID(msg), meta.AnchorMessageID)
 			return
 		}
 	}
@@ -131,6 +134,65 @@ func countTopicMemoryMessages(msgs []*schema.Message) int {
 		}
 	}
 	return count
+}
+
+func TestWriteCursorUsesStableMessageAnchor(t *testing.T) {
+	t.Run("message", func(t *testing.T) {
+		original := []*schema.Message{
+			schema.UserMessage("one"),
+			schema.AssistantMessage("ack", nil),
+		}
+		state := markWriteCursor(&adk.ChatModelAgentState{Messages: original}, len(original))
+		requireWriteCursor(t, state.Messages, len(original))
+
+		messages := append([]*schema.Message{schema.SystemMessage("inserted")}, state.Messages...)
+		require.Equal(t, 3, getWriteCursorFromMessages(messages))
+	})
+
+	t.Run("agentic message", func(t *testing.T) {
+		original := []*schema.AgenticMessage{
+			schema.UserAgenticMessage("one"),
+			{
+				Role: schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.AssistantGenText{Text: "ack"}),
+				},
+			},
+		}
+		state := markWriteCursor(&adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: original}, len(original))
+
+		messages := append([]*schema.AgenticMessage{schema.SystemAgenticMessage("inserted")}, state.Messages...)
+		require.Equal(t, 3, getWriteCursorFromMessages(messages))
+	})
+}
+
+func TestWriteCursorRebasesWhenAnchorIsReplaced(t *testing.T) {
+	messages := []*schema.Message{
+		schema.UserMessage("one"),
+		schema.AssistantMessage("ack", nil),
+	}
+	state := markWriteCursor(&adk.ChatModelAgentState{Messages: messages}, len(messages))
+	meta := state.Messages[1].Extra[memoryExtraKey]
+
+	replacement := schema.AssistantMessage("summary", nil)
+	adk.EnsureMessageID(replacement)
+	replacement.Extra[memoryExtraKey] = meta
+
+	require.Zero(t, getWriteCursorFromMessages([]*schema.Message{replacement}))
+}
+
+func TestWriteCursorMigratesLegacyMarkerFromPhysicalPosition(t *testing.T) {
+	messages := []*schema.Message{
+		schema.UserMessage("one"),
+		schema.AssistantMessage("ack", nil),
+		schema.UserMessage("two"),
+	}
+	internal.SetMessageExtra(messages[1], memoryExtraKey, &memoryExtra{
+		Type:   "write_cursor",
+		Cursor: 99,
+	})
+
+	require.Equal(t, 2, getWriteCursorFromMessages(messages))
 }
 
 func TestMiddleware_IndexInjection_Empty(t *testing.T) {
@@ -279,14 +341,11 @@ func TestNew_DoesNotMutateConfig(t *testing.T) {
 	_, err = New(ctx, cfgExplicitNested)
 	require.NoError(t, err)
 	require.Empty(t, cfgExplicitNested.Read.Mode)
-	require.Nil(t, cfgExplicitNested.Read.Model)
 	require.Nil(t, cfgExplicitNested.Read.Index)
 	require.Nil(t, cfgExplicitNested.Read.TopicSelection)
 	require.Empty(t, cfgExplicitNested.Write.Mode)
-	require.Nil(t, cfgExplicitNested.Write.Model)
 	require.Zero(t, cfgExplicitNested.Write.MaxTurns)
 	require.Nil(t, cfgExplicitNested.Coordination.Coordinator)
-	require.Zero(t, cfgExplicitNested.Coordination.LockTTL)
 }
 
 func TestMiddleware_TopicSelection_InsertsMemoryMessage(t *testing.T) {
@@ -742,7 +801,7 @@ func TestMiddleware_TopicSelection_SmallCandidateSetUsesModel(t *testing.T) {
 		Model:           model,
 		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
-			TopicSelection: &TopicSelectionConfig{
+			TopicSelection: &TopicSelectionConfig[*schema.Message]{
 				TopK: 5,
 			},
 		},
@@ -780,7 +839,7 @@ func TestMiddleware_TopicSelection_DisabledSkipsSelectionAndReminder(t *testing.
 				Model:           selModel,
 				Read: &ReadConfig[*schema.Message]{
 					Mode: mode,
-					TopicSelection: &TopicSelectionConfig{
+					TopicSelection: &TopicSelectionConfig[*schema.Message]{
 						Enable: boolPtr(false),
 						TopK:   1,
 					},
@@ -825,9 +884,9 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 		},
 		OnError: func(ctx context.Context, stage ErrorStage, err error) {
 			onErrStages = append(onErrStages, stage)
@@ -877,6 +936,148 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryFiles(t *testing.T) {
 	require.Contains(t, extModel.promptSeen[0], "Path: /mem")
 }
 
+func TestMiddleware_AfterAgent_ReextractsAfterTranscriptRebase(t *testing.T) {
+	tests := []struct {
+		name        string
+		first       []*schema.Message
+		replacement []*schema.Message
+	}{
+		{
+			name: "legacy cursor would exceed replacement",
+			first: []*schema.Message{
+				schema.UserMessage("one"),
+				schema.AssistantMessage("ack one", nil),
+				schema.UserMessage("two"),
+				schema.AssistantMessage("ack two", nil),
+			},
+			replacement: []*schema.Message{
+				schema.UserMessage("summary"),
+				schema.AssistantMessage("new answer", nil),
+			},
+		},
+		{
+			name: "legacy cursor would remain in range",
+			first: []*schema.Message{
+				schema.UserMessage("one"),
+				schema.AssistantMessage("ack one", nil),
+			},
+			replacement: []*schema.Message{
+				schema.UserMessage("summary"),
+				schema.AssistantMessage("summary answer", nil),
+				schema.UserMessage("new question"),
+				schema.AssistantMessage("new answer", nil),
+			},
+		},
+		{
+			name: "historical memory write does not suppress rebased extraction",
+			first: []*schema.Message{
+				schema.UserMessage("old information"),
+				schema.AssistantMessage("ack old information", nil),
+			},
+			replacement: []*schema.Message{
+				schema.UserMessage("summary"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:   "historical-memory-write",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "write_file",
+							Arguments: `{"file_path":"/mem/old.md","content":"old information"}`,
+						},
+					},
+				}),
+				schema.ToolMessage("ok", "historical-memory-write", schema.WithToolName("write_file")),
+				schema.UserMessage("new information"),
+				schema.AssistantMessage("ack new information", nil),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := runnerSessionCtx(t, "rebase")
+			b := NewInMemoryBackend()
+			b.put("/mem/MEMORY.md", "", time.Now())
+			extModel := &extractionModel{}
+			coord := &CoordinationConfig[*schema.Message]{
+				Coordinator: NewLocalCoordinator(),
+			}
+
+			mw, err := New(ctx, &Config[*schema.Message]{
+				MemoryDirectory: "/mem",
+				MemoryBackend:   b,
+				Model:           extModel,
+				Write: &WriteConfig[*schema.Message]{
+					Mode: WriteModeSync,
+				},
+				Coordination: coord,
+			})
+			require.NoError(t, err)
+
+			_, err = mw.AfterAgent(ctx, &adk.ChatModelAgentState{Messages: tt.first})
+			require.NoError(t, err)
+			callsBeforeRebase := atomic.LoadInt32(&extModel.generateCallings)
+
+			progress, ok, err := getCoordinatorWriteProgress(ctx, coord.Coordinator, "/mem::rebase")
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.Equal(t, coordinatorWriteProgressVersion, progress.Version)
+			require.Equal(t, adk.GetMessageID(tt.first[len(tt.first)-1]), progress.AnchorMessageID)
+
+			_, err = mw.AfterAgent(ctx, &adk.ChatModelAgentState{Messages: tt.replacement})
+			require.NoError(t, err)
+			require.Greater(t, atomic.LoadInt32(&extModel.generateCallings), callsBeforeRebase)
+
+			extModel.mu.Lock()
+			lastPrompt := extModel.promptSeen[len(extModel.promptSeen)-1]
+			extModel.mu.Unlock()
+			require.Contains(t, lastPrompt, fmt.Sprintf("~%d messages", countModelVisibleMessages(tt.replacement)))
+		})
+	}
+}
+
+func TestMiddleware_AfterAgent_LegacyRemoteCursorReextractsAndMigrates(t *testing.T) {
+	ctx := runnerSessionCtx(t, "legacy-cursor")
+	b := NewInMemoryBackend()
+	b.put("/mem/MEMORY.md", "", time.Now())
+	extModel := &extractionModel{}
+	coord := &CoordinationConfig[*schema.Message]{
+		Coordinator: NewLocalCoordinator(),
+	}
+	coordKey := "/mem::legacy-cursor"
+	require.NoError(t, setCoordinatorCursor(ctx, coord.Coordinator, coordKey, 99))
+
+	mw, err := New(ctx, &Config[*schema.Message]{
+		MemoryDirectory: "/mem",
+		MemoryBackend:   b,
+		Model:           extModel,
+		Write: &WriteConfig[*schema.Message]{
+			Mode: WriteModeSync,
+		},
+		Coordination: coord,
+	})
+	require.NoError(t, err)
+
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{
+		schema.UserMessage("remember after upgrade"),
+		schema.AssistantMessage("ack", nil),
+	}}
+	_, err = mw.AfterAgent(ctx, state)
+	require.NoError(t, err)
+	require.Greater(t, atomic.LoadInt32(&extModel.generateCallings), int32(0))
+
+	progress, ok, err := getCoordinatorWriteProgress(ctx, coord.Coordinator, coordKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, coordinatorWriteProgressVersion, progress.Version)
+	require.Equal(t, adk.GetMessageID(state.Messages[len(state.Messages)-1]), progress.AnchorMessageID)
+
+	cursor, ok, err := getCoordinatorCursor(ctx, coord.Coordinator, coordKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, len(state.Messages), cursor)
+}
+
 func TestMiddleware_AfterAgent_SyncExtraction_CustomWriteInstruction(t *testing.T) {
 	ctx := context.Background()
 	b := NewInMemoryBackend()
@@ -887,9 +1088,9 @@ func TestMiddleware_AfterAgent_SyncExtraction_CustomWriteInstruction(t *testing.
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 			GenInstruction: func(ctx context.Context) (string, error) {
 				return "## Custom save policy\n- Save only explicitly requested memories\n- Prefer updating user_preferences.md for user preference changes\n- Do not save temporary debugging notes", nil
 			},
@@ -935,9 +1136,9 @@ func TestMiddleware_AfterAgent_SyncExtractionWritesMemoryDirectory(t *testing.T)
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 		},
 		OnError: func(ctx context.Context, stage ErrorStage, err error) {
 			onErrStages = append(onErrStages, stage)
@@ -980,9 +1181,9 @@ func TestMiddleware_AfterAgent_SyncExtraction_IteratorHandlerCanDrain(t *testing
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 			HandleExtractionIterator: func(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent]) error {
 				for {
 					ev, ok := iter.Next()
@@ -1033,9 +1234,9 @@ func TestMiddleware_AfterAgent_SkipsExtractionWhenMainAgentAlreadyWroteMemory(t 
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 		},
 	})
 	require.NoError(t, err)
@@ -1067,7 +1268,7 @@ func TestMiddleware_AfterAgent_SkipsExtractionWhenMainAgentAlreadyWroteMemory(t 
 }
 
 func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *testing.T) {
-	ctx := context.Background()
+	ctx := runnerSessionCtx(t, "session-1")
 	b := NewInMemoryBackend()
 	now := time.Now()
 	b.put("/mem/MEMORY.md", "", now)
@@ -1079,17 +1280,15 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 		firstRunStarted: startedCh,
 	}
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionID:   "session-1",
 		Coordinator: NewLocalCoordinator(),
-		LockTTL:     time.Minute,
 	}
 
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeAsync,
-			Model: extModel,
+			Mode: WriteModeAsync,
 		},
 		Coordination: coord,
 	})
@@ -1139,7 +1338,13 @@ func TestMiddleware_AfterAgent_AsyncExtractionKeepsLatestPendingSnapshot(t *test
 		if cursorErr != nil || !ok {
 			return false
 		}
-		return cursor == len(state2.Messages)
+		progress, ok, progressErr := getCoordinatorWriteProgress(ctx, coord.Coordinator, "/mem::session-1")
+		if progressErr != nil || !ok {
+			return false
+		}
+		return cursor == len(state2.Messages) &&
+			progress.Version == coordinatorWriteProgressVersion &&
+			progress.AnchorMessageID == adk.GetMessageID(state2.Messages[len(state2.Messages)-1])
 	}, 2*time.Second, 10*time.Millisecond)
 }
 
@@ -1209,7 +1414,7 @@ func TestMiddleware_BeforeAgent_TopicMemoryInjectedOncePerSession(t *testing.T) 
 		Model:           selModel,
 		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
-			TopicSelection: &TopicSelectionConfig{
+			TopicSelection: &TopicSelectionConfig[*schema.Message]{
 				TopK: 1,
 			},
 		},
@@ -1247,7 +1452,7 @@ func TestMiddleware_LastUserMessageSkipsSystemReminderPrefix(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	last, ok := mw.(*middleware[*schema.Message]).lastUserMessage(&adk.AgentInput{
+	last, ok := mw.lastUserMessage(&adk.AgentInput{
 		Messages: []adk.Message{
 			schema.UserMessage("real user query"),
 			schema.UserMessage("<system-reminder>\nInjected by another middleware.\n</system-reminder>"),
@@ -1282,15 +1487,24 @@ func TestMiddleware_BeforeAgent_InjectsInstructionWhenMessagesAlreadyContainMemo
 	requireTopicMemoryMessage(t, out.AgentInput.Messages[2], "preloaded")
 }
 
-func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing.T) {
-	ctx := context.Background()
+func TestMiddleware_BeforeAgent_DistributedProgressSyncIntoMessageExtra(t *testing.T) {
+	ctx := runnerSessionCtx(t, "sess-cursor")
 	b := NewInMemoryBackend()
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionID:   "sess-cursor",
 		Coordinator: NewLocalCoordinator(),
-		LockTTL:     time.Minute,
 	}
-	require.NoError(t, setCoordinatorCursor(ctx, coord.Coordinator, "/mem::sess-cursor", 5))
+	messages := []*schema.Message{
+		schema.UserMessage("hi"),
+		schema.AssistantMessage("ack", nil),
+	}
+	adk.EnsureMessageID(messages[1])
+	require.NoError(t, setCoordinatorWriteProgress(
+		ctx,
+		coord.Coordinator,
+		"/mem::sess-cursor",
+		adk.GetMessageID(messages[1]),
+		len(messages),
+	))
 
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
@@ -1301,29 +1515,35 @@ func TestMiddleware_BeforeAgent_DistributedCursorSyncIntoMessageExtra(t *testing
 
 	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
-		AgentInput: &adk.AgentInput{Messages: []adk.Message{
-			schema.UserMessage("hi"),
-			schema.AssistantMessage("ack", nil),
-		}},
+		AgentInput:  &adk.AgentInput{Messages: messages},
 	}
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
 	require.NoError(t, err)
-	requireWriteCursor(t, out.AgentInput.Messages, 5)
+	requireWriteCursor(t, out.AgentInput.Messages, len(messages))
 }
 
 func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *testing.T) {
-	ctx := context.Background()
+	ctx := runnerSessionCtx(t, "sess-cursor")
 	b := NewInMemoryBackend()
 	now := time.Now()
 	b.put("/mem/MEMORY.md", "remembered\n", now)
 
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionID:   "sess-cursor",
 		Coordinator: NewLocalCoordinator(),
-		LockTTL:     time.Minute,
 	}
-	require.NoError(t, setCoordinatorCursor(ctx, coord.Coordinator, "/mem::sess-cursor", 5))
+	messages := []*schema.Message{
+		schema.AssistantMessage("ack", nil),
+		schema.UserMessage("next turn"),
+	}
+	adk.EnsureMessageID(messages[1])
+	require.NoError(t, setCoordinatorWriteProgress(
+		ctx,
+		coord.Coordinator,
+		"/mem::sess-cursor",
+		adk.GetMessageID(messages[1]),
+		len(messages),
+	))
 
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
@@ -1334,10 +1554,7 @@ func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *t
 
 	runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 		Instruction: "base",
-		AgentInput: &adk.AgentInput{Messages: []adk.Message{
-			schema.AssistantMessage("ack", nil),
-			schema.UserMessage("next turn"),
-		}},
+		AgentInput:  &adk.AgentInput{Messages: messages},
 	}
 
 	_, out, err := mw.BeforeAgent(ctx, runCtx)
@@ -1346,7 +1563,7 @@ func TestMiddleware_BeforeAgent_WriteCursorDoesNotBlockInstructionInjection(t *t
 	require.NotContains(t, out.Instruction, "remembered")
 	requireMemoryIndexMessage(t, out.AgentInput.Messages[1], "remembered")
 
-	requireWriteCursor(t, out.AgentInput.Messages, 5)
+	requireWriteCursor(t, out.AgentInput.Messages, len(messages))
 }
 
 func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
@@ -1364,7 +1581,7 @@ func TestMiddleware_TopicSelection_ToolCallParsingAndFiltering(t *testing.T) {
 		Model:           selModel,
 		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeSync,
-			TopicSelection: &TopicSelectionConfig{
+			TopicSelection: &TopicSelectionConfig[*schema.Message]{
 				TopK: 1,
 			},
 		},
@@ -1444,9 +1661,9 @@ func TestMiddleware_AfterAgent_SyncExtraction_ChinesePrompt(t *testing.T) {
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 		},
 	})
 	require.NoError(t, err)
@@ -1486,9 +1703,9 @@ func TestMiddleware_AfterAgent_RelativeMemoryDirRendersAbsolutePath(t *testing.T
 	mw, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: ".",
 		MemoryBackend:   NewLocalBackend(),
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeSync,
-			Model: extModel,
+			Mode: WriteModeSync,
 		},
 	})
 	require.NoError(t, err)
@@ -1583,16 +1800,14 @@ func TestMiddleware_TopicSelection_IgnoresOutOfBoundsCandidatePaths(t *testing.T
 }
 
 func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T) {
-	ctx := context.Background()
+	ctx := runnerSessionCtx(t, "sess-pending")
 	b := NewInMemoryBackend()
 	now := time.Now()
 	b.put("/mem/MEMORY.md", "", now)
 
 	extModel := &extractionModel{}
 	coord := &CoordinationConfig[*schema.Message]{
-		SessionID:   "sess-pending",
 		Coordinator: NewLocalCoordinator(),
-		LockTTL:     time.Minute,
 	}
 	// Hold the lock.
 	coordKey := "/mem::sess-pending"
@@ -1603,14 +1818,14 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	mwI, err := New(ctx, &Config[*schema.Message]{
 		MemoryDirectory: "/mem",
 		MemoryBackend:   b,
+		Model:           extModel,
 		Write: &WriteConfig[*schema.Message]{
-			Mode:  WriteModeAsync,
-			Model: extModel,
+			Mode: WriteModeAsync,
 		},
 		Coordination: coord,
 	})
 	require.NoError(t, err)
-	mw := mwI.(*middleware[*schema.Message])
+	mw := mwI
 
 	state := &adk.ChatModelAgentState{
 		Messages: []adk.Message{
@@ -1640,6 +1855,12 @@ func TestMiddleware_AfterAgent_AsyncSetsPendingSnapshotWhenLockHeld(t *testing.T
 	topic, err := b.Read(ctx, &ReadRequest{FilePath: "/mem/topic.md"})
 	require.NoError(t, err)
 	require.Equal(t, "remember pending", topic.Content)
+
+	progress, ok, err := getCoordinatorWriteProgress(ctx, coord.Coordinator, coordKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, coordinatorWriteProgressVersion, progress.Version)
+	require.Equal(t, adk.GetMessageID(state.Messages[len(state.Messages)-1]), progress.AnchorMessageID)
 }
 
 type responseFormatSelectionModel struct {
@@ -1712,35 +1933,37 @@ func TestMiddleware_TopicSelection_ResponseFormatFallback(t *testing.T) {
 	require.Equal(t, schema.ResponseFormatTypeJSONObject, selectionModel.formats[2].Type)
 }
 
-func TestMiddleware_TopicSelection_FixedOutputMode(t *testing.T) {
-	ctx := context.Background()
-	backend := NewInMemoryBackend()
-	now := time.Now()
-	backend.put("/mem/MEMORY.md", "- [debugging.md](debugging.md) - notes\n", now)
-	backend.put("/mem/debugging.md", "debug notes", now)
+// sessionCaptureAgent captures the context handed to an agent during a Runner
+// run, so tests can exercise code paths that read the ADK Runner session ID.
+type sessionCaptureAgent struct {
+	ctxCh chan context.Context
+}
 
-	selectionModel := &responseFormatSelectionModel{
-		objectOutput: `{"selected_memories":["debugging.md"]}`,
+func (a *sessionCaptureAgent) Name(context.Context) string { return "session-capture" }
+
+func (a *sessionCaptureAgent) Description(context.Context) string { return "capture runner session" }
+
+func (a *sessionCaptureAgent) Run(ctx context.Context, _ *adk.TypedAgentInput[*schema.Message], _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Message]] {
+	a.ctxCh <- ctx
+	iter, gen := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.Message]]()
+	gen.Close()
+	return iter
+}
+
+// runnerSessionCtx returns a context that carries the ADK Runner session ID.
+func runnerSessionCtx(t *testing.T, sessionID string) context.Context {
+	t.Helper()
+
+	agent := &sessionCaptureAgent{ctxCh: make(chan context.Context, 1)}
+	runner := adk.NewRunner(context.Background(), adk.RunnerConfig{Agent: agent, SessionID: sessionID})
+	iter := runner.Query(context.Background(), "session capture")
+	for {
+		if _, ok := iter.Next(); !ok {
+			break
+		}
 	}
-	mw, err := New(ctx, &Config[*schema.Message]{
-		MemoryDirectory: "/mem",
-		MemoryBackend:   backend,
-		Model:           selectionModel,
-		Read: &ReadConfig[*schema.Message]{
-			Mode: ReadModeSync,
-			TopicSelection: &TopicSelectionConfig{
-				OutputMode: TopicSelectionOutputModeJSONObject,
-			},
-		},
-	})
-	require.NoError(t, err)
 
-	_, out, err := mw.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{
-		Instruction: "base",
-		AgentInput:  &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("How do I debug?")}},
-	})
-	require.NoError(t, err)
-	require.Equal(t, 1, countTopicMemoryMessages(out.AgentInput.Messages))
-	require.Len(t, selectionModel.formats, 1)
-	require.Equal(t, schema.ResponseFormatTypeJSONObject, selectionModel.formats[0].Type)
+	got := <-agent.ctxCh
+	require.NotNil(t, got)
+	return got
 }

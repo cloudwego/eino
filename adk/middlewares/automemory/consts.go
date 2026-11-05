@@ -16,9 +16,11 @@
 
 package automemory
 
+import "time"
+
 const (
-	// CandidateGlobPattern matches topic files under the memory directory.
-	CandidateGlobPattern = "**/*.md"
+	// candidateGlobPattern matches topic files under the memory directory.
+	candidateGlobPattern = "**/*.md"
 
 	memoryIndexFileName = "MEMORY.md"
 
@@ -36,7 +38,33 @@ const (
 	defaultMemoryWriteMaxTurns = 5
 
 	topicSelectionToolName = "select_memories"
+
+	// Extraction rounds are model calls over a long transcript plus one memory
+	// filesystem round, budgeted here to derive the lock TTL.
+	extractionTimePerTurn = 2 * time.Minute
+	minExtractionLockTTL  = 5 * time.Minute
+	maxExtractionLockTTL  = 30 * time.Minute
+	// A pending snapshot must outlive one full lease: it is stashed when the lock
+	// is contended and drained only after the current holder releases or expires.
+	pendingSnapshotLockFactor = 2
 )
+
+// extractionLockTTL derives the extraction lock TTL from the extractor's tool-call
+// budget. Locks are never renewed, so the TTL has to cover one complete drain.
+func extractionLockTTL(maxTurns int) time.Duration {
+	ttl := extractionTimePerTurn * time.Duration(maxTurns)
+	if ttl < minExtractionLockTTL {
+		return minExtractionLockTTL
+	}
+	if ttl > maxExtractionLockTTL {
+		return maxExtractionLockTTL
+	}
+	return ttl
+}
+
+func pendingSnapshotTTL(lockTTL time.Duration) time.Duration {
+	return pendingSnapshotLockFactor * lockTTL
+}
 
 // ErrorStage error stage during auto memory processing
 type ErrorStage string

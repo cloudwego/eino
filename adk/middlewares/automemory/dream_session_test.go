@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package dream
+package automemory
 
 import (
 	"context"
@@ -50,7 +50,7 @@ func TestNewSessionHistoryGrepTool(t *testing.T) {
 	require.NoError(t, err)
 
 	result, err := bt.(tool.InvokableTool).InvokableRun(
-		withDreamRunMeta(ctx, &dreamRunMeta{SessionID: sessionID, SearchSessionIDs: []string{sessionID}}),
+		withDreamRunMeta(ctx, &dreamRunMeta{SearchSessionIDs: []string{sessionID}}),
 		`{"query":"build failure","limit":2}`,
 	)
 	require.NoError(t, err)
@@ -79,7 +79,6 @@ func TestNewSessionHistoryGrepTool_SearchesRunScopedSessions(t *testing.T) {
 
 	result, err := bt.(tool.InvokableTool).InvokableRun(
 		withDreamRunMeta(ctx, &dreamRunMeta{
-			SessionID:        "session-c",
 			SearchSessionIDs: []string{"session-a", "session-b"},
 		}),
 		`{"query":"build failure","limit":5}`,

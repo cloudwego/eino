@@ -181,9 +181,11 @@ func TestAutomemoryIntegration_AsyncReplayPreservesReadyBoundaryOrder(t *testing
 		MemoryBackend:   backend,
 		Read: &ReadConfig[*schema.Message]{
 			Mode: ReadModeAsync,
-			Model: &gatedTopicSelectionModel{
-				started: selectionStarted,
-				release: releaseSelection,
+			TopicSelection: &TopicSelectionConfig[*schema.Message]{
+				Model: &gatedTopicSelectionModel{
+					started: selectionStarted,
+					release: releaseSelection,
+				},
 			},
 		},
 	})
