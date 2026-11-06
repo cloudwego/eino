@@ -88,14 +88,15 @@ type TypedGenerateSummaryAction[M adk.MessageType] struct {
 	// It may be nil when the model call fails without returning a response.
 	ModelResponse M `json:"model_response,omitempty"`
 
-	// err is the error returned by the model call, if any. Use GetError to access it.
+	// err is the error returned by the model call or summary response validation, if any.
+	// Use GetError to access it.
 	err error
 }
 
 // GenerateSummaryAction is the default type using *schema.Message.
 type GenerateSummaryAction = TypedGenerateSummaryAction[*schema.Message]
 
-// GetError returns the error from the model call, if any.
+// GetError returns the error from the model call or summary response validation, if any.
 func (a *TypedGenerateSummaryAction[M]) GetError() error {
 	return a.err
 }
