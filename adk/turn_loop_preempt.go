@@ -419,7 +419,8 @@ func (r *preemptRequest) cancelOptions(now time.Time) []AgentCancelOption {
 //   - requestPreempt binds to the captured turnID; if the turn has moved on, the
 //     request is resolved as a no-op.
 //   - During active phase, receivePreempt transfers the pending request to the
-//     watcher, which submits cancel and then acks.
+//     watcher, which submits cancel and then acks. Each active turn has its own
+//     notification channel, also used to check the receiving watcher's ownership.
 type preemptController struct {
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -467,7 +468,7 @@ func (c *preemptController) abortPlanningTurn() *preemptRequest {
 	return req
 }
 
-func (c *preemptController) beginActiveTurn(ctx context.Context, tc any) {
+func (c *preemptController) beginActiveTurn(ctx context.Context, tc any) <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -475,9 +476,11 @@ func (c *preemptController) beginActiveTurn(ctx context.Context, tc any) {
 	c.turnPhase = preemptTurnActive
 	c.currentRunCtx = ctx
 	c.currentTC = tc
+	c.notify = make(chan struct{}, 1)
 	if c.pending != nil {
 		c.notifyWatcherLocked()
 	}
+	return c.notify
 }
 
 func (c *preemptController) endActiveTurn() *preemptRequest {
@@ -561,11 +564,13 @@ func (c *preemptController) requestPreempt(target preemptTurnSnapshot, ack chan 
 	}
 }
 
-func (c *preemptController) receivePreempt() (*preemptRequest, bool) {
+func (c *preemptController) receivePreempt(notify <-chan struct{}) (*preemptRequest, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.turnPhase != preemptTurnActive || c.pending == nil {
+	// A watcher can resume after its turn ended, including after selecting a
+	// notification. Only the current turn's watcher may take the request.
+	if c.turnPhase != preemptTurnActive || c.notify != notify || c.pending == nil {
 		return nil, false
 	}
 	req := c.pending
@@ -600,14 +605,14 @@ func (c *preemptController) notifyWatcherLocked() {
 
 // watchPreempt runs for the lifetime of a single active turn. It consumes
 // pending preempt requests exactly once and submits cancel for that turn.
-func (l *TurnLoop[T, M]) watchPreempt(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
+func (l *TurnLoop[T, M]) watchPreempt(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}, notify <-chan struct{}) {
 	preemptDoneClosed := false
 	for {
 		select {
 		case <-done:
 			return
-		case <-l.preemptCtrl.notify:
-			req, ok := l.preemptCtrl.receivePreempt()
+		case <-notify:
+			req, ok := l.preemptCtrl.receivePreempt(notify)
 			if !ok {
 				continue
 			}

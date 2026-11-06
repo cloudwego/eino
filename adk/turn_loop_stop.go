@@ -183,7 +183,8 @@ func (r *stopCancelRequest) cancelOptions(now time.Time) []AgentCancelOption {
 //
 // Unlike preempt, Stop is not bound to a turnID. It is global and terminal.
 // A pending cancel request is consumed by the active turn or dropped when that
-// turn ends before consumption.
+// turn ends before consumption. Each active turn has its own notification channel,
+// which also identifies the watcher allowed to consume its cancel requests.
 type stopController struct {
 	mu sync.Mutex
 
@@ -282,16 +283,18 @@ func (c *stopController) cause() string {
 	return c.stopCause
 }
 
-func (c *stopController) beginActiveTurn() {
+func (c *stopController) beginActiveTurn() <-chan struct{} {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return
+		return nil
 	}
 	c.hasActiveCancelTarget = true
+	c.notify = make(chan struct{}, 1)
 	if c.pending != nil {
 		c.notifyWatcherLocked()
 	}
+	return c.notify
 }
 
 func (c *stopController) endActiveTurn() *stopCancelRequest {
@@ -303,10 +306,12 @@ func (c *stopController) endActiveTurn() *stopCancelRequest {
 	return req
 }
 
-func (c *stopController) receiveCancel() (*stopCancelRequest, bool) {
+func (c *stopController) receiveCancel(notify <-chan struct{}) (*stopCancelRequest, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.hasActiveCancelTarget || c.pending == nil {
+	// Check ownership under the same lock that transfers the request. An old
+	// watcher may still be running after endActiveTurn and a new activation.
+	if !c.hasActiveCancelTarget || c.notify != notify || c.pending == nil {
 		return nil, false
 	}
 	req := c.pending
@@ -394,7 +399,7 @@ func (l *TurnLoop[T, M]) finishStopCommit() {
 
 // watchStop runs for the lifetime of a single active turn. It consumes pending
 // Stop cancel requests exactly once and submits them to that turn.
-func (l *TurnLoop[T, M]) watchStop(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
+func (l *TurnLoop[T, M]) watchStop(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}, notify <-chan struct{}) {
 	stoppedClosed := false
 
 	submit := func(req *stopCancelRequest) {
@@ -406,7 +411,7 @@ func (l *TurnLoop[T, M]) watchStop(done <-chan struct{}, agentCancelFunc AgentCa
 	}
 
 	for {
-		if req, ok := l.stopCtrl.receiveCancel(); ok {
+		if req, ok := l.stopCtrl.receiveCancel(notify); ok {
 			submit(req)
 			continue
 		}
@@ -414,7 +419,7 @@ func (l *TurnLoop[T, M]) watchStop(done <-chan struct{}, agentCancelFunc AgentCa
 		select {
 		case <-done:
 			return
-		case <-l.stopCtrl.notify:
+		case <-notify:
 		}
 	}
 }
