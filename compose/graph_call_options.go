@@ -154,6 +154,7 @@ func (o Option) deepCopy() Option {
 }
 
 // DesignateNode sets the key of the node to which the option will be applied.
+// Appending designations does not change other options derived from the same value.
 // notice: only effective at the top graph.
 // e.g.
 //
@@ -168,13 +169,15 @@ func (o Option) DesignateNode(nodeKey ...string) Option {
 }
 
 // DesignateNodeWithPath sets the path of the node(s) to which the option will be applied.
+// Appending designations does not change other options derived from the same value.
 // You can specify a node in the subgraph through `NodePath` to make the option only take effect at this node.
 //
 // e.g.
 // nodePath := NewNodePath("sub_graph_node_key", "node_key_within_sub_graph")
 // DesignateNodeWithPath(nodePath)
 func (o Option) DesignateNodeWithPath(path ...*NodePath) Option {
-	o.paths = append(o.paths, path...)
+	// Do not reuse the receiver's spare capacity when deriving a new option.
+	o.paths = append(o.paths[:len(o.paths):len(o.paths)], path...)
 	return o
 }
 
