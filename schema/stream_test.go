@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -591,6 +592,74 @@ func TestArrayStreamCombined(t *testing.T) {
 		if !record[i] {
 			t.Fatal("record missing")
 		}
+	}
+}
+
+func TestMergedStreamAutomaticCloseReleasesWriters(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		t.Run(fmt.Sprintf("named=%t", named), func(t *testing.T) {
+			first, second := abandonedMergedStream(named)
+			defer first.Close()
+			defer second.Close()
+			deadline := time.After(3 * time.Second)
+			for _, writer := range []*StreamWriter[int]{first, second} {
+				closed := writer.stm.closed
+				for closed != nil {
+					runtime.GC()
+					select {
+					case <-closed:
+						closed = nil
+					case <-deadline:
+						t.Fatal("the abandoned merged reader did not close its source while the writer remained live")
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+				if !writer.Send(1, nil) {
+					t.Fatal("writer accepted a value after its consumer was collected")
+				}
+			}
+		})
+	}
+}
+
+func abandonedMergedStream(named bool) (*StreamWriter[int], *StreamWriter[int]) {
+	first, firstWriter := Pipe[int](0)
+	second, secondWriter := Pipe[int](0)
+	var merged *StreamReader[int]
+	if named {
+		merged = MergeNamedStreamReaders(map[string]*StreamReader[int]{"first": first, "second": second})
+	} else {
+		merged = MergeStreamReaders([]*StreamReader[int]{first, second})
+	}
+	merged.SetAutomaticClose()
+	return firstWriter, secondWriter
+}
+
+func TestMergedStreamKeepsAutomaticCloseSourceAlive(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		t.Run(fmt.Sprintf("named=%t", named), func(t *testing.T) {
+			source, writer := Pipe[int](1)
+			source.SetAutomaticClose()
+			var merged *StreamReader[int]
+			if named {
+				merged = MergeNamedStreamReaders(map[string]*StreamReader[int]{"source": source})
+			} else {
+				merged = MergeStreamReaders([]*StreamReader[int]{source, StreamReaderFromArray([]int{})})
+			}
+			defer merged.Close()
+			defer writer.Close()
+			for i := 0; i < 10; i++ {
+				runtime.GC()
+				runtime.Gosched()
+			}
+			if writer.Send(42, nil) {
+				t.Fatal("the source reader was collected while its merged reader was still live")
+			}
+			chunk, err := merged.Recv()
+			if err != nil || chunk != 42 {
+				t.Fatalf("merged.Recv() = %v, %v; want 42, nil", chunk, err)
+			}
+		})
 	}
 }
 

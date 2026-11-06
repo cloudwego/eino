@@ -280,24 +280,13 @@ func (sr *StreamReader[T]) SetAutomaticClose() {
 	switch sr.typ {
 	case readerTypeStream:
 		if !sr.st.automaticClose {
-			sr.st.automaticClose = true
-			var flag uint32
-			sr.st.closedFlag = &flag
+			sr.st.enableAutomaticClose()
 			runtime.SetFinalizer(sr, func(s *StreamReader[T]) {
 				s.Close()
 			})
 		}
 	case readerTypeMultiStream:
-		for _, s := range sr.msr.nonClosedStreams() {
-			if !s.automaticClose {
-				s.automaticClose = true
-				var flag uint32
-				s.closedFlag = &flag
-				runtime.SetFinalizer(s, func(st *stream[T]) {
-					st.closeRecv()
-				})
-			}
-		}
+		sr.msr.setAutomaticClose()
 	case readerTypeChild:
 		parent := sr.csr.parent.sr
 		parent.SetAutomaticClose()
@@ -429,6 +418,13 @@ func (s *stream[T]) closeSend() {
 	close(s.items)
 }
 
+func (s *stream[T]) enableAutomaticClose() {
+	if !s.automaticClose {
+		s.automaticClose = true
+		s.closedFlag = new(uint32)
+	}
+}
+
 func (s *stream[T]) closeRecv() {
 	if s.automaticClose {
 		if atomic.CompareAndSwapUint32(s.closedFlag, 0, 1) {
@@ -502,7 +498,10 @@ type multiArrayReader[T any] struct {
 }
 
 type multiStreamReader[T any] struct {
-	sts []*stream[T]
+	automaticClose bool
+	// Retain finalizer owners when a merge takes their underlying streams.
+	closeOwners []*StreamReader[T]
+	sts         []*stream[T]
 
 	itemsCases []reflect.SelectCase
 
@@ -544,6 +543,7 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 			chosen, recv, ok = reflect.Select(msr.itemsCases)
 			if ok {
 				item := recv.Interface().(streamItem[T])
+				runtime.KeepAlive(msr)
 				return item.chunk, item.err
 			}
 			msr.itemsCases[chosen].Chan = reflect.Value{}
@@ -551,6 +551,7 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 			var item *streamItem[T]
 			chosen, item, ok = receiveN(msr.nonClosed, msr.sts)
 			if ok {
+				runtime.KeepAlive(msr)
 				return item.chunk, item.err
 			}
 		}
@@ -587,6 +588,20 @@ func (msr *multiStreamReader[T]) close() {
 	for _, s := range msr.sts {
 		s.closeRecv()
 	}
+}
+
+func (msr *multiStreamReader[T]) setAutomaticClose() {
+	if msr.automaticClose {
+		return
+	}
+	msr.automaticClose = true
+	for _, s := range msr.sts {
+		s.enableAutomaticClose()
+	}
+	// Writers retain streams, so the finalizer must belong to the consumer.
+	runtime.SetFinalizer(msr, func(reader *multiStreamReader[T]) {
+		reader.close()
+	})
 }
 
 func (msr *multiStreamReader[T]) toStream() *stream[T] {
@@ -920,8 +935,10 @@ func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
 
 	var arr []T
 	var ss []*stream[T]
+	var closeOwners []*StreamReader[T]
 
 	for _, sr := range srs {
+		closeOwners = sr.appendCloseOwners(closeOwners)
 		switch sr.typ {
 		case readerTypeStream:
 			ss = append(ss, sr.st)
@@ -953,10 +970,27 @@ func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
 		ss = append(ss, s)
 	}
 
+	msr := newMultiStreamReader(ss)
+	msr.closeOwners = closeOwners
 	return &StreamReader[T]{
 		typ: readerTypeMultiStream,
-		msr: newMultiStreamReader(ss),
+		msr: msr,
 	}
+}
+
+func (sr *StreamReader[T]) appendCloseOwners(owners []*StreamReader[T]) []*StreamReader[T] {
+	switch sr.typ {
+	case readerTypeStream:
+		if sr.st.automaticClose {
+			return append(owners, sr)
+		}
+	case readerTypeMultiStream:
+		if sr.msr.automaticClose {
+			return append(owners, sr)
+		}
+		return append(owners, sr.msr.closeOwners...)
+	}
+	return owners
 }
 
 // MergeNamedStreamReaders merges multiple named StreamReaders into one.
@@ -1009,12 +1043,15 @@ func MergeNamedStreamReaders[T any](srs map[string]*StreamReader[T]) *StreamRead
 // into a single multi-stream reader.
 func InternalMergeNamedStreamReaders[T any](srs []*StreamReader[T], names []string) *StreamReader[T] {
 	ss := make([]*stream[T], len(srs))
+	var closeOwners []*StreamReader[T]
 
 	for i, sr := range srs {
+		closeOwners = sr.appendCloseOwners(closeOwners)
 		ss[i] = sr.toStream()
 	}
 
 	msr := newMultiStreamReader(ss)
+	msr.closeOwners = closeOwners
 	msr.sourceReaderNames = names
 
 	return &StreamReader[T]{
