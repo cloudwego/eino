@@ -1197,13 +1197,15 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		fileType := valueOrDefault(input.FileType, "")
 		var beforeLines, afterLines int
 
-		if input.Context != nil {
-			beforeLines = valueOrDefault(input.Context, 0)
-			afterLines = valueOrDefault(input.Context, 0)
-		} else {
-			// Extract context parameters
-			beforeLines = valueOrDefault(input.BeforeLines, 0)
-			afterLines = valueOrDefault(input.AfterLines, 0)
+		if input.OutputMode == "content" {
+			if input.Context != nil {
+				beforeLines = valueOrDefault(input.Context, 0)
+				afterLines = valueOrDefault(input.Context, 0)
+			} else {
+				// Extract context parameters
+				beforeLines = valueOrDefault(input.BeforeLines, 0)
+				afterLines = valueOrDefault(input.AfterLines, 0)
+			}
 		}
 
 		// Extract boolean flags
