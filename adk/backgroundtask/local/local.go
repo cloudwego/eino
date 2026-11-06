@@ -174,7 +174,7 @@ func (r *Runner) runForeground(
 	work WorkFunc,
 ) (*backgroundtask.Task, error) {
 	startedAt := time.Now()
-	workCtx, cancel := context.WithCancel(ctx)
+	workCtx, cancel := newForegroundWorkContext(ctx)
 	adopted := false
 	defer func() {
 		if !adopted {
@@ -223,7 +223,11 @@ func (r *Runner) runForeground(
 		}
 		if r.policy.ShouldAutoBackground != nil &&
 			r.policy.ShouldAutoBackground(ctx, candidate) {
-			task, err := r.adoptForeground(ctx, spec, resultCh)
+			if err := ctx.Err(); err != nil {
+				cancel()
+				return nil, err
+			}
+			task, err := r.adoptForeground(ctx, spec, resultCh, cancel)
 			if err != nil {
 				cancel()
 				return r.failedTask(spec, fmt.Sprintf("handoff failed after %dms: %v", timeoutMs, err)), nil
@@ -246,10 +250,16 @@ func (r *Runner) adoptForeground(
 		value string
 		err   error
 	},
+	cancelWork context.CancelFunc,
 ) (*backgroundtask.Task, error) {
-	waitWork := func(context.Context, backgroundtask.ExecutionRuntime) (string, error) {
-		result := <-resultCh
-		return result.value, result.err
+	waitWork := func(ctx context.Context, _ backgroundtask.ExecutionRuntime) (string, error) {
+		defer cancelWork()
+		select {
+		case result := <-resultCh:
+			return result.value, result.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	if err := r.executor.register(spec.ID, waitWork); err != nil {
 		return nil, err
@@ -351,15 +361,21 @@ func (r *Runner) RunStream(
 				return output.String(), nil
 			}
 			if recvErr != nil {
-				chunks <- streamChunk{err: recvErr}
+				if !sendStreamChunk(workCtx, chunks, streamChunk{err: recvErr}) {
+					return "", workCtx.Err()
+				}
 				return "", recvErr
 			}
 			if _, appendErr := runtime.EmitProgress(workCtx, "", []byte(chunk)); appendErr != nil {
-				chunks <- streamChunk{err: appendErr}
+				if !sendStreamChunk(workCtx, chunks, streamChunk{err: appendErr}) {
+					return "", workCtx.Err()
+				}
 				return "", appendErr
 			}
 			output.WriteString(chunk)
-			chunks <- streamChunk{text: chunk}
+			if !sendStreamChunk(workCtx, chunks, streamChunk{text: chunk}) {
+				return "", workCtx.Err()
+			}
 		}
 	}
 	spec, err := r.newSpec(ctx, input)
@@ -391,6 +407,19 @@ func (r *Runner) RunStream(
 	return reader, nil
 }
 
+func sendStreamChunk(
+	ctx context.Context,
+	chunks chan<- streamChunk,
+	chunk streamChunk,
+) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case chunks <- chunk:
+		return true
+	}
+}
+
 func (r *Runner) runForegroundStream(
 	ctx context.Context,
 	input *Input,
@@ -399,7 +428,7 @@ func (r *Runner) runForegroundStream(
 	chunks <-chan streamChunk,
 	ready <-chan error,
 ) (*schema.StreamReader[string], error) {
-	workCtx, cancel := context.WithCancel(ctx)
+	workCtx, cancel := newForegroundWorkContext(ctx)
 	resultCh := make(chan struct {
 		value string
 		err   error
@@ -411,9 +440,15 @@ func (r *Runner) runForegroundStream(
 			err   error
 		}{value: value, err: err}
 	}()
-	if err := <-ready; err != nil {
+	select {
+	case err := <-ready:
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	case <-ctx.Done():
 		cancel()
-		return nil, err
+		return nil, ctx.Err()
 	}
 	reader, writer := schema.Pipe[string](streamBufferCap)
 	go r.projectForegroundStream(&foregroundStreamProjection{
@@ -491,6 +526,12 @@ type executor struct {
 
 type detachedContext struct {
 	parent context.Context
+}
+
+// newForegroundWorkContext preserves request-scoped values while making the
+// Runner the sole owner of cancellation across the foreground handoff boundary.
+func newForegroundWorkContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(detachedContext{parent: ctx})
 }
 
 func (detachedContext) Deadline() (time.Time, bool) { return time.Time{}, false }
