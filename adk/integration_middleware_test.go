@@ -54,6 +54,29 @@ func (m *stubChatModel) Stream(_ context.Context, input []*schema.Message, _ ...
 	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage(m.reply, nil)}), nil
 }
 
+type stubAgenticModel struct {
+	reply     string
+	lastInput []*schema.AgenticMessage
+}
+
+func (m *stubAgenticModel) Generate(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+	m.lastInput = input
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: m.reply}),
+		},
+	}, nil
+}
+
+func (m *stubAgenticModel) Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	message, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{message}), nil
+}
+
 // memBackend is a minimal Agents.md backend that serves an in-memory file.
 type memBackend struct {
 	files map[string]string
@@ -65,6 +88,132 @@ func (b *memBackend) Read(_ context.Context, req *filesystem.ReadRequest) (*file
 		return nil, fmt.Errorf("file not found: %s: %w", req.FilePath, os.ErrNotExist)
 	}
 	return &filesystem.FileContent{Content: content}, nil
+}
+
+func findMessageInsertedEvent[M adk.MessageType](
+	t *testing.T,
+	iter *adk.AsyncIterator[*adk.TypedAgentEvent[M]],
+) *adk.MessageInsertedEvent[M] {
+	t.Helper()
+
+	var inserted *adk.MessageInsertedEvent[M]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.SessionEventVariant != nil &&
+			event.SessionEventVariant.Event != nil &&
+			event.SessionEventVariant.Event.MessageInserted != nil {
+			require.Nil(t, inserted, "expected exactly one MessageInserted event")
+			inserted = event.SessionEventVariant.Event.MessageInserted
+		}
+	}
+	require.NotNil(t, inserted, "expected a MessageInserted event")
+	return inserted
+}
+
+func TestAgentsMDIntegration_NoSessionEventAnchorMatchesState(t *testing.T) {
+	ctx := context.Background()
+	backend := &memBackend{files: map[string]string{
+		"AGENTS.md": "anchor test instructions",
+	}}
+	middleware, err := agentsmd.New(ctx, &agentsmd.Config{
+		Backend:       backend,
+		AgentsMDFiles: []string{"AGENTS.md"},
+	})
+	require.NoError(t, err)
+
+	chatModel := &stubChatModel{reply: "ok"}
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:     "agentsmd-no-session-anchor",
+		Model:    chatModel,
+		Handlers: []adk.ChatModelAgentMiddleware{middleware},
+	})
+	require.NoError(t, err)
+
+	userMessage := schema.UserMessage("hello")
+	require.Empty(t, adk.GetMessageID(userMessage))
+
+	inserted := findMessageInsertedEvent(t, agent.Run(ctx, &adk.AgentInput{
+		Messages: []*schema.Message{userMessage},
+	}))
+
+	require.Len(t, chatModel.lastInput, 2)
+	require.Same(t, inserted.Message, chatModel.lastInput[0])
+	require.Same(t, userMessage, chatModel.lastInput[1])
+	require.Equal(t, true, chatModel.lastInput[0].Extra["__agentsmd_content__"])
+	require.NotEmpty(t, inserted.BeforeMessageID)
+	assert.Equal(t, adk.GetMessageID(userMessage), inserted.BeforeMessageID)
+	assert.Equal(t, adk.GetMessageID(chatModel.lastInput[1]), inserted.BeforeMessageID)
+}
+
+func TestAgentsMDIntegration_NoSessionAgenticEventAnchorMatchesState(t *testing.T) {
+	ctx := context.Background()
+	backend := &memBackend{files: map[string]string{
+		"AGENTS.md": "agentic anchor test instructions",
+	}}
+	middleware, err := agentsmd.NewTyped[*schema.AgenticMessage](ctx, &agentsmd.Config{
+		Backend:       backend,
+		AgentsMDFiles: []string{"AGENTS.md"},
+	})
+	require.NoError(t, err)
+
+	chatModel := &stubAgenticModel{reply: "ok"}
+	agent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:     "agentsmd-agentic-no-session-anchor",
+		Model:    chatModel,
+		Handlers: []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]{middleware},
+	})
+	require.NoError(t, err)
+
+	userMessage := schema.UserAgenticMessage("hello")
+	require.Empty(t, adk.GetMessageID(userMessage))
+
+	inserted := findMessageInsertedEvent(t, agent.Run(ctx, &adk.TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{userMessage},
+	}))
+
+	require.Len(t, chatModel.lastInput, 2)
+	require.Same(t, inserted.Message, chatModel.lastInput[0])
+	require.Same(t, userMessage, chatModel.lastInput[1])
+	require.Equal(t, true, chatModel.lastInput[0].Extra["__agentsmd_content__"])
+	require.NotEmpty(t, inserted.BeforeMessageID)
+	assert.Equal(t, adk.GetMessageID(userMessage), inserted.BeforeMessageID)
+	assert.Equal(t, adk.GetMessageID(chatModel.lastInput[1]), inserted.BeforeMessageID)
+}
+
+func TestAgentsMDIntegration_NoUserAppendsWithEmptyAnchor(t *testing.T) {
+	ctx := context.Background()
+	backend := &memBackend{files: map[string]string{
+		"AGENTS.md": "append test instructions",
+	}}
+	middleware, err := agentsmd.New(ctx, &agentsmd.Config{
+		Backend:       backend,
+		AgentsMDFiles: []string{"AGENTS.md"},
+	})
+	require.NoError(t, err)
+
+	chatModel := &stubChatModel{reply: "ok"}
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:     "agentsmd-no-user",
+		Model:    chatModel,
+		Handlers: []adk.ChatModelAgentMiddleware{middleware},
+	})
+	require.NoError(t, err)
+
+	systemMessage := schema.SystemMessage("existing system message")
+	inserted := findMessageInsertedEvent(t, agent.Run(ctx, &adk.AgentInput{
+		Messages: []*schema.Message{systemMessage},
+	}))
+
+	require.Empty(t, inserted.BeforeMessageID)
+	require.Len(t, chatModel.lastInput, 2)
+	require.Same(t, systemMessage, chatModel.lastInput[0])
+	require.Same(t, inserted.Message, chatModel.lastInput[1])
+	require.Equal(t, true, chatModel.lastInput[1].Extra["__agentsmd_content__"])
+	assert.Empty(t, adk.GetMessageID(systemMessage))
 }
 
 // TestAgentsMDIntegration_PersistsMessageInserted is a true end-to-end test:
