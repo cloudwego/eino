@@ -385,16 +385,21 @@ func (n *WorkflowNode) checkAndAddMappedPath(paths []FieldPath) error {
 		var traversed FieldPath
 		for i, path := range targetPath {
 			traversed = append(traversed, path)
-			if v, ok := m[path]; ok {
-				if _, ok = v.(struct{}); ok {
-					return fmt.Errorf("two terminal field paths conflict for node %s: %v, %v", n.key, traversed, targetPath)
-				}
+			v, exists := m[path]
+			if _, ok := v.(struct{}); ok {
+				return fmt.Errorf("two terminal field paths conflict for node %s: %v, %v", n.key, traversed, targetPath)
 			}
 
 			if i < len(targetPath)-1 {
-				m[path] = make(map[string]any)
-				m = m[path].(map[string]any)
+				if !exists {
+					v = make(map[string]any)
+					m[path] = v
+				}
+				m = v.(map[string]any)
 			} else {
+				if exists {
+					return fmt.Errorf("two terminal field paths conflict for node %s: %v and its sub field paths", n.key, targetPath)
+				}
 				m[path] = struct{}{}
 			}
 		}
