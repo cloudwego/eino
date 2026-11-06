@@ -22,18 +22,18 @@ package subagent
 
 const (
 	agentToolPrompt = `
-# Agent Tool
+# {tool_name} tool
 
-You have access to an 'agent' tool to launch specialized agents that handle isolated tasks autonomously. Each agent invocation starts fresh — provide a complete task description.
+You can use the '{tool_name}' tool to launch specialized agents that handle isolated tasks autonomously. Each {tool_name} invocation starts fresh — provide a complete task description.
 
-When to use the agent tool:
+When to use the {tool_name} tool:
 - When a task is complex and multi-step, and can be fully delegated in isolation
 - When a task is independent of other tasks and can run in parallel
 - When a task requires focused reasoning or heavy token/context usage that would bloat the orchestrator thread
 - When you only care about the output of the subagent, and not the intermediate steps (e.g. performing research then returning a synthesized report)
 
-When NOT to use the agent tool:
-- If you need to see the intermediate reasoning or steps (the agent tool hides them)
+When NOT to use the {tool_name} tool:
+- If you need to see the intermediate reasoning or steps (the {tool_name} tool hides them)
 - If the task is trivial (a few tool calls or simple lookup)
 - If delegating does not reduce token usage, complexity, or context switching
 
@@ -43,7 +43,7 @@ When NOT to use the agent tool:
 - The agent's outputs should generally be trusted.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first.
-- If the user specifies that they want you to run agents "in parallel", you MUST issue multiple Agent tool calls within a single response.
+- If the user specifies that they want you to run agents "in parallel", you MUST issue multiple {tool_name} tool calls within a single response.
 
 ## Writing the prompt
 
@@ -60,18 +60,18 @@ Terse command-style prompts produce shallow, generic work.
 `
 
 	agentToolPromptChinese = `
-# Agent 工具
+# {tool_name} 工具
 
-你可以使用 'agent' 工具启动专门的智能体来自主处理独立任务。每次智能体调用都从零开始——请提供完整的任务描述。
+你可以使用 '{tool_name}' 工具启动专门的智能体来自主处理独立任务。每次 {tool_name} 调用都从零开始——请提供完整的任务描述。
 
-何时使用 agent 工具：
+何时使用 {tool_name} 工具：
 - 当任务复杂且包含多个步骤，并且可以完全独立委托时
 - 当任务独立于其他任务并且可以并行运行时
 - 当任务需要集中推理或大量 token/上下文使用，这会使编排器线程膨胀时
 - 当你只关心子智能体的输出，而不关心中间步骤时（例如执行大量研究然后返回综合报告）
 
-何时不使用 agent 工具：
-- 如果你需要查看中间推理或步骤（agent 工具会隐藏它们）
+何时不使用 {tool_name} 工具：
+- 如果你需要查看中间推理或步骤（{tool_name} 工具会隐藏它们）
 - 如果任务很简单（几个工具调用或简单查找）
 - 如果委托不会减少 token 使用、复杂性或上下文切换
 
@@ -81,7 +81,7 @@ Terse command-style prompts produce shallow, generic work.
 - 智能体的输出通常应该被信任。
 - 明确告诉智能体你期望它编写代码还是只是进行研究（搜索、文件读取等），因为它不知道用户的意图。
 - 如果智能体描述提到应该主动使用它，那么你应该尽力主动使用它。
-- 如果用户指定他们希望你"并行"运行智能体，你必须在一次回复中发起多个 Agent 工具调用。
+- 如果用户指定他们希望你"并行"运行智能体，你必须在一次回复中发起多个 {tool_name} 工具调用。
 
 ## 编写提示词
 
@@ -101,7 +101,7 @@ Terse command-style prompts produce shallow, generic work.
 
 Available agent types are listed in <system-reminder> messages in the conversation.
 
-When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
+When using the {tool_name} tool, specify a subagent_type parameter to select which agent type to use.
 
 ## When to use
 
@@ -113,7 +113,7 @@ Reach for this when the task matches an available agent type, when you have inde
 
 可用的智能体类型会列在对话中的 <system-reminder> 消息里。
 
-使用 Agent 工具时，指定 subagent_type 参数来选择要使用的智能体类型。
+使用 {tool_name} 工具时，指定 subagent_type 参数来选择要使用的智能体类型。
 
 ## 何时使用
 
@@ -123,13 +123,13 @@ Reach for this when the task matches an available agent type, when you have inde
 
 	agentToolBackgroundPrompt = `
 
-Subagents run in the foreground by default; the tool call returns only once the sub-agent completes and no background task is created. Pass ` + "`" + `run_in_background: true` + "`" + ` to create a background task immediately — you'll be notified when it completes, even if it finishes quickly. The launch result includes ` + "`" + `child_session_id` + "`" + `; pass it to a later background agent call to continue the same child session with its prior history, or omit it to start a new child session. After completion notification, use task_output to inspect the terminal result.`
+Subagents run in the foreground by default; the tool call returns only once the sub-agent completes and no background task is created. Pass ` + "`" + `run_in_background: true` + "`" + ` to create a background task immediately — you'll be notified when it completes, even if it finishes quickly. The launch result includes ` + "`" + `child_session_id` + "`" + `; pass it to a later background {tool_name} call to continue the same child session with its prior history, or omit it to start a new child session. After completion notification, use task_output to inspect the terminal result.`
 
 	agentToolBackgroundPromptChinese = `
 
-子智能体默认在前台运行；工具调用会等到子智能体完成后才返回，且不会创建后台任务。若要立即创建后台任务，传 ` + "`" + `run_in_background: true` + "`" + `——即使很快完成，也会通过完成通知告知你。启动结果包含 ` + "`" + `child_session_id` + "`" + `；后续后台 agent 调用可传入该值以继承同一子会话的历史，省略则创建新的子会话。收到完成通知后，用 task_output 查看终态结果。`
+子智能体默认在前台运行；工具调用会等到子智能体完成后才返回，且不会创建后台任务。若要立即创建后台任务，传 ` + "`" + `run_in_background: true` + "`" + `——即使很快完成，也会通过完成通知告知你。启动结果包含 ` + "`" + `child_session_id` + "`" + `；后续后台 {tool_name} 调用可传入该值以继承同一子会话的历史，省略则创建新的子会话。收到完成通知后，用 task_output 查看终态结果。`
 
-	availableAgentTypesPreamble = `Available agent types for the Agent tool:`
+	availableAgentTypesPreamble = `Available agent types for the {tool_name} tool:`
 
-	availableAgentTypesPreambleChinese = `Agent 工具可用的智能体类型：`
+	availableAgentTypesPreambleChinese = `{tool_name} 工具可用的智能体类型：`
 )
