@@ -21,6 +21,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -64,9 +65,15 @@ type Skill struct {
 	BaseDirectory string
 }
 
+// ErrSkillNotFound identifies a requested skill that does not exist.
+// Backends may wrap this error to include the requested name.
+var ErrSkillNotFound = errors.New("skill not found")
+
 // Backend loads skills and provides metadata for tool description rendering.
 type Backend interface {
 	List(ctx context.Context) ([]FrontMatter, error)
+	// Get should return an error wrapping ErrSkillNotFound when the skill is absent.
+	// Other errors are treated as backend failures, even when input recovery is enabled.
 	Get(ctx context.Context, name string) (Skill, error)
 }
 
@@ -137,6 +144,11 @@ type SubAgentOutput = TypedSubAgentOutput[*schema.Message]
 type TypedConfig[M adk.MessageType] struct {
 	// Backend is the backend for retrieving skills.
 	Backend Backend
+	// RecoverInputErrors returns argument decoding errors and errors wrapping
+	// ErrSkillNotFound as tool results so the model can correct its next call.
+	// Defaults to false, preserving error propagation. Backend failures, execution
+	// errors, cancellation, deadlines, and interrupts are never recovered.
+	RecoverInputErrors bool
 	// SkillToolName is the custom name for the skill tool. If nil, the default name "skill" is used.
 	SkillToolName *string
 	// Deprecated: Use adk.SetLanguage(adk.LanguageChinese) instead to enable Chinese prompts globally.
@@ -247,16 +259,17 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		instruction:          instruction,
 		customFormatReminder: config.CustomFormatReminder,
 		tool: &typedSkillTool[M]{
-			b:                 config.Backend,
-			toolName:          name,
-			useChinese:        config.UseChinese,
-			agentHub:          config.AgentHub,
-			modelHub:          config.ModelHub,
-			customToolDesc:    config.CustomToolDescription,
-			customToolParams:  config.CustomToolParams,
-			buildContent:      config.BuildContent,
-			buildForkMessages: config.BuildForkMessages,
-			formatForkResult:  config.FormatForkResult,
+			b:                  config.Backend,
+			recoverInputErrors: config.RecoverInputErrors,
+			toolName:           name,
+			useChinese:         config.UseChinese,
+			agentHub:           config.AgentHub,
+			modelHub:           config.ModelHub,
+			customToolDesc:     config.CustomToolDescription,
+			customToolParams:   config.CustomToolParams,
+			buildContent:       config.BuildContent,
+			buildForkMessages:  config.BuildForkMessages,
+			formatForkResult:   config.FormatForkResult,
 		},
 	}, nil
 }
@@ -514,10 +527,11 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	return adk.AgentMiddleware{
 		AdditionalInstruction: sp,
 		AdditionalTools: []tool.BaseTool{&typedSkillTool[*schema.Message]{
-			b:              config.Backend,
-			toolName:       name,
-			useChinese:     config.UseChinese,
-			customToolDesc: config.CustomToolDescription,
+			b:                  config.Backend,
+			recoverInputErrors: config.RecoverInputErrors,
+			toolName:           name,
+			useChinese:         config.UseChinese,
+			customToolDesc:     config.CustomToolDescription,
 		}},
 	}, nil
 }
@@ -538,8 +552,9 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 }
 
 type typedSkillTool[M adk.MessageType] struct {
-	b        Backend
-	toolName string
+	b                  Backend
+	toolName           string
+	recoverInputErrors bool
 
 	useChinese bool
 	agentHub   TypedAgentHub[M]
@@ -593,11 +608,15 @@ func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON st
 	args := &inputArguments{}
 	err := json.Unmarshal([]byte(argumentsInJSON), args)
 	if err != nil {
-		return "", fmt.Errorf("failed to unmarshal arguments: %w", err)
+		return s.handleInputError(ctx, fmt.Errorf("failed to unmarshal arguments: %w", err))
 	}
 	skill, err := s.b.Get(ctx, args.Skill)
 	if err != nil {
-		return "", fmt.Errorf("failed to get skill: %w", err)
+		err = fmt.Errorf("failed to get skill: %w", err)
+		if errors.Is(err, ErrSkillNotFound) {
+			return s.handleInputError(ctx, err)
+		}
+		return "", err
 	}
 
 	switch skill.Context {
@@ -611,6 +630,32 @@ func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON st
 		}
 		return s.buildSkillResult(ctx, skill, argumentsInJSON)
 	}
+}
+
+func (s *typedSkillTool[M]) handleInputError(ctx context.Context, err error) (string, error) {
+	if !s.recoverInputErrors {
+		return "", err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	// A backend error can carry more than one classification. Control signals take
+	// precedence over a not-found classification and must reach the runtime intact.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, adk.ErrStreamCanceled) {
+		return "", err
+	}
+	var cancelErr *adk.CancelError
+	if errors.As(err, &cancelErr) {
+		return "", err
+	}
+	if _, interrupted := compose.IsInterruptRerunError(err); interrupted {
+		return "", err
+	}
+	if _, interrupted := compose.ExtractInterruptInfo(err); interrupted {
+		return "", err
+	}
+	return fmt.Sprintf("[skill error] %v. Check the skill name and arguments, then retry.", err), nil
 }
 
 func (s *typedSkillTool[M]) setActiveModel(ctx context.Context, modelName string) {
