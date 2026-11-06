@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2167,6 +2168,33 @@ func TestTypedToolEnhancedEventAgenticToolSearchResult(t *testing.T) {
 		require.NotNil(t, block.ToolSearchFunctionToolResult.Result)
 		require.Len(t, block.ToolSearchFunctionToolResult.Result.Tools, 1)
 		assert.Equal(t, "dynamic_tool", block.ToolSearchFunctionToolResult.Result.Tools[0].Name)
+	})
+
+	t.Run("stream with empty chunks", func(t *testing.T) {
+		event := typedToolEnhancedStreamEvent[*schema.AgenticMessage](
+			"call_3", "tool_search", "msg_3",
+			schema.StreamReaderFromArray([]*schema.ToolResult{{}, result, {}}),
+		)
+		stream := event.Output.MessageOutput.MessageStream
+		defer stream.Close()
+		var chunks []*schema.AgenticMessage
+		for {
+			chunk, err := stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			require.NoError(t, err)
+			chunks = append(chunks, chunk)
+		}
+		merged, err := schema.ConcatAgenticMessages(chunks)
+		require.NoError(t, err)
+		require.NotEmpty(t, chunks[0].Extra, "the first chunk carries the message ID")
+		require.Equal(t, chunks[0].Extra, merged.Extra)
+		require.Len(t, merged.ContentBlocks, 1)
+		search := merged.ContentBlocks[0].ToolSearchFunctionToolResult
+		require.NotNil(t, search)
+		require.Equal(t, "call_3", search.CallID)
+		require.Equal(t, result.Parts[0].ToolSearchResult, search.Result)
 	})
 }
 

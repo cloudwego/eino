@@ -1195,6 +1195,14 @@ func concatChunksOfSameContentBlock(blocks []*ContentBlock) (*ContentBlock, erro
 	}
 
 	blockType := blocks[0].Type
+	if blockType == ContentBlockTypeFunctionToolResult {
+		for _, block := range blocks[1:] {
+			if block.Type == ContentBlockTypeToolSearchResult {
+				blockType = ContentBlockTypeToolSearchResult
+				break
+			}
+		}
+	}
 
 	switch blockType {
 	case ContentBlockTypeReasoning:
@@ -1228,9 +1236,7 @@ func concatChunksOfSameContentBlock(blocks []*ContentBlock) (*ContentBlock, erro
 			concatUserInputFiles)
 
 	case ContentBlockTypeToolSearchResult:
-		return concatContentBlockHelper(blocks, blockType,
-			func(b *ContentBlock) *ToolSearchFunctionToolResult { return b.ToolSearchFunctionToolResult },
-			concatToolSearchFunctionToolResult)
+		return concatToolSearchResultBlocks(blocks)
 
 	case ContentBlockTypeAssistantGenText:
 		return concatContentBlockHelper(blocks, blockType,
@@ -1328,7 +1334,10 @@ func concatContentBlockHelper[T contentBlockVariant](
 	if err != nil {
 		return nil, fmt.Errorf("failed to concat '%s' content blocks: %w", expectedType, err)
 	}
+	return newConcatenatedContentBlock(concatenated, blocks)
+}
 
+func newConcatenatedContentBlock[T contentBlockVariant](content *T, blocks []*ContentBlock) (*ContentBlock, error) {
 	extras := make([]map[string]any, 0, len(blocks))
 	for _, block := range blocks {
 		if len(block.Extra) > 0 {
@@ -1338,13 +1347,14 @@ func concatContentBlockHelper[T contentBlockVariant](
 
 	var extra map[string]any
 	if len(extras) > 0 {
+		var err error
 		extra, err = internal.ConcatItems(extras)
 		if err != nil {
 			return nil, fmt.Errorf("failed to concat content block extras: %w", err)
 		}
 	}
 
-	block := NewContentBlock(concatenated)
+	block := NewContentBlock(content)
 	block.Extra = extra
 
 	return block, nil
@@ -1446,14 +1456,35 @@ func concatUserInputFiles(files []*UserInputFile) (*UserInputFile, error) {
 	return nil, fmt.Errorf("cannot concat multiple user input files")
 }
 
-func concatToolSearchFunctionToolResult(results []*ToolSearchFunctionToolResult) (*ToolSearchFunctionToolResult, error) {
-	if len(results) == 0 {
-		return nil, fmt.Errorf("no tool search results found")
+func concatToolSearchResultBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
+	var result *ToolSearchFunctionToolResult
+	for _, block := range blocks {
+		if block.Type != ContentBlockTypeToolSearchResult {
+			continue
+		}
+		if block.ToolSearchFunctionToolResult == nil {
+			return nil, fmt.Errorf("'%s' content is nil", ContentBlockTypeToolSearchResult)
+		}
+		if result != nil {
+			return nil, fmt.Errorf("cannot concat multiple tool search results")
+		}
+		result = block.ToolSearchFunctionToolResult
 	}
-	if len(results) == 1 {
-		return results[0], nil
+
+	// Enhanced-tool streams can encode an empty chunk as an ordinary result.
+	// Treat it as a placeholder only for the same call and keep its extras.
+	for _, block := range blocks {
+		if block.Type == ContentBlockTypeToolSearchResult {
+			continue
+		}
+		if placeholder := block.FunctionToolResult; block.Type == ContentBlockTypeFunctionToolResult &&
+			placeholder != nil && len(placeholder.Content) == 0 &&
+			placeholder.CallID == result.CallID && placeholder.Name == result.Name {
+			continue
+		}
+		return nil, fmt.Errorf("content block type mismatch: expected '%s', but got '%s'", ContentBlockTypeToolSearchResult, block.Type)
 	}
-	return nil, fmt.Errorf("cannot concat multiple tool search results")
+	return newConcatenatedContentBlock(result, blocks)
 }
 
 func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, err error) {
