@@ -1811,6 +1811,9 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	agent TypedAgent[M],
 	spec *turnRunSpec[T, M],
 ) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	l.interruptContexts = nil
 	l.capturedCancelErr = nil
 	l.checkPointRunnerBytes = nil
