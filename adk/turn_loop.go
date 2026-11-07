@@ -992,8 +992,6 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 		return nil
 	}
 
-	l.loadCheckpointID = checkPointID
-
 	data, existed, err := l.config.Store.Get(ctx, checkPointID)
 	if err != nil {
 		return fmt.Errorf("failed to load checkpoint[%s]: %w", checkPointID, err)
@@ -1031,6 +1029,7 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 		l.buffer.PushFront(items)
 	}
 
+	l.loadCheckpointID = checkPointID
 	return nil
 }
 
