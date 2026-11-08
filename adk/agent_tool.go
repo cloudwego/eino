@@ -242,21 +242,25 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		}
 	}
 
+	// Track the final message output separately from the final event: trailing
+	// control/custom events must not replace or close the answer.
 	var lastEvent *TypedAgentEvent[M]
+	var lastMessageOutput *TypedMessageVariant[M]
+
+	closeLastMessageStream := func() {
+		if lastMessageOutput != nil && lastMessageOutput.MessageStream != nil {
+			lastMessageOutput.MessageStream.Close()
+		}
+	}
+
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
 
-		if lastEvent != nil &&
-			lastEvent.Output != nil &&
-			lastEvent.Output.MessageOutput != nil &&
-			lastEvent.Output.MessageOutput.MessageStream != nil {
-			lastEvent.Output.MessageOutput.MessageStream.Close()
-		}
-
 		if event.Err != nil {
+			closeLastMessageStream()
 			return "", event.Err
 		}
 
@@ -282,10 +286,19 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			}
 		}
 
+		if event.Output != nil &&
+			event.Output.MessageOutput != nil &&
+			event.Output.MessageOutput != lastMessageOutput {
+			closeLastMessageStream()
+			lastMessageOutput = event.Output.MessageOutput
+		}
+
 		lastEvent = event
 	}
 
 	if lastEvent != nil && lastEvent.Action != nil && lastEvent.Action.Interrupted != nil {
+		closeLastMessageStream()
+
 		data, existed, err_ := ms.Get(ctx, bridgeCheckpointID)
 		if err_ != nil {
 			return "", fmt.Errorf("failed to get interrupt info: %w", err_)
@@ -313,14 +326,12 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	var ret string
-	if lastEvent.Output != nil {
-		if output := lastEvent.Output.MessageOutput; output != nil {
-			msg, err := output.GetMessage()
-			if err != nil {
-				return "", err
-			}
-			ret = extractTextContent(msg)
+	if lastMessageOutput != nil {
+		msg, err := lastMessageOutput.GetMessage()
+		if err != nil {
+			return "", err
 		}
+		ret = extractTextContent(msg)
 	}
 
 	return ret, nil

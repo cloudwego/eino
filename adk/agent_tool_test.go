@@ -1468,3 +1468,110 @@ func TestAgentToolEventReceiver_StreamingFanoutCopiesPerReceiver(t *testing.T) {
 	assert.Equal(t, "first second", result)
 	assert.Equal(t, []string{"first second", "first second"}, got)
 }
+
+type afterAgentCustomEventMiddleware[M MessageType] struct {
+	TypedBaseChatModelAgentMiddleware[M]
+}
+
+func (m *afterAgentCustomEventMiddleware[M]) AfterAgent(ctx context.Context, _ *TypedChatModelAgentState[M]) (context.Context, error) {
+	return ctx, TypedSendEvent(ctx, &TypedAgentEvent[M]{
+		Action: &AgentAction{CustomizedAction: "audit complete"},
+	})
+}
+
+func TestAgentTool_InvokableRun_AfterAgentCustomEventDoesNotReplaceAnswer(t *testing.T) {
+	ctx := context.Background()
+
+	newMessageTool := func(t *testing.T) tool.BaseTool {
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "messageAgent",
+			Description: "message agent",
+			Model: &mockChatModelForAttack{
+				generateFn: func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+					return schema.AssistantMessage("verified answer", nil), nil
+				},
+			},
+			Handlers: []ChatModelAgentMiddleware{
+				&afterAgentCustomEventMiddleware[*schema.Message]{},
+			},
+		})
+		require.NoError(t, err)
+		return NewAgentTool(ctx, agent)
+	}
+
+	newAgenticTool := func(t *testing.T) tool.BaseTool {
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "agenticAgent",
+			Description: "agentic agent",
+			Model: &mockAgenticModel{
+				generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+					return agenticMsg("verified answer"), nil
+				},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{
+				&afterAgentCustomEventMiddleware[*schema.AgenticMessage]{},
+			},
+		})
+		require.NoError(t, err)
+		return NewTypedAgentTool(ctx, TypedAgent[*schema.AgenticMessage](agent))
+	}
+
+	tests := []struct {
+		name      string
+		streaming bool
+		newTool   func(*testing.T) tool.BaseTool
+	}{
+		{name: "message/generate", streaming: false, newTool: newMessageTool},
+		{name: "message/stream", streaming: true, newTool: newMessageTool},
+		{name: "agentic/generate", streaming: false, newTool: newAgenticTool},
+		{name: "agentic/stream", streaming: true, newTool: newAgenticTool},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := tt.newTool(t).(tool.InvokableTool).InvokableRun(
+				ctx, `{"request":"q"}`, withAgentToolEnableStreaming(tt.streaming))
+			require.NoError(t, err)
+			assert.Equal(t, "verified answer", out)
+		})
+	}
+}
+
+func TestAgentTool_InvokableRun_ForwardsTrailingCustomEvent(t *testing.T) {
+	ctx := context.Background()
+
+	events := []*AgentEvent{
+		EventFromMessage(schema.AssistantMessage("verified answer", nil), nil, schema.Assistant, ""),
+		{Action: &AgentAction{CustomizedAction: "audit complete"}},
+	}
+
+	parentIter, parentGen := NewAsyncIteratorPair[*AgentEvent]()
+	at := NewAgentTool(ctx, &emitEventsAgent{events: events})
+
+	out, err := at.(tool.InvokableTool).InvokableRun(
+		ctx, `{"request":"q"}`, withParentEventReceiver(parentGen))
+	require.NoError(t, err)
+	assert.Equal(t, "verified answer", out)
+
+	parentGen.Close()
+
+	var sawMessage, sawCustomEvent bool
+	for {
+		event, ok := parentIter.Next()
+		if !ok {
+			break
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil &&
+			!event.Output.MessageOutput.IsStreaming &&
+			event.Output.MessageOutput.Message != nil &&
+			event.Output.MessageOutput.Message.Content == "verified answer" {
+			sawMessage = true
+		}
+		if event.Action != nil && event.Action.CustomizedAction == "audit complete" {
+			sawCustomEvent = true
+		}
+	}
+
+	assert.True(t, sawMessage, "message output should be forwarded")
+	assert.True(t, sawCustomEvent, "custom event should be forwarded")
+}
