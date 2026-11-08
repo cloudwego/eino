@@ -1149,11 +1149,9 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 
 	editTarget = append(editTarget, state.Messages[:start]...)
 
-	if clearAtLeastTokens > 0 {
-		needProcessPart = copyMessagesGeneric(state.Messages[start:end])
-	} else {
-		needProcessPart = state.Messages[start:end]
-	}
+	// Clearing may fail after earlier tool pairs have been rewritten. Keep
+	// those edits private until every required offload has succeeded.
+	needProcessPart = copyMessagesGeneric(state.Messages[start:end])
 
 	if t.config.ClearMessageRewriter != nil {
 		var (
