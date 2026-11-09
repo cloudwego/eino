@@ -375,7 +375,8 @@ type iStreamReader interface {
 type stream[T any] struct {
 	items chan streamItem[T]
 
-	closed chan struct{}
+	closed  chan struct{}
+	onClose func()
 
 	automaticClose bool
 	closedFlag     *uint32 // 0 = not closed, 1 = closed, only used when automaticClose is set
@@ -430,14 +431,14 @@ func (s *stream[T]) closeSend() {
 }
 
 func (s *stream[T]) closeRecv() {
-	if s.automaticClose {
-		if atomic.CompareAndSwapUint32(s.closedFlag, 0, 1) {
-			close(s.closed)
-		}
+	if s.automaticClose && !atomic.CompareAndSwapUint32(s.closedFlag, 0, 1) {
 		return
 	}
 
 	close(s.closed)
+	if s.onClose != nil {
+		s.onClose()
+	}
 }
 
 // StreamReaderFromArray creates a StreamReader from a given slice of elements.
@@ -746,6 +747,9 @@ type reader[T any] interface {
 
 func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 	ret := newStream[T](5)
+	var closeOnce sync.Once
+	closeReader := func() { closeOnce.Do(r.close) }
+	ret.onClose = closeReader
 
 	go func() {
 		defer func() {
@@ -758,7 +762,7 @@ func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 			}
 
 			ret.closeSend()
-			r.close()
+			closeReader()
 		}()
 
 		for {
