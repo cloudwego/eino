@@ -177,6 +177,7 @@ type ToolAliasConfig struct {
 	NameAliases []string
 
 	// ArgumentsAliases maps canonical argument keys to their alias lists.
+	// When the canonical key is absent, the first present alias in its list wins.
 	// key=canonical, value=[]alias. Applied to top-level JSON keys before tool execution.
 	// Example: {"query": ["q", "search_term"], "limit": ["max_results", "count"]}
 	ArgumentsAliases map[string][]string
@@ -426,19 +427,21 @@ type toolsTuple struct {
 	streamEndpoints             []StreamableToolEndpoint
 	enhancedInvokableEndpoints  []EnhancedInvokableToolEndpoint
 	enhancedStreamableEndpoints []EnhancedStreamableToolEndpoint
-	// argsAliasMap stores reverse argument alias mappings for each tool.
-	// key: canonical tool name, value: map[aliasKey]canonicalKey (alias → canonical direction)
-	argsAliasMap map[string]map[string]string
+	// argsAliases stores each tool's argument aliases in precedence order.
+	argsAliases map[string][]argumentAlias
 	// canonicalNames stores the canonical name for each tool index
 	canonicalNames []string
 	// toolInfos stores the ToolInfo for each tool index, used for alias validation
 	toolInfos []*schema.ToolInfo
 }
 
+type argumentAlias struct {
+	alias, canonical string
+}
+
 // remapArgs replaces alias keys in the JSON arguments string with canonical keys.
-// aliasMap: alias → canonical mapping
-func remapArgs(args string, aliasMap map[string]string) (string, error) {
-	if len(aliasMap) == 0 {
+func remapArgs(args string, aliases []argumentAlias) (string, error) {
+	if len(aliases) == 0 {
 		return args, nil
 	}
 
@@ -453,7 +456,8 @@ func remapArgs(args string, aliasMap map[string]string) (string, error) {
 	}
 
 	changed := false
-	for alias, canonical := range aliasMap {
+	for _, mapping := range aliases {
+		alias, canonical := mapping.alias, mapping.canonical
 		if v, ok := m[alias]; ok {
 			// Only replace if canonical key doesn't exist.
 			// If both alias and canonical are present (e.g. {"q":"a","query":"b"}),
@@ -486,7 +490,7 @@ type convToolsParams struct {
 }
 
 func (t *toolsTuple) applyAliasConfigs(aliasConfigs map[string]ToolAliasConfig) error {
-	t.argsAliasMap = make(map[string]map[string]string)
+	t.argsAliases = make(map[string][]argumentAlias)
 
 	sortedToolNames := make([]string, 0, len(aliasConfigs))
 	for toolName := range aliasConfigs {
@@ -537,7 +541,7 @@ func (t *toolsTuple) applyNameAliases(toolName string, toolIdx int, nameAliases 
 	return nil
 }
 
-// applyArgsAliases validates argument aliases against the tool schema and builds a reverse alias map for a single tool.
+// applyArgsAliases validates and records aliases in precedence order for a single tool.
 func (t *toolsTuple) applyArgsAliases(toolName string, toolIdx int, argumentsAliases map[string][]string) error {
 	if len(argumentsAliases) == 0 {
 		return nil
@@ -557,6 +561,7 @@ func (t *toolsTuple) applyArgsAliases(toolName string, toolIdx int, argumentsAli
 	}
 
 	reverseMap := make(map[string]string)
+	var mappings []argumentAlias
 	sortedCanonicals := make([]string, 0, len(argumentsAliases))
 	for canonical := range argumentsAliases {
 		sortedCanonicals = append(sortedCanonicals, canonical)
@@ -585,9 +590,10 @@ func (t *toolsTuple) applyArgsAliases(toolName string, toolIdx int, argumentsAli
 					toolName, alias, existingCanonical, canonical)
 			}
 			reverseMap[alias] = canonical
+			mappings = append(mappings, argumentAlias{alias: alias, canonical: canonical})
 		}
 	}
-	t.argsAliasMap[toolName] = reverseMap
+	t.argsAliases[toolName] = mappings
 
 	return nil
 }
@@ -948,8 +954,8 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 
 			// Process argument aliases remapping
 			args := toolCall.Function.Arguments
-			if aliasMap, hasAliases := tuple.argsAliasMap[canonicalToolName]; hasAliases {
-				remappedArgs, err := remapArgs(args, aliasMap)
+			if aliases, hasAliases := tuple.argsAliases[canonicalToolName]; hasAliases {
+				remappedArgs, err := remapArgs(args, aliases)
 				if err != nil {
 					return nil, fmt.Errorf("failed to remap args for tool[name:%s]: %w", canonicalToolName, err)
 				}

@@ -136,6 +136,15 @@ func TestArgumentsAliases(t *testing.T) {
 	assert.Equal(t, float64(10), args["limit"])
 	assert.NotContains(t, args, "q")
 	assert.NotContains(t, args, "max_results")
+
+	t.Run("first configured alias wins when canonical key is absent", func(t *testing.T) {
+		input.ToolCalls[0].Function.Arguments = `{"search_term":"second","q":"first","count":20,"max_results":10}`
+		for i := 0; i < 64; i++ {
+			_, err := node.Invoke(ctx, input)
+			require.NoError(t, err)
+			require.JSONEq(t, `{"query":"first","limit":10}`, receivedArgs)
+		}
+	})
 }
 
 type emptyArgs struct{}
@@ -408,7 +417,7 @@ func TestToolAliasesE2E(t *testing.T) {
 }
 
 func TestRemapArgsEdgeCases(t *testing.T) {
-	aliasMap := map[string]string{"q": "query"}
+	aliasMap := []argumentAlias{{alias: "q", canonical: "query"}}
 
 	t.Run("empty string", func(t *testing.T) {
 		result, err := remapArgs("", aliasMap)
