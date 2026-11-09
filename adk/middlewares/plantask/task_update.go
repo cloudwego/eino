@@ -198,6 +198,7 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		for _, tk := range tasks {
 			taskMap[tk.ID] = tk
 		}
+		taskMap[params.TaskID] = taskData
 
 		if len(params.AddBlocks) > 0 {
 			for _, blockedTaskID := range params.AddBlocks {
@@ -206,11 +207,6 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 				}
 				if hasCyclicDependency(taskMap, params.TaskID, blockedTaskID) {
 					return "", fmt.Errorf("%s adding Task #%s to blocks of Task #%s would create a cyclic dependency", TaskUpdateToolName, blockedTaskID, params.TaskID)
-				}
-			}
-			for _, blockedTaskID := range params.AddBlocks {
-				if addErr := t.addBlockedByToTask(ctx, blockedTaskID, params.TaskID); addErr != nil {
-					return "", fmt.Errorf("%s update Task #%s blocks failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
 				}
 			}
 			taskData.Blocks = appendUnique(taskData.Blocks, params.AddBlocks...)
@@ -225,13 +221,19 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 					return "", fmt.Errorf("%s adding Task #%s to blockedBy of Task #%s would create a cyclic dependency", TaskUpdateToolName, blockingTaskID, params.TaskID)
 				}
 			}
-			for _, blockingTaskID := range params.AddBlockedBy {
-				if addErr := t.addBlocksToTask(ctx, blockingTaskID, params.TaskID); addErr != nil {
-					return "", fmt.Errorf("%s update Task #%s blockedBy failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
-				}
-			}
 			taskData.BlockedBy = appendUnique(taskData.BlockedBy, params.AddBlockedBy...)
 			updatedFields = append(updatedFields, "blockedBy")
+		}
+		// Both dependency sets are valid; now persist their reciprocal edges.
+		for _, blockedTaskID := range params.AddBlocks {
+			if addErr := t.addBlockedByToTask(ctx, blockedTaskID, params.TaskID); addErr != nil {
+				return "", fmt.Errorf("%s update Task #%s blocks failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
+			}
+		}
+		for _, blockingTaskID := range params.AddBlockedBy {
+			if addErr := t.addBlocksToTask(ctx, blockingTaskID, params.TaskID); addErr != nil {
+				return "", fmt.Errorf("%s update Task #%s blockedBy failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
+			}
 		}
 	}
 	if params.Owner != "" {
