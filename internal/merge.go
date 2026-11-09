@@ -34,6 +34,17 @@ func GetMergeFunc(typ reflect.Type) func([]any) (any, error) {
 		return func(vs []any) (any, error) {
 			rvs := reflect.MakeSlice(reflect.SliceOf(typ), 0, len(vs))
 			for _, v := range vs {
+				if v == nil {
+					// A nil interface value has no reflect type of its own. It is
+					// only representable when the merge type can hold nil, where it
+					// becomes a typed zero for the merge function to interpret.
+					if !typeHoldsNil(typ) {
+						return nil, fmt.Errorf(
+							"(values merge) field type mismatch. expected: '%v', got: '<nil>'", typ)
+					}
+					rvs = reflect.Append(rvs, reflect.Zero(typ))
+					continue
+				}
 				if t := reflect.TypeOf(v); t != typ {
 					return nil, fmt.Errorf(
 						"(values merge) field type mismatch. expected: '%v', got: '%v'", typ, t)
@@ -59,9 +70,24 @@ func GetMergeFunc(typ reflect.Type) func([]any) (any, error) {
 	return nil
 }
 
+// typeHoldsNil reports whether values of typ can be nil, i.e. whether a nil
+// interface value is representable as a zero of this type.
+func typeHoldsNil(typ reflect.Type) bool {
+	switch typ.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return true
+	}
+	return false
+}
+
 func mergeMap(typ reflect.Type, vs []any) (any, error) {
 	merged := reflect.MakeMap(typ)
 	for _, v := range vs {
+		if v == nil {
+			// A nil map contributes no entries; skip it rather than failing on
+			// reflect.ValueOf(nil), which has no type to check or iterate.
+			continue
+		}
 		if t := reflect.TypeOf(v); t != typ {
 			return nil, fmt.Errorf(
 				"(values merge map) field type mismatch. expected: '%v', got: '%v'", typ, t)
