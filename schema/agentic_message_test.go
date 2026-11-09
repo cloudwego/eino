@@ -25,6 +25,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestConcatToolSearchResultWithPlaceholder(t *testing.T) {
+	search := NewContentBlock(&ToolSearchFunctionToolResult{
+		CallID: "search", Name: "find_tools", Result: &ToolSearchResult{},
+	})
+	search.StreamingMeta = &StreamingMeta{Index: 0}
+	search.Extra = map[string]any{"search_meta": "result"}
+	for _, tc := range []struct {
+		name      string
+		callID    string
+		toolName  string
+		content   []*FunctionToolResultContentBlock
+		wantError bool
+	}{
+		{name: "same call", callID: "search", toolName: "find_tools"},
+		{name: "different call", callID: "other", toolName: "find_tools", wantError: true},
+		{name: "different tool", callID: "search", toolName: "other", wantError: true},
+		{name: "nonempty result", callID: "search", toolName: "find_tools", wantError: true,
+			content: []*FunctionToolResultContentBlock{{Type: FunctionToolResultContentBlockTypeText, Text: &UserInputText{Text: "output"}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			placeholder := NewContentBlock(&FunctionToolResult{CallID: tc.callID, Name: tc.toolName, Content: tc.content})
+			placeholder.StreamingMeta = &StreamingMeta{Index: 0}
+			placeholder.Extra = map[string]any{"empty_meta": "placeholder"}
+			got, err := ConcatAgenticMessages([]*AgenticMessage{
+				{ContentBlocks: []*ContentBlock{placeholder}},
+				{ContentBlocks: []*ContentBlock{search}},
+			})
+			if tc.wantError {
+				require.ErrorContains(t, err, "content block type mismatch")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, got.ContentBlocks, 1)
+			require.Equal(t, search.ToolSearchFunctionToolResult, got.ContentBlocks[0].ToolSearchFunctionToolResult)
+			require.Equal(t, map[string]any{"empty_meta": "placeholder", "search_meta": "result"}, got.ContentBlocks[0].Extra)
+		})
+	}
+}
+
 func TestConcatAgenticMessages(t *testing.T) {
 	t.Run("single message", func(t *testing.T) {
 		msg := &AgenticMessage{
