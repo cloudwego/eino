@@ -2103,6 +2103,53 @@ func (s *deletableCheckpointStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+type transientTurnLoopReadStore struct {
+	deletableCheckpointStore
+	readErr error
+}
+
+func (s *transientTurnLoopReadStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if s.readErr != nil {
+		return nil, false, s.readErr
+	}
+	return s.deletableCheckpointStore.Get(ctx, key)
+}
+
+func TestTurnLoop_CheckpointReadFailureLeavesCheckpointForRetry(t *testing.T) {
+	ctx := context.Background()
+	store := &transientTurnLoopReadStore{}
+	store.m = make(map[string][]byte)
+	cfg := TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: "checkpoint",
+		GenInput:     genInputConsumeAll,
+		PrepareAgent: prepareTestAgent,
+	}
+
+	first := NewTurnLoop(cfg)
+	first.Push("queued before shutdown")
+	first.Stop()
+	first.Run(ctx)
+	exit := first.Wait()
+	require.True(t, exit.CheckpointAttempted)
+	require.NoError(t, exit.CheckpointErr)
+
+	readErr := errors.New("checkpoint read temporarily unavailable")
+	store.readErr = readErr
+	failed := NewTurnLoop(cfg)
+	failed.Run(ctx)
+	require.ErrorIs(t, failed.Wait().ExitReason, readErr)
+	require.False(t, store.deleteCalled, "a failed read must not delete the stored checkpoint")
+
+	store.readErr = nil
+	retry := NewTurnLoop(cfg)
+	retry.Stop()
+	retry.Run(ctx)
+	retried := retry.Wait()
+	require.NoError(t, retried.ExitReason)
+	require.Equal(t, []string{"queued before shutdown"}, retried.UnhandledItems)
+}
+
 func TestTurnLoop_CheckpointDeleter_CalledOnContextCancel(t *testing.T) {
 	ctx := context.Background()
 	store := &deletableCheckpointStore{
