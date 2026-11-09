@@ -697,6 +697,10 @@ func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, 
 }
 
 func (srw *streamReaderWithConvert[T]) recv() (T, error) {
+	if srw.eofDone {
+		var zero T
+		return zero, io.EOF
+	}
 	for {
 		out, err := srw.sr.recvAny()
 
