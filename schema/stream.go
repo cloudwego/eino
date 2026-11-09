@@ -599,6 +599,8 @@ type streamReaderWithConvert[T any] struct {
 	convert func(any) (T, error)
 
 	errWrapper func(error) error
+	onClose    func()
+	closeOnce  sync.Once
 	onEOF      func() (T, error)
 	eofDone    bool
 }
@@ -613,6 +615,7 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 		sr:         origin,
 		convert:    convert,
 		errWrapper: opt.ErrWrapper,
+		onClose:    opt.OnClose,
 	}
 
 	if opt.OnEOF != nil {
@@ -640,6 +643,7 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 type convertOptions struct {
 	ErrWrapper func(error) error
 	OnEOF      func() (any, error)
+	OnClose    func()
 }
 
 type ConvertOption func(*convertOptions)
@@ -665,6 +669,13 @@ func WithOnEOF(fn func() (any, error)) ConvertOption {
 	return func(o *convertOptions) {
 		o.OnEOF = fn
 	}
+}
+
+// WithOnClose registers a callback that runs once after the underlying reader is closed.
+// EOF does not invoke it; callers must still close the reader. If the converting
+// reader is copied, the callback runs after all copies have been closed.
+func WithOnClose(fn func()) ConvertOption {
+	return func(o *convertOptions) { o.OnClose = fn }
 }
 
 // StreamReaderWithConvert returns a new StreamReader[D] that wraps sr and
@@ -736,7 +747,12 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 }
 
 func (srw *streamReaderWithConvert[T]) close() {
-	srw.sr.Close()
+	srw.closeOnce.Do(func() {
+		srw.sr.Close()
+		if srw.onClose != nil {
+			srw.onClose()
+		}
+	})
 }
 
 type reader[T any] interface {

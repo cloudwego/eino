@@ -113,6 +113,8 @@ func (p *preBranchHandlerManager) handle(nodeKey string, idx int, value any, isS
 }
 
 type channelManager struct {
+	streamReplay *streamCheckpointReplay
+
 	isStream bool
 	channels map[string]channel
 
@@ -267,6 +269,7 @@ type task struct {
 	syntheticRerunInput     bool
 	subGraphCheckpointReady <-chan *subGraphInterruptError
 	finished                chan struct{}
+	routing                 *completedTaskRouting
 }
 
 type taskManager struct {

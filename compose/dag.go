@@ -56,7 +56,9 @@ type dagChannel struct {
 	DataPredecessors    map[string]bool // if all dependencies have been skipped, indirect dependencies won't effect.
 	Skipped             bool
 
-	mergeConfig FanInMergeConfig
+	mergeConfig   FanInMergeConfig
+	retainedInput *dagChannel
+	retainInput   bool
 }
 
 func (ch *dagChannel) setMergeConfig(cfg FanInMergeConfig) {
@@ -146,6 +148,9 @@ func (ch *dagChannel) get(isStream bool, name string, edgeHandler *edgeHandlerMa
 		}
 	}
 
+	if ch.retainInput {
+		ch.retainValues()
+	}
 	defer func() {
 		ch.Values = make(map[string]any)
 		for k := range ch.ControlPredecessors {

@@ -17,6 +17,7 @@
 package compose
 
 import (
+	"io"
 	"reflect"
 
 	"github.com/cloudwego/eino/internal/generic"
@@ -24,6 +25,7 @@ import (
 )
 
 type streamReader interface {
+	withLifecycle(func(error) error, func()) streamReader
 	copy(n int) []streamReader
 	getType() reflect.Type
 	getChunkType() reflect.Type
@@ -126,4 +128,12 @@ func unpackStreamReader[T any](isr streamReader) (*schema.StreamReader[T], bool)
 	}
 
 	return nil, false
+}
+
+// withLifecycle keeps graph checkpoint handling on the returned typed reader.
+func (srp streamReaderPacker[T]) withLifecycle(onError func(error) error, finish func()) streamReader {
+	return packStreamReader(schema.StreamReaderWithConvert(srp.sr, func(value T) (T, error) { return value, nil },
+		schema.WithErrWrapper(onError),
+		schema.WithOnEOF(func() (any, error) { finish(); return nil, io.EOF }),
+		schema.WithOnClose(finish)))
 }
