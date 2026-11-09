@@ -19,12 +19,26 @@ package embedding
 import (
 	"testing"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestConvEmbedding(t *testing.T) {
 	assert.NotNil(t, ConvCallbackInput(&CallbackInput{}))
 	assert.NotNil(t, ConvCallbackInput([]string{}))
+	assert.NotNil(t, ConvCallbackInput([]MultiModalInput{
+		{
+			{Type: schema.ChatMessagePartTypeText, Text: "hello"},
+		},
+	}))
+	assert.NotNil(t, ConvCallbackInput([][]schema.MessageInputPart{
+		{
+			{Type: schema.ChatMessagePartTypeText, Text: "hello"},
+		},
+	}))
+	assert.NotNil(t, ConvCallbackInput([]schema.MessageInputPart{
+		{Type: schema.ChatMessagePartTypeText, Text: "world"},
+	}))
 	assert.Nil(t, ConvCallbackInput("asd"))
 
 	assert.NotNil(t, ConvCallbackOutput(&CallbackOutput{}))
