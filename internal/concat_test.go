@@ -17,6 +17,7 @@
 package internal
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,14 +81,23 @@ func TestConcat(t *testing.T) {
 	})
 
 	t.Run("concat same key: nil mixed with multiple non-nil strings", func(t *testing.T) {
-		m, err := ConcatItems([]map[string]any{
+		chunks := []map[string]any{
 			{"a": nil},
 			{"a": "foo"},
+			{"a": nil},
 			{"a": "bar"},
 			{"a": nil},
-		})
+		}
+		m, err := ConcatItems(chunks)
 		assert.Nil(t, err)
 		assert.Equal(t, map[string]any{"a": "foobar"}, m)
+		assert.Equal(t, []map[string]any{
+			{"a": nil},
+			{"a": "foo"},
+			{"a": nil},
+			{"a": "bar"},
+			{"a": nil},
+		}, chunks)
 	})
 
 	t.Run("concat same key: nested map with nil then value", func(t *testing.T) {
@@ -107,4 +117,39 @@ func TestConcat(t *testing.T) {
 		assert.Nil(t, err)
 		assert.Equal(t, map[string]any{"a": map[string]any{"x": nil}}, m)
 	})
+}
+
+var concatMapsBenchmarkResult map[string]any
+
+func BenchmarkConcatMapsNilValues(b *testing.B) {
+	for _, chunkCount := range []int{2, 64, 256} {
+		for _, test := range []struct {
+			name     string
+			nilEvery int
+		}{
+			{name: "all_non_nil"},
+			{name: "mixed_nil", nilEvery: 2},
+			{name: "all_nil", nilEvery: 1},
+		} {
+			b.Run(fmt.Sprintf("chunks=%d/%s", chunkCount, test.name), func(b *testing.B) {
+				chunks := make([]map[string]any, chunkCount)
+				for i := range chunks {
+					var value any = "x"
+					if test.nilEvery > 0 && i%test.nilEvery == 0 {
+						value = nil
+					}
+					chunks[i] = map[string]any{"key": value}
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					result, err := ConcatItems(chunks)
+					if err != nil {
+						b.Fatal(err)
+					}
+					concatMapsBenchmarkResult = result
+				}
+			})
+		}
+	}
 }
