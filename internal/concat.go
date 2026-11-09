@@ -142,7 +142,8 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 		// Filter nils out so concat is order-independent and toSliceValue
 		// never receives a nil element (reflect.TypeOf(nil) returns a nil
 		// reflect.Type, which makes reflect.SliceOf(nil) panic).
-		nonNil := make([]any, 0, len(anyVals))
+		// anyVals is collected in rms, so its buffer can be reused without changing input maps.
+		nonNil := anyVals[:0]
 		for _, v := range anyVals {
 			if v != nil {
 				nonNil = append(nonNil, v)
