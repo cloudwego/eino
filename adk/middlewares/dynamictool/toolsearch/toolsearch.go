@@ -298,21 +298,19 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	if !m.useModelToolSearch {
 		existing := toolNameSet(state.ToolInfos)
 		for _, msg := range state.Messages {
-			content, ok := extractToolSearchResult(msg, toolSearchToolName)
-			if !ok {
-				continue
-			}
-			var result toolSearchResult
-			if err := json.Unmarshal([]byte(content), &result); err != nil {
-				continue
-			}
-			for _, name := range result.Matches {
-				if existing[name] {
+			for _, content := range extractToolSearchResults(msg, toolSearchToolName) {
+				var result toolSearchResult
+				if err := json.Unmarshal([]byte(content), &result); err != nil {
 					continue
 				}
-				if info, ok := m.mapOfDynamicTools[name]; ok {
-					state.ToolInfos = append(state.ToolInfos, info)
-					existing[name] = true
+				for _, name := range result.Matches {
+					if existing[name] {
+						continue
+					}
+					if info, ok := m.mapOfDynamicTools[name]; ok {
+						state.ToolInfos = append(state.ToolInfos, info)
+						existing[name] = true
+					}
 				}
 			}
 		}
@@ -321,27 +319,31 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	return ctx, state, nil
 }
 
-// extractToolSearchResult checks if the given message is a tool result from the tool_search tool,
-// and if so returns the content string. Returns ("", false) if not a matching tool result.
-func extractToolSearchResult[M adk.MessageType](msg M, toolName string) (string, bool) {
+// extractToolSearchResults collects each tool_search result in a message.
+// An AgenticMessage can contain results for multiple tool calls.
+func extractToolSearchResults[M adk.MessageType](msg M, toolName string) []string {
 	switch v := any(msg).(type) {
 	case *schema.Message:
 		if v.Role == schema.Tool && v.ToolName == toolName {
-			return v.Content, true
+			return []string{v.Content}
 		}
 	case *schema.AgenticMessage:
+		var results []string
 		for _, block := range v.ContentBlocks {
 			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
 				block.FunctionToolResult != nil && block.FunctionToolResult.Name == toolName {
+				var content strings.Builder
 				for _, b := range block.FunctionToolResult.Content {
 					if b != nil && b.Text != nil {
-						return b.Text.Text, true
+						content.WriteString(b.Text.Text)
 					}
 				}
+				results = append(results, content.String())
 			}
 		}
+		return results
 	}
-	return "", false
+	return nil
 }
 
 func newToolSearchTool(tools map[string]*schema.ToolInfo, useModelToolSearch bool) tool.BaseTool {
