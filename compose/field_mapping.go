@@ -229,6 +229,10 @@ func buildStreamFieldMappingConverter[I any]() func(input streamReader) streamRe
 
 		return packStreamReader(schema.StreamReaderWithConvert(s, func(v map[string]any) (I, error) {
 			t := convertTo(v, generic.TypeOf[I]())
+			if t == nil {
+				var zero I
+				return zero, nil
+			}
 			return t.(I), nil
 		}))
 	}
@@ -249,7 +253,11 @@ func convertTo(mappings map[string]any, typ reflect.Type) any {
 
 func assignOne(destValue reflect.Value, taken any, to string) reflect.Value {
 	if len(to) == 0 { // assign to output directly
-		destValue.Set(reflect.ValueOf(taken))
+		value := reflect.ValueOf(taken)
+		if !value.IsValid() {
+			value = reflect.Zero(destValue.Type())
+		}
+		destValue.Set(value)
 		return destValue
 	}
 
