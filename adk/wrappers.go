@@ -860,6 +860,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
 		if prePopAction != nil {
 			event.Action = prePopAction
+			event.Type = actionEventType(prePopAction)
 		}
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -893,6 +894,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		toolMsgID := uuid.NewString()
 		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
 		event.Action = prePopAction
+		event.Type = actionEventType(prePopAction)
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
@@ -927,6 +929,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 		}
 		if prePopAction != nil {
 			event.Action = prePopAction
+			event.Type = actionEventType(prePopAction)
 		}
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -960,6 +963,7 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		toolMsgID := uuid.NewString()
 		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
 		event.Action = prePopAction
+		event.Type = actionEventType(prePopAction)
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
