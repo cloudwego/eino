@@ -28,10 +28,12 @@ import (
 type ErrorHandler func(context.Context, error) string
 
 // WrapToolWithErrorHandler wraps any BaseTool with custom error handling.
-// This function detects the tool type (InvokableTool, StreamableTool, or both)
+// This function detects the tool type (InvokableTool, StreamableTool,
+// EnhancedInvokableTool, EnhancedStreamableTool, or both variants of a pair)
 // and applies the appropriate error handling wrapper.
 // When the wrapped tool returns an error, the error handler function 'h' will be called
 // to convert the error into a string result, and no error will be returned from the wrapper.
+// Enhanced tools receive the same string as a single text part of a [schema.ToolResult].
 //
 // Parameters:
 //   - t: The original BaseTool to be wrapped
@@ -64,6 +66,25 @@ func WrapToolWithErrorHandler(t tool.BaseTool, h ErrorHandler) tool.BaseTool {
 	}
 	if s != nil {
 		return WrapStreamableToolWithErrorHandler(s, h)
+	}
+	if ei, ok := t.(tool.EnhancedInvokableTool); ok {
+		if es, ok := t.(tool.EnhancedStreamableTool); ok {
+			return &combinedEnhancedErrorWrapper{
+				infoHelper: ih,
+				enhancedErrorHandler: &enhancedErrorHandler{
+					i: ei.InvokableRun,
+					h: h,
+				},
+				enhancedStreamErrorHelper: &enhancedStreamErrorHelper{
+					s: es.StreamableRun,
+					h: h,
+				},
+			}
+		}
+		return WrapEnhancedInvokableToolWithErrorHandler(ei, h)
+	}
+	if es, ok := t.(tool.EnhancedStreamableTool); ok {
+		return WrapEnhancedStreamableToolWithErrorHandler(es, h)
 	}
 	return t
 }
@@ -109,6 +130,50 @@ func WrapStreamableToolWithErrorHandler(t tool.StreamableTool, h ErrorHandler) t
 	}
 }
 
+// WrapEnhancedInvokableToolWithErrorHandler wraps an EnhancedInvokableTool with
+// custom error handling. When the wrapped tool returns an error, the error
+// handler function 'h' will be called to convert the error into a string result,
+// which is returned as a single text part of a [schema.ToolResult], and no error
+// will be returned from the wrapper.
+//
+// Parameters:
+//   - tool: The original EnhancedInvokableTool to be wrapped
+//   - h: A function that converts an error to a string
+//
+// Returns:
+//   - A wrapped EnhancedInvokableTool that handles errors internally
+func WrapEnhancedInvokableToolWithErrorHandler(t tool.EnhancedInvokableTool, h ErrorHandler) tool.EnhancedInvokableTool {
+	return &enhancedErrorWrapper{
+		infoHelper: &infoHelper{info: t.Info},
+		enhancedErrorHandler: &enhancedErrorHandler{
+			i: t.InvokableRun,
+			h: h,
+		},
+	}
+}
+
+// WrapEnhancedStreamableToolWithErrorHandler wraps an EnhancedStreamableTool with
+// custom error handling. When the wrapped tool returns an error, the error handler
+// function 'h' will be called to convert the error into a string result, which will
+// be returned as a single-item stream of a [schema.ToolResult] text part, and no
+// error will be returned from the wrapper.
+//
+// Parameters:
+//   - tool: The original EnhancedStreamableTool to be wrapped
+//   - h: A function that converts an error to a string
+//
+// Returns:
+//   - A wrapped EnhancedStreamableTool that handles errors internally
+func WrapEnhancedStreamableToolWithErrorHandler(t tool.EnhancedStreamableTool, h ErrorHandler) tool.EnhancedStreamableTool {
+	return &enhancedStreamErrorWrapper{
+		infoHelper: &infoHelper{info: t.Info},
+		enhancedStreamErrorHelper: &enhancedStreamErrorHelper{
+			s: t.StreamableRun,
+			h: h,
+		},
+	}
+}
+
 type errorWrapper struct {
 	*infoHelper
 	*errorHelper
@@ -123,6 +188,22 @@ type combinedErrorWrapper struct {
 	*infoHelper
 	*errorHelper
 	*streamErrorHelper
+}
+
+type enhancedErrorWrapper struct {
+	*infoHelper
+	*enhancedErrorHandler
+}
+
+type enhancedStreamErrorWrapper struct {
+	*infoHelper
+	*enhancedStreamErrorHelper
+}
+
+type combinedEnhancedErrorWrapper struct {
+	*infoHelper
+	*enhancedErrorHandler
+	*enhancedStreamErrorHelper
 }
 
 type infoHelper struct {
@@ -163,4 +244,40 @@ func (s *streamErrorHelper) StreamableRun(ctx context.Context, argumentsInJSON s
 		return schema.StreamReaderFromArray([]string{s.h(ctx, err)}), nil
 	}
 	return result, nil
+}
+
+type enhancedErrorHandler struct {
+	i func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error)
+	h ErrorHandler
+}
+
+func (e *enhancedErrorHandler) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+	result, err := e.i(ctx, toolArgument, opts...)
+	if _, ok := compose.IsInterruptRerunError(err); ok {
+		return result, err
+	}
+	if err != nil {
+		return textToolResult(e.h(ctx, err)), nil
+	}
+	return result, nil
+}
+
+type enhancedStreamErrorHelper struct {
+	s func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)
+	h ErrorHandler
+}
+
+func (e *enhancedStreamErrorHelper) StreamableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	result, err := e.s(ctx, toolArgument, opts...)
+	if _, ok := compose.IsInterruptRerunError(err); ok {
+		return result, err
+	}
+	if err != nil {
+		return schema.StreamReaderFromArray([]*schema.ToolResult{textToolResult(e.h(ctx, err))}), nil
+	}
+	return result, nil
+}
+
+func textToolResult(text string) *schema.ToolResult {
+	return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: text}}}
 }
