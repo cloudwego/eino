@@ -1388,7 +1388,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -1404,7 +1404,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		fileContentStr := strings.TrimPrefix(strings.TrimSpace(fileContent.Content), "1\t")
 		assert.Equal(t, "Sunny", fileContentStr)
 
-		msgs = append(msgs, []*schema.Message{
+		msgs = append(s.Messages, []*schema.Message{
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_8877665544",
@@ -1423,7 +1423,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -1431,7 +1431,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[4].ToolCalls)
-		assert.NotNil(t, msgs[4].Extra[msgClearedFlag])
+		assert.NotNil(t, s.Messages[4].Extra[msgClearedFlag])
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
 	})
