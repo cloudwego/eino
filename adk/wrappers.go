@@ -446,6 +446,9 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	}
 
 	combinedErrWrapper := func(err error) error {
+		if _, ok := compose.ExtractInterruptInfo(err); ok {
+			return err
+		}
 		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
 			wrapped := retryWrapper(err)
