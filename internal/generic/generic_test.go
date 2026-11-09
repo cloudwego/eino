@@ -76,6 +76,11 @@ func TestNewInstance(t *testing.T) {
 		assert.Equal(t, []int{1}, inst)
 	})
 
+	t.Run("primitive_array", func(t *testing.T) {
+		inst := NewInstance[[3]int]()
+		assert.Equal(t, [3]int{}, inst)
+	})
+
 	t.Run("primitive_string", func(t *testing.T) {
 		inst := NewInstance[string]()
 		assert.Equal(t, "", inst)

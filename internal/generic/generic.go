@@ -30,8 +30,10 @@ func NewInstance[T any]() T {
 	switch typ.Kind() {
 	case reflect.Map:
 		return reflect.MakeMap(typ).Interface().(T)
-	case reflect.Slice, reflect.Array:
+	case reflect.Slice:
 		return reflect.MakeSlice(typ, 0, 0).Interface().(T)
+	case reflect.Array:
+		return reflect.New(typ).Elem().Interface().(T)
 	case reflect.Ptr:
 		typ = typ.Elem()
 		origin := reflect.New(typ)
