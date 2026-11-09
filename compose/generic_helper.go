@@ -165,6 +165,11 @@ type streamConvertPair struct {
 	restoreStream func(any) (streamReader, error)
 }
 
+// nilStreamChunk distinguishes a non-empty stream with a nil result from an empty stream.
+type nilStreamChunk struct {
+	Present bool
+}
+
 func defaultStreamConvertPair[T any]() streamConvertPair {
 	var t T
 	return streamConvertPair{
@@ -180,9 +185,18 @@ func defaultStreamConvertPair[T any]() streamConvertPair {
 				}
 				return nil, err
 			}
+			if any(value) == nil || isTypedNil(value) {
+				return nilStreamChunk{Present: true}, nil
+			}
 			return value, nil
 		},
 		restoreStream: func(a any) (streamReader, error) {
+			if _, ok := a.(nilStreamChunk); ok {
+				if any(t) != nil && !isTypedNil(t) {
+					return nil, fmt.Errorf("cannot restore nil chunk to streamReader[%T]", t)
+				}
+				return packStreamReader(schema.StreamReaderFromArray([]T{t})), nil
+			}
 			if a == nil {
 				return packStreamReader(schema.StreamReaderFromArray([]T{})), nil
 			}
