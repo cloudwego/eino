@@ -601,6 +601,16 @@ func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx cont
 			return nil, streamErr
 		}
 
+		// Graph interruptions are control-flow signals, not retryable errors.
+		// Bypass the retry policy and preserve the original error (issue #1446).
+		if streamErr != nil {
+			if _, ok := compose.ExtractInterruptInfo(streamErr); ok {
+				signal.ch <- retryVerdict{WillRetry: false}
+				returnCopy.Close()
+				return nil, streamErr
+			}
+		}
+
 		retryCtx := &TypedRetryContext[M]{
 			RetryAttempt:  attempt + 1,
 			InputMessages: currentInput,
@@ -741,6 +751,11 @@ func (r *typedRetryModelWrapper[M]) streamLegacy(ctx context.Context, input []M,
 
 		returnCopy.Close()
 		if errors.Is(streamErr, ErrStreamCanceled) {
+			return nil, streamErr
+		}
+		// Graph interruptions are control-flow signals, not retryable errors
+		// (issue #1446).
+		if _, ok := compose.ExtractInterruptInfo(streamErr); ok {
 			return nil, streamErr
 		}
 		if !isRetryAble(ctx, streamErr) {
