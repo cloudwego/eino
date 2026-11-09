@@ -458,7 +458,13 @@ func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error
 			}
 			chunks = append(chunks, chunk)
 		}
-		msg, _ := schema.ConcatMessages(chunks)
+		msg, concatErr := schema.ConcatMessages(chunks)
+		if concatErr != nil {
+			// Propagate the concatenation error so the retry/failover policy
+			// can see it; discarding it made an incompatible stream look like
+			// a successful empty response (issue #1450).
+			return zero, concatErr
+		}
 		if msg != nil {
 			return any(msg).(M), nil
 		}
@@ -479,7 +485,10 @@ func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error
 			}
 			chunks = append(chunks, chunk)
 		}
-		msg, _ := schema.ConcatAgenticMessages(chunks)
+		msg, concatErr := schema.ConcatAgenticMessages(chunks)
+		if concatErr != nil {
+			return zero, concatErr
+		}
 		if msg != nil {
 			return any(msg).(M), nil
 		}
