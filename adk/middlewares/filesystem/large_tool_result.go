@@ -153,15 +153,21 @@ func concatString(sr *schema.StreamReader[string]) (string, error) {
 }
 
 func formatToolMessage(s string) string {
-	reader := bufio.NewScanner(strings.NewReader(s))
+	// Use a Reader instead of a Scanner: offloading only triggers for
+	// results above tokenLimit*4 (80KB with the default limit), so a
+	// single-line result such as minified JSON or base64 routinely
+	// exceeds Scanner's 64KB token limit, which would silently yield an
+	// empty sample.
+	reader := bufio.NewReader(strings.NewReader(s))
 	var b strings.Builder
 
 	lineNum := 1
-	for reader.Scan() {
-		if lineNum > 10 {
+	for lineNum <= 10 {
+		line, err := reader.ReadString('\n')
+		if line == "" && err != nil {
 			break
 		}
-		line := reader.Text()
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 
 		if utf8.RuneCountInString(line) > 1000 {
 			runes := []rune(line)
@@ -171,6 +177,9 @@ func formatToolMessage(s string) string {
 		b.WriteString(fmt.Sprintf("%d: %s\n", lineNum, line))
 
 		lineNum++
+		if err != nil {
+			break
+		}
 	}
 
 	return b.String()

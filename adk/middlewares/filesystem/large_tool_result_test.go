@@ -457,6 +457,16 @@ func TestFormatToolMessage(t *testing.T) {
 			expected: fmt.Sprintf("1: %s\n", strings.Repeat("a", 1000)),
 		},
 		{
+			name: "single line beyond the scanner token limit",
+			// Offloading only triggers for results above tokenLimit*4
+			// (80KB with the default 20000-token limit), so single-line
+			// results such as minified JSON or base64 routinely exceed
+			// bufio.Scanner's 64KB token limit. The sample must stay
+			// truncated, not silently come back empty.
+			input:    strings.Repeat("a", 100000),
+			expected: fmt.Sprintf("1: %s\n", strings.Repeat("a", 1000)),
+		},
+		{
 			name:     "unicode characters",
 			input:    "你好世界\n测试",
 			expected: "1: 你好世界\n2: 测试\n",
