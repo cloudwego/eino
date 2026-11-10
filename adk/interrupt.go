@@ -218,6 +218,7 @@ type serialization struct {
 	EnableStreaming           bool
 	InterruptID2Address       map[string]Address
 	InterruptID2State         map[string]core.InterruptState
+	InterruptID2Info          map[string]core.InterruptInfo
 }
 
 func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkpointID string) (
@@ -240,7 +241,7 @@ func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkp
 	if err = restoreRunnerCheckpointInfoData(s); err != nil {
 		return nil, nil, nil, err
 	}
-	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
+	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State, s.InterruptID2Info)
 
 	return ctx, s.RunCtx, &ResumeInfo{
 		EnableStreaming: s.EnableStreaming,
@@ -301,7 +302,7 @@ func runnerSaveCheckPointImpl(
 
 	runCtx := getRunCtx(ctx)
 
-	id2Addr, id2State := core.SignalToPersistenceMaps(is)
+	id2Addr, id2State, id2Info := core.SignalToPersistenceMaps(is)
 	info, infoDataStateID := compactRunnerCheckpointInfoData(info, is)
 
 	buf := &bytes.Buffer{}
@@ -310,6 +311,7 @@ func runnerSaveCheckPointImpl(
 		Info:                      info,
 		InfoDataSourceInterruptID: infoDataStateID,
 		InterruptID2Address:       id2Addr,
+		InterruptID2Info:          id2Info,
 		InterruptID2State:         id2State,
 		EnableStreaming:           enableStreaming,
 	})

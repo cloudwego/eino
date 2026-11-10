@@ -81,6 +81,7 @@ type addrCtxKey struct{}
 type addrCtx struct {
 	addr           Address
 	interruptState *InterruptState
+	interruptInfo  *InterruptInfo
 	isResumeTarget bool
 	resumeData     any
 }
@@ -94,6 +95,8 @@ type globalResumeInfo struct {
 	id2State          map[string]InterruptState
 	id2StateUsed      map[string]bool
 	id2Addr           map[string]Address
+	id2Info           map[string]InterruptInfo
+	id2InfoUsed       map[string]bool
 }
 
 // GetCurrentAddress returns the hierarchical address of the currently executing component.
@@ -254,6 +257,7 @@ func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context
 			id2ResumeData:     newMap,
 			id2ResumeDataUsed: make(map[string]bool),
 			id2StateUsed:      make(map[string]bool),
+			id2InfoUsed:       make(map[string]bool),
 		})
 	}
 
@@ -269,7 +273,7 @@ func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context
 }
 
 func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
-	id2State map[string]InterruptState) context.Context {
+	id2State map[string]InterruptState, id2Info map[string]InterruptInfo) context.Context {
 	rInfo, ok := ctx.Value(globalResumeInfoKey{}).(*globalResumeInfo)
 	if ok {
 		rInfo.mu.Lock()
@@ -287,11 +291,19 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 		for id, state := range id2State {
 			rInfo.id2State[id] = state
 		}
+		if rInfo.id2Info == nil {
+			rInfo.id2Info = make(map[string]InterruptInfo)
+		}
+		for id, info := range id2Info {
+			rInfo.id2Info[id] = info
+		}
 	} else {
 		rInfo = &globalResumeInfo{
 			id2Addr:           id2Addr,
 			id2State:          id2State,
+			id2Info:           id2Info,
 			id2StateUsed:      make(map[string]bool),
+			id2InfoUsed:       make(map[string]bool),
 			id2ResumeDataUsed: make(map[string]bool),
 		}
 		ctx = context.WithValue(ctx, globalResumeInfoKey{}, rInfo)
@@ -299,11 +311,19 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 
 	runCtx, ok := getRunCtx(ctx)
 	if ok {
+		if rInfo.id2InfoUsed == nil {
+			rInfo.id2InfoUsed = make(map[string]bool)
+		}
 		for id_, addr := range id2Addr {
 			if addr.Equals(runCtx.addr) {
 				if used, ok := rInfo.id2StateUsed[id_]; !ok || !used {
 					runCtx.interruptState = generic.PtrOf(rInfo.id2State[id_])
 					rInfo.id2StateUsed[id_] = true
+				}
+
+				if used, ok := rInfo.id2InfoUsed[id_]; !ok || !used {
+					runCtx.interruptInfo = generic.PtrOf(rInfo.id2Info[id_])
+					rInfo.id2InfoUsed[id_] = true
 				}
 
 				if used, ok := rInfo.id2ResumeDataUsed[id_]; !ok || !used {

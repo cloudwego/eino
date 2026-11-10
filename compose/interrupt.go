@@ -361,3 +361,16 @@ func isInterruptError(err error) bool {
 
 	return false
 }
+
+// GetInterruptInfo retrieves the user-facing info originally passed to
+// StatefulInterrupt / Interrupt, if it was persisted with the checkpoint.
+//
+// It complements GetInterruptState: State is the component-internal payload, while
+// Info is what was surfaced to users. It matters for the targeted resume pattern:
+// when a sibling interrupt is resumed, a non-target interrupted component is
+// re-executed and must re-interrupt to preserve its state. Without this function
+// it cannot reconstruct the original info, so any extra fields beyond what it can
+// re-derive from the state would be silently lost.
+func GetInterruptInfo[T any](ctx context.Context) (wasInterrupted bool, hasInfo bool, info T) {
+	return core.GetInterruptInfo[T](ctx)
+}

@@ -122,7 +122,7 @@ func TestInterruptConversion(t *testing.T) {
 func TestSignalToPersistenceMaps(t *testing.T) {
 	// Test Case 1: Nil Signal
 	t.Run("NilSignal", func(t *testing.T) {
-		id2addr, id2state := SignalToPersistenceMaps(nil)
+		id2addr, id2state, _ := SignalToPersistenceMaps(nil)
 		assert.NotNil(t, id2addr)
 		assert.NotNil(t, id2state)
 		assert.Empty(t, id2addr)
@@ -142,7 +142,7 @@ func TestSignalToPersistenceMaps(t *testing.T) {
 			},
 		}
 
-		id2addr, id2state := SignalToPersistenceMaps(signal)
+		id2addr, id2state, _ := SignalToPersistenceMaps(signal)
 
 		assert.Len(t, id2addr, 1)
 		assert.Len(t, id2state, 1)
@@ -186,7 +186,7 @@ func TestSignalToPersistenceMaps(t *testing.T) {
 			Subs: []*InterruptSignal{child1, child2},
 		}
 
-		id2addr, id2state := SignalToPersistenceMaps(parent)
+		id2addr, id2state, _ := SignalToPersistenceMaps(parent)
 
 		// Should contain all 3 nodes
 		assert.Len(t, id2addr, 3)
@@ -252,7 +252,7 @@ func TestSignalToPersistenceMaps(t *testing.T) {
 			Subs: []*InterruptSignal{middle},
 		}
 
-		id2addr, id2state := SignalToPersistenceMaps(root)
+		id2addr, id2state, _ := SignalToPersistenceMaps(root)
 
 		// Should contain all 4 nodes
 		assert.Len(t, id2addr, 4)
@@ -281,7 +281,7 @@ func TestSignalToPersistenceMaps(t *testing.T) {
 
 		root := &InterruptSignal{ID: "root", Address: Address{{Type: AddressSegmentAgent, ID: "a1"}}, InterruptState: InterruptState{State: "root"}, Subs: []*InterruptSignal{branch1, branch2}}
 
-		id2addr, id2state := SignalToPersistenceMaps(root)
+		id2addr, id2state, _ := SignalToPersistenceMaps(root)
 
 		// Should contain all 6 nodes
 		assert.Len(t, id2addr, 6)
@@ -305,7 +305,7 @@ func TestSignalToPersistenceMaps(t *testing.T) {
 			},
 		}
 
-		id2addr, id2state := SignalToPersistenceMaps(signal)
+		id2addr, id2state, _ := SignalToPersistenceMaps(signal)
 
 		assert.Len(t, id2addr, 1)
 		assert.Len(t, id2state, 1)
@@ -890,7 +890,7 @@ func TestPopulateInterruptState(t *testing.T) {
 			"interrupt1": {State: "test state"},
 		}
 
-		newCtx := PopulateInterruptState(ctx, id2Addr, id2State)
+		newCtx := PopulateInterruptState(ctx, id2Addr, id2State, nil)
 
 		// Verify the state was populated
 		wasInterrupted, hasState, state := GetInterruptState[string](newCtx)
@@ -918,7 +918,7 @@ func TestPopulateInterruptState(t *testing.T) {
 			"interrupt1": {State: "test state"},
 		}
 
-		newCtx := PopulateInterruptState(ctx, id2Addr, id2State)
+		newCtx := PopulateInterruptState(ctx, id2Addr, id2State, nil)
 
 		// Verify the state was NOT populated (no matching address)
 		wasInterrupted, hasState, state := GetInterruptState[string](newCtx)
@@ -931,7 +931,7 @@ func TestPopulateInterruptState(t *testing.T) {
 	t.Run("PopulateEmptyData", func(t *testing.T) {
 		ctx := context.Background()
 
-		newCtx := PopulateInterruptState(ctx, map[string]Address{}, map[string]InterruptState{})
+		newCtx := PopulateInterruptState(ctx, map[string]Address{}, map[string]InterruptState{}, nil)
 
 		// Verify no state was populated
 		wasInterrupted, hasState, state := GetInterruptState[string](newCtx)
@@ -1124,5 +1124,149 @@ func TestInterruptCtxEqualsWithoutID(t *testing.T) {
 		}
 
 		assert.False(t, ctx1.EqualsWithoutID(ctx2))
+	})
+}
+
+func TestGetInterruptInfo(t *testing.T) {
+	// Test Case 1: No Interrupt State
+	t.Run("NoInterruptState", func(t *testing.T) {
+		ctx := context.Background()
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](ctx)
+		assert.False(t, wasInterrupted)
+		assert.False(t, hasInfo)
+		assert.Equal(t, "", info)
+	})
+
+	// Test Case 2: With Interrupt Info
+	t.Run("WithInterruptInfo", func(t *testing.T) {
+		ctx := context.Background()
+
+		runCtx := &addrCtx{
+			interruptInfo: &InterruptInfo{
+				Info: "approval prompt",
+			},
+		}
+		ctx = context.WithValue(ctx, addrCtxKey{}, runCtx)
+
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](ctx)
+		assert.True(t, wasInterrupted)
+		assert.True(t, hasInfo)
+		assert.Equal(t, "approval prompt", info)
+	})
+
+	// Test Case 3: Wrong Type for Interrupt Info
+	t.Run("WrongType", func(t *testing.T) {
+		ctx := context.Background()
+
+		runCtx := &addrCtx{
+			interruptInfo: &InterruptInfo{
+				Info: 123,
+			},
+		}
+		ctx = context.WithValue(ctx, addrCtxKey{}, runCtx)
+
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](ctx)
+		assert.True(t, wasInterrupted)
+		assert.False(t, hasInfo)
+		assert.Equal(t, "", info)
+	})
+
+	// Test Case 4: Nil Interrupt State
+	t.Run("NilInterruptState", func(t *testing.T) {
+		ctx := context.Background()
+
+		runCtx := &addrCtx{
+			interruptState: nil,
+		}
+		ctx = context.WithValue(ctx, addrCtxKey{}, runCtx)
+
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](ctx)
+		assert.False(t, wasInterrupted)
+		assert.False(t, hasInfo)
+		assert.Equal(t, "", info)
+	})
+
+	// Test Case 5: Interrupt without info leaves Info nil
+	t.Run("InterruptWithoutInfo", func(t *testing.T) {
+		is, err := Interrupt(context.Background(), nil, "state only", nil)
+		assert.Nil(t, err)
+		assert.NotNil(t, is)
+		assert.Nil(t, is.InterruptInfo.Info)
+	})
+}
+
+func TestInterruptInfoSurvivesPersistence(t *testing.T) {
+	// The targeted-resume scenario from the docs: a tool that re-interrupts
+	// must be able to read back the original info after the checkpoint
+	// round trip (SignalToPersistenceMaps <-> PopulateInterruptState).
+	currentAddr := Address{{Type: AddressSegmentAgent, ID: "agent1"}}
+
+	interruptCtx := context.Background()
+	runCtx := &addrCtx{addr: currentAddr}
+	interruptCtx = context.WithValue(interruptCtx, addrCtxKey{}, runCtx)
+
+	t.Run("InfoAndStateRoundTrip", func(t *testing.T) {
+		is, err := Interrupt(interruptCtx, "approval prompt", "stored args", nil)
+		assert.Nil(t, err)
+
+		id2Addr, id2State, id2Info := SignalToPersistenceMaps(is)
+		assert.Len(t, id2State, 1)
+		assert.Len(t, id2Info, 1)
+		for _, st := range id2State {
+			assert.Equal(t, "stored args", st.State)
+		}
+		for _, info := range id2Info {
+			assert.Equal(t, "approval prompt", info.Info)
+		}
+
+		resumeCtx := context.Background()
+		resumeRunCtx := &addrCtx{addr: currentAddr}
+		resumeCtx = context.WithValue(resumeCtx, addrCtxKey{}, resumeRunCtx)
+		resumeCtx = PopulateInterruptState(resumeCtx, id2Addr, id2State, id2Info)
+
+		wasInterrupted, _, storedArgs := GetInterruptState[string](resumeCtx)
+		assert.True(t, wasInterrupted)
+		assert.Equal(t, "stored args", storedArgs)
+
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](resumeCtx)
+		assert.True(t, wasInterrupted)
+		assert.True(t, hasInfo)
+		assert.Equal(t, "approval prompt", info)
+	})
+
+	t.Run("InfoOnlyRoundTrip", func(t *testing.T) {
+		// Interrupt with info only (no state): previously the info was
+		// dropped by SignalToPersistenceMaps; it must now survive.
+		is, err := Interrupt(interruptCtx, "user-facing prompt", nil, nil)
+		assert.Nil(t, err)
+
+		id2Addr, id2State, id2Info := SignalToPersistenceMaps(is)
+		resumeCtx := context.Background()
+		resumeRunCtx := &addrCtx{addr: currentAddr}
+		resumeCtx = context.WithValue(resumeCtx, addrCtxKey{}, resumeRunCtx)
+		resumeCtx = PopulateInterruptState(resumeCtx, id2Addr, id2State, id2Info)
+
+		wasInterrupted, _, _ := GetInterruptState[string](resumeCtx)
+		assert.True(t, wasInterrupted)
+
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](resumeCtx)
+		assert.True(t, wasInterrupted)
+		assert.True(t, hasInfo)
+		assert.Equal(t, "user-facing prompt", info)
+	})
+
+	t.Run("NilInfoRoundTrip", func(t *testing.T) {
+		is, err := Interrupt(interruptCtx, nil, nil, nil)
+		assert.Nil(t, err)
+
+		id2Addr, id2State, id2Info := SignalToPersistenceMaps(is)
+		resumeCtx := context.Background()
+		resumeRunCtx := &addrCtx{addr: currentAddr}
+		resumeCtx = context.WithValue(resumeCtx, addrCtxKey{}, resumeRunCtx)
+		resumeCtx = PopulateInterruptState(resumeCtx, id2Addr, id2State, id2Info)
+
+		wasInterrupted, hasInfo, _ := GetInterruptInfo[string](resumeCtx)
+		assert.True(t, wasInterrupted)
+		assert.False(t, hasInfo)
 	})
 }

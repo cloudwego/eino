@@ -103,6 +103,36 @@ func GetResumeContext[T any](ctx context.Context) (isResumeTarget bool, hasData 
 	return
 }
 
+// GetInterruptInfo provides a type-safe way to check for and retrieve the user-facing
+// information originally passed to Interrupt / StatefulInterrupt, if it was persisted
+// with the checkpoint.
+//
+// It complements GetInterruptState: State is the component-internal payload, while Info
+// is what was surfaced to users (e.g. an approval prompt with fields the component cannot
+// re-derive from the state alone). This matters for the targeted resume pattern: when a
+// sibling interrupt is resumed, a non-target interrupted component is re-executed and must
+// re-interrupt to preserve its state. Without this function it could not reconstruct the
+// original info, so any extra fields would be silently lost.
+//
+// It returns three values:
+//   - wasInterrupted (bool): True if the node was part of a previous interruption.
+//   - hasInfo (bool): True if info was provided during the original interrupt and successfully cast to type `T`.
+//   - info (T): The typed info object (zero value if hasInfo is false).
+func GetInterruptInfo[T any](ctx context.Context) (wasInterrupted bool, hasInfo bool, info T) {
+	rCtx, ok := getRunCtx(ctx)
+	if !ok || rCtx.interruptInfo == nil {
+		return
+	}
+
+	wasInterrupted = true
+	if rCtx.interruptInfo.Info == nil {
+		return
+	}
+
+	info, hasInfo = rCtx.interruptInfo.Info.(T)
+	return
+}
+
 func getRunCtx(ctx context.Context) (*addrCtx, bool) {
 	rCtx, ok := ctx.Value(addrCtxKey{}).(*addrCtx)
 	return rCtx, ok

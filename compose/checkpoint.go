@@ -116,6 +116,7 @@ type checkpoint struct {
 
 	InterruptID2Addr  map[string]Address
 	InterruptID2State map[string]core.InterruptState
+	InterruptID2Info  map[string]core.InterruptInfo
 }
 
 type stateModifierKey struct{}
@@ -168,7 +169,7 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
-	ctx = core.PopulateInterruptState(ctx, cp.InterruptID2Addr, cp.InterruptID2State)
+	ctx = core.PopulateInterruptState(ctx, cp.InterruptID2Addr, cp.InterruptID2State, cp.InterruptID2Info)
 	return context.WithValue(ctx, checkPointKey{}, cp)
 }
 
@@ -399,7 +400,7 @@ func applyToolStreamCheckpoint(
 	}
 	if interrupt != nil {
 		appendInterruptSignalIfMissing(interrupt, streamErr.signal)
-		cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(interrupt)
+		cp.InterruptID2Addr, cp.InterruptID2State, cp.InterruptID2Info = core.SignalToPersistenceMaps(interrupt)
 	}
 }
 

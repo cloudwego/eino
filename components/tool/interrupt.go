@@ -183,3 +183,32 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 func GetResumeContext[T any](ctx context.Context) (isResumeTarget bool, hasData bool, data T) {
 	return core.GetResumeContext[T](ctx)
 }
+
+// GetInterruptInfo retrieves the user-facing info originally passed to
+// StatefulInterrupt / Interrupt, if it was persisted with the checkpoint.
+//
+// It complements GetInterruptState: State is the tool-internal payload, while
+// Info is what was surfaced to users (e.g. an approval prompt with fields the
+// tool cannot re-derive from the state alone). It is essential for the targeted
+// resume pattern: when a sibling interrupt is resumed, a non-target interrupted
+// tool is re-executed and must re-interrupt to preserve its state. Without this
+// function the tool cannot re-emit the original info, so any extra fields beyond
+// what it can re-derive from the state would be silently lost.
+//
+// Example (re-interrupting with the original info preserved):
+//
+//	wasInterrupted, _, storedArgs := tool.GetInterruptState[string](ctx)
+//	if !wasInterrupted {
+//	    return "", tool.StatefulInterrupt(ctx, &ApprovalInfo{...}, args)
+//	}
+//	isTarget, _, _ := tool.GetResumeContext[string](ctx)
+//	if !isTarget {
+//	    _, hasInfo, info := tool.GetInterruptInfo[*ApprovalInfo](ctx)
+//	    if !hasInfo {
+//	        info = &ApprovalInfo{ /* re-derive as a fallback */ }
+//	    }
+//	    return "", tool.StatefulInterrupt(ctx, info, storedArgs)
+//	}
+func GetInterruptInfo[T any](ctx context.Context) (wasInterrupted bool, hasInfo bool, info T) {
+	return core.GetInterruptInfo[T](ctx)
+}

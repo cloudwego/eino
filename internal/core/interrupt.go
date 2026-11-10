@@ -327,13 +327,17 @@ func encapsulateContextAddresses(ctx *InterruptCtx, allowedSet map[AddressSegmen
 	}
 }
 
-// SignalToPersistenceMaps flattens an InterruptSignal tree into two maps suitable for persistence in a checkpoint.
-func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[string]InterruptState) {
+// SignalToPersistenceMaps flattens an InterruptSignal tree into three maps suitable
+// for persistence in a checkpoint: addresses, per-point states, and the user-facing
+// interrupt info. The info map is what allows a re-interrupting component to read back
+// the original user-facing info after a checkpoint restore (see GetInterruptInfo).
+func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[string]InterruptState, map[string]InterruptInfo) {
 	id2addr := make(map[string]Address)
 	id2state := make(map[string]InterruptState)
+	id2info := make(map[string]InterruptInfo)
 
 	if is == nil {
-		return id2addr, id2state
+		return id2addr, id2state, id2info
 	}
 
 	var traverse func(*InterruptSignal)
@@ -341,6 +345,7 @@ func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[strin
 		// Add current signal's data to the maps.
 		id2addr[signal.ID] = signal.Address
 		id2state[signal.ID] = signal.InterruptState // The embedded struct
+		id2info[signal.ID] = signal.InterruptInfo
 
 		// Recurse into children.
 		for _, sub := range signal.Subs {
@@ -349,5 +354,5 @@ func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[strin
 	}
 
 	traverse(is)
-	return id2addr, id2state
+	return id2addr, id2state, id2info
 }

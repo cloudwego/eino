@@ -2097,7 +2097,7 @@ func TestCheckpointStreamConversionIgnoresOnlyRecordedInterrupt(t *testing.T) {
 	recordedErr := StatefulInterrupt(ctx, "recorded", "state")
 	recordedSignal := &core.InterruptSignal{}
 	require.ErrorAs(t, recordedErr, &recordedSignal)
-	id2Addr, id2State := core.SignalToPersistenceMaps(recordedSignal)
+	id2Addr, id2State, _ := core.SignalToPersistenceMaps(recordedSignal)
 
 	newCheckpoint := func(streamErr error) (*checkpoint, *checkPointer) {
 		r, w := schema.Pipe[string](2)
@@ -2135,7 +2135,7 @@ func TestAttack_CheckpointStreamConversionRejectsUnrecordedInterrupt(t *testing.
 	recordedErr := StatefulInterrupt(ctx, "recorded", "recorded-state")
 	recordedSignal := &core.InterruptSignal{}
 	require.ErrorAs(t, recordedErr, &recordedSignal)
-	id2Addr, id2State := core.SignalToPersistenceMaps(recordedSignal)
+	id2Addr, id2State, _ := core.SignalToPersistenceMaps(recordedSignal)
 
 	unrecordedErr := StatefulInterrupt(ctx, "unrecorded", "unrecorded-state")
 	r, w := schema.Pipe[string](1)
@@ -2196,7 +2196,7 @@ func TestCheckpointToolStreamCancellationRerunsProducerOnce(t *testing.T) {
 		InterruptState: core.InterruptState{State: state},
 	}
 	rootSignal := &core.InterruptSignal{ID: "root"}
-	id2Addr, id2State := core.SignalToPersistenceMaps(rootSignal)
+	id2Addr, id2State, _ := core.SignalToPersistenceMaps(rootSignal)
 
 	inputs := make(map[string]any)
 	inputPairs := make(map[string]streamConvertPair)
