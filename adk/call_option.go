@@ -36,7 +36,9 @@ type AgentRunOption struct {
 }
 
 func (o AgentRunOption) DesignateAgent(name ...string) AgentRunOption {
-	o.agentNames = append(o.agentNames, name...)
+	agentNames := make([]string, len(o.agentNames), len(o.agentNames)+len(name))
+	copy(agentNames, o.agentNames)
+	o.agentNames = append(agentNames, name...)
 	return o
 }
 
