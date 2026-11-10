@@ -344,6 +344,9 @@ func (b *InMemoryBackend) grepFilesInParallel(filteredFiles []string, re *regexp
 
 func (b *InMemoryBackend) compilePattern(req *GrepRequest) (*regexp.Regexp, error) {
 	pattern := req.Pattern
+	if req.EnableMultiline {
+		pattern = "(?s)" + pattern
+	}
 	if req.CaseInsensitive {
 		pattern = "(?i)" + pattern
 	}

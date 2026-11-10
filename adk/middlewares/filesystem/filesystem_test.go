@@ -764,6 +764,53 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 
 }
 
+func TestGrepToolMultilineDotAll(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+	if err := backend.Write(ctx, &filesystem.WriteRequest{
+		FilePath: "/notes.txt", Content: "start\nmiddle line\nend",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	grepTool, err := newGrepTool(backend, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "single line default",
+			input: `{"pattern":"start.*end","output_mode":"content"}`,
+			want:  noMatchesFound,
+		},
+		{
+			name:  "content",
+			input: `{"pattern":"start.*end","multiline":true,"output_mode":"content"}`,
+			want:  "/notes.txt:1:start\n/notes.txt:2:middle line\n/notes.txt:3:end",
+		},
+		{
+			name:  "files",
+			input: `{"pattern":"start.*end","multiline":true,"output_mode":"files_with_matches"}`,
+			want:  "Found 1 file\n/notes.txt",
+		},
+		{
+			name:  "count",
+			input: `{"pattern":"start.*end","multiline":true,"output_mode":"count"}`,
+			want:  "/notes.txt:3\n\nFound 3 total occurrences across 1 file.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := invokeTool(t, grepTool, tc.input)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, result)
+		})
+	}
+}
+
 func TestGrepToolWithSortingAndPagination(t *testing.T) {
 	backend := filesystem.NewInMemoryBackend()
 	ctx := context.Background()
