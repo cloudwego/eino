@@ -1561,6 +1561,19 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 		}()
 		return iterator
 	}
+	resumeError := func(err error) *AsyncIterator[*TypedAgentEvent[M]] {
+		go func() {
+			if abortOnlyCancel != nil {
+				defer abortOnlyCancel()
+			}
+			if cancelCtxOwned && cancelCtx != nil {
+				defer cancelCtx.markDone()
+			}
+			generator.Send(&TypedAgentEvent[M]{Err: err})
+			generator.Close()
+		}()
+		return iterator
+	}
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
@@ -1579,16 +1592,16 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	}
 
 	if info == nil {
-		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but info is nil", a.Name(ctx)))
+		return resumeError(fmt.Errorf("ChatModelAgent.Resume: agent '%s' was asked to resume but info is nil", a.Name(ctx)))
 	}
 
 	if info.InterruptState == nil {
-		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
+		return resumeError(fmt.Errorf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
 	}
 
 	stateByte, ok := info.InterruptState.([]byte)
 	if !ok {
-		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid interrupt state type: %T",
+		return resumeError(fmt.Errorf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid interrupt state type: %T",
 			a.Name(ctx), info.InterruptState))
 	}
 
@@ -1611,7 +1624,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	if info.ResumeData != nil {
 		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
 		if !ok {
-			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
+			return resumeError(fmt.Errorf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
 				a.Name(ctx), info.ResumeData))
 		}
 		historyModifier = resumeData.HistoryModifier
