@@ -18,12 +18,16 @@ package plantask
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/adk/middlewares/filesystem"
 )
 
 func TestTaskListTool(t *testing.T) {
@@ -57,4 +61,63 @@ func TestTaskListTool(t *testing.T) {
 	assert.Contains(t, result, "[blocked by #2]")
 	assert.Contains(t, result, "#2 ["+taskStatusInProgress+"] Task 2")
 	assert.Contains(t, result, "[owner: agent1]")
+}
+
+// pathFreeBackend is a Backend stub that serves file entries exactly as they
+// were registered, without path normalization, so tests stay independent of
+// platform path separators.
+type pathFreeBackend struct {
+	entries  []FileInfo
+	contents map[string]string
+}
+
+func (b *pathFreeBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]FileInfo, error) {
+	return b.entries, nil
+}
+
+func (b *pathFreeBackend) Read(ctx context.Context, req *ReadRequest) (*filesystem.FileContent, error) {
+	content, ok := b.contents[req.FilePath]
+	if !ok {
+		return nil, fmt.Errorf("file not found: %s", req.FilePath)
+	}
+	return &filesystem.FileContent{Content: content}, nil
+}
+
+func (b *pathFreeBackend) Write(ctx context.Context, req *WriteRequest) error {
+	b.contents[req.FilePath] = req.Content
+	return nil
+}
+
+func (b *pathFreeBackend) Delete(ctx context.Context, req *DeleteRequest) error {
+	delete(b.contents, req.FilePath)
+	return nil
+}
+
+func TestTaskListToolSortsTasksByNumericID(t *testing.T) {
+	ctx := context.Background()
+	baseDir := "/tmp/tasks"
+
+	backend := &pathFreeBackend{contents: make(map[string]string)}
+	for _, id := range []string{"10", "2", "1", "11"} {
+		taskData := &task{ID: id, Subject: "Task " + id, Status: taskStatusPending}
+		taskJSON, err := sonic.MarshalString(taskData)
+		assert.NoError(t, err)
+		filePath := baseDir + "/" + id + ".json"
+		backend.entries = append(backend.entries, FileInfo{Path: filePath})
+		backend.contents[filePath] = taskJSON
+	}
+
+	tool := newTaskListTool(backend, baseDir, &sync.Mutex{})
+	result, err := tool.InvokableRun(ctx, `{}`)
+	assert.NoError(t, err)
+
+	lastPos := -1
+	for _, prefix := range []string{"#1 [", "#2 [", "#10 [", "#11 ["} {
+		pos := strings.Index(result, prefix)
+		assert.GreaterOrEqual(t, pos, 0, "missing %s in result: %s", prefix, result)
+		if lastPos >= 0 {
+			assert.Greater(t, pos, lastPos, "tasks not in numeric ID order, got: %s", result)
+		}
+		lastPos = pos
+	}
 }
