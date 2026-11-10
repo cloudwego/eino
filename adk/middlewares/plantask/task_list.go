@@ -74,8 +74,9 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 			continue
 		}
 
+		filePath := resolveListedFilePath(baseDir, file.Path)
 		content, err := backend.Read(ctx, &ReadRequest{
-			FilePath: file.Path,
+			FilePath: filePath,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("%s read task file %s failed, err: %w", TaskListToolName, file.Path, err)
