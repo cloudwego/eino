@@ -17,6 +17,7 @@
 package schema
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,31 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestPipeCancellationHelpers(t *testing.T) {
+	reader, writer := Pipe[int](1)
+	ctx, cancel := context.WithCancel(context.Background())
+	if writer.SendContext(ctx, 1, nil) {
+		t.Fatal("first send should succeed")
+	}
+	cancel()
+	if !writer.SendContext(ctx, 2, nil) {
+		t.Fatal("canceled send should stop")
+	}
+	if writer.SendTerminal(context.DeadlineExceeded) {
+		t.Fatal("terminal error should be delivered")
+	}
+	writer.Close()
+	if _, err := reader.Recv(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Recv() error = %v, want deadline exceeded", err)
+	}
+	reader.Close()
+	select {
+	case <-reader.Done():
+	default:
+		t.Fatal("Done() should close when the reader closes")
+	}
+}
 
 func TestStream(t *testing.T) {
 	s := newStream[int](0)
