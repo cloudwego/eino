@@ -1368,6 +1368,16 @@ func TestWithForceNewRun(t *testing.T) {
 	result, err := r.Invoke(ctx, "input", WithCheckPointID("1"), WithForceNewRun())
 	assert.NoError(t, err)
 	assert.Equal(t, "input1", result)
+
+	// WithForceNewRun must also work when it is not the last option.
+	result, err = r.Invoke(ctx, "input", WithForceNewRun(), WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input1", result)
+
+	result, err = r.Invoke(ctx, "input", WithForceNewRun(), WithCheckPointID("1"), WithStateModifier(
+		func(ctx context.Context, _ NodePath, state any) error { return nil }))
+	assert.NoError(t, err)
+	assert.Equal(t, "input1", result)
 }
 
 type failStore struct {
