@@ -154,6 +154,18 @@ type TypedConfig[M adk.MessageType] struct {
 	// or return an error in context mode.
 	ModelHub TypedModelHub[M]
 
+	// PreloadSkills lists the names of skills whose full content is preloaded into
+	// the agent's system instruction when the middleware is created, so the model
+	// starts with their instructions without calling the skill tool.
+	// Each name must exist in the Backend, and the skill must not use
+	// "context: fork" or "context: fork_with_context", which are executed by
+	// sub-agents and cannot be preloaded.
+	// The "model" frontmatter field of preloaded skills has no effect: it only
+	// applies when the skill is loaded through the skill tool.
+	// Skills not listed here keep the default on-demand behavior via the skill tool.
+	// optional
+	PreloadSkills []string
+
 	// CustomSystemPrompt allows customizing the system prompt injected into the agent.
 	// If nil, the default system prompt is used.
 	// The function receives the skill tool name as a parameter.
@@ -218,6 +230,14 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if len(config.PreloadSkills) > 0 {
+		section, err := buildPreloadSection(ctx, config.Backend, config.PreloadSkills, name, config.UseChinese)
+		if err != nil {
+			return nil, err
+		}
+		instruction += section
 	}
 
 	return &typedSkillHandler[M]{
@@ -331,6 +351,14 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 		}
 	}
 
+	if len(config.PreloadSkills) > 0 {
+		section, err := buildPreloadSection(ctx, config.Backend, config.PreloadSkills, name, config.UseChinese)
+		if err != nil {
+			return adk.AgentMiddleware{}, err
+		}
+		sp += section
+	}
+
 	return adk.AgentMiddleware{
 		AdditionalInstruction: sp,
 		AdditionalTools: []tool.BaseTool{&typedSkillTool[*schema.Message]{
@@ -355,6 +383,49 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 	return pyfmt.Fmt(prompt, map[string]string{
 		"tool_name": skillToolName,
 	})
+}
+
+type preloadTemplateHelper struct {
+	ToolName string
+	Skills   []Skill
+}
+
+// buildPreloadSection loads the skills to preload from the backend and renders
+// the instruction section that inlines their full content.
+func buildPreloadSection(ctx context.Context, backend Backend, names []string, toolName string, useChinese bool) (string, error) {
+	skills := make([]Skill, 0, len(names))
+	for _, name := range names {
+		skill, err := backend.Get(ctx, name)
+		if err != nil {
+			return "", fmt.Errorf("failed to preload skill '%s': %w", name, err)
+		}
+		switch skill.Context {
+		case ContextModeFork, ContextModeForkWithContext:
+			return "", fmt.Errorf("failed to preload skill '%s': context mode %q runs in a sub-agent and cannot be preloaded", name, skill.Context)
+		}
+		skills = append(skills, skill)
+	}
+
+	tplStr := internal.SelectPrompt(internal.I18nPrompts{
+		English: preloadTemplate,
+		Chinese: preloadTemplateChinese,
+	})
+	if useChinese {
+		tplStr = preloadTemplateChinese
+	}
+
+	tpl, err := template.New("preloaded_skills").Parse(tplStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse preload template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	err = tpl.Execute(&buf, preloadTemplateHelper{ToolName: toolName, Skills: skills})
+	if err != nil {
+		return "", fmt.Errorf("failed to render preload section: %w", err)
+	}
+
+	return buf.String(), nil
 }
 
 type typedSkillTool[M adk.MessageType] struct {
