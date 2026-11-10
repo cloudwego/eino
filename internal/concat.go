@@ -20,13 +20,15 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/internal/generic"
 )
 
 var (
-	concatFuncs = map[reflect.Type]any{
+	concatFuncsMu sync.RWMutex
+	concatFuncs   = map[reflect.Type]any{
 		generic.TypeOf[string]():        concatStrings,
 		generic.TypeOf[int8]():          useLast[int8],
 		generic.TypeOf[int16]():         useLast[int16],
@@ -69,11 +71,16 @@ func concatStrings(ss []string) (string, error) {
 }
 
 func RegisterStreamChunkConcatFunc[T any](fn func([]T) (T, error)) {
+	concatFuncsMu.Lock()
 	concatFuncs[generic.TypeOf[T]()] = fn
+	concatFuncsMu.Unlock()
 }
 
 func GetConcatFunc(typ reflect.Type) func(reflect.Value) (reflect.Value, error) {
-	if fn, ok := concatFuncs[typ]; ok {
+	concatFuncsMu.RLock()
+	fn, ok := concatFuncs[typ]
+	concatFuncsMu.RUnlock()
+	if ok {
 		return func(a reflect.Value) (reflect.Value, error) {
 			rvs := reflect.ValueOf(fn).Call([]reflect.Value{a})
 			var err error
