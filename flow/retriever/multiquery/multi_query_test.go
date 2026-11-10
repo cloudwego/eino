@@ -18,6 +18,7 @@ package multiquery
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -114,5 +115,57 @@ func TestMultiQueryRetriever(t *testing.T) {
 	}
 	if len(result) != 3 {
 		t.Fatal("default llm retrieve result is unexpected")
+	}
+}
+
+func TestMultiQueryRetrieverMaxQueriesNum(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   int
+		wantErr bool
+		wantIDs []string
+	}{
+		{name: "negative one", limit: -1, wantErr: true},
+		{name: "negative five", limit: -5, wantErr: true},
+		{name: "default", limit: 0, wantIDs: []string{"1", "2", "3", "4", "5"}},
+		{name: "single query", limit: 1, wantIDs: []string{"1"}},
+		{name: "truncated queries", limit: 3, wantIDs: []string{"1", "2", "3"}},
+		{name: "all queries", limit: 6, wantIDs: []string{"1", "2", "3", "4", "5"}},
+		{name: "larger than query count", limit: 7, wantIDs: []string{"1", "2", "3", "4", "5"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			mqr, err := NewRetriever(ctx, &Config{
+				OrigRetriever: &mockRetriever{},
+				MaxQueriesNum: tt.limit,
+				RewriteHandler: func(ctx context.Context, query string) ([]string, error) {
+					return []string{"1", "2", "3", "4", "5", "1"}, nil
+				},
+			})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "MaxQueriesNum") {
+					t.Fatalf("expected MaxQueriesNum validation error, got %v", err)
+				}
+				if mqr != nil {
+					t.Fatal("expected no retriever for an invalid limit")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			docs, err := mqr.Retrieve(ctx, "query")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, len(docs))
+			for i, doc := range docs {
+				ids[i] = doc.ID
+			}
+			if !reflect.DeepEqual(ids, tt.wantIDs) {
+				t.Fatalf("retrieved IDs = %v, want %v", ids, tt.wantIDs)
+			}
+		})
 	}
 }
