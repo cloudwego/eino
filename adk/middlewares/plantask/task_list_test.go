@@ -58,3 +58,25 @@ func TestTaskListTool(t *testing.T) {
 	assert.Contains(t, result, "#2 ["+taskStatusInProgress+"] Task 2")
 	assert.Contains(t, result, "[owner: agent1]")
 }
+
+func TestTaskListToolWithBaseNameLsInfo(t *testing.T) {
+	ctx := context.Background()
+	backend := newBaseNameLsBackend()
+	baseDir := "/tmp/tasks"
+	lock := &sync.Mutex{}
+
+	task1 := &task{ID: "1", Subject: "Task 1", Status: taskStatusPending}
+	task1JSON, _ := sonic.MarshalString(task1)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
+
+	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusCompleted}
+	task2JSON, _ := sonic.MarshalString(task2)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+
+	tool := newTaskListTool(backend, baseDir, lock)
+
+	result, err := tool.InvokableRun(ctx, `{}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "#1 ["+taskStatusPending+"] Task 1")
+	assert.Contains(t, result, "#2 ["+taskStatusCompleted+"] Task 2")
+}
