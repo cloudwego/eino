@@ -271,6 +271,16 @@ type MiddlewareConfig struct {
 	// Default false, preserving backward compatibility.
 	UseMultiModalRead bool
 
+	// WithoutLargeToolResultOffloading disables automatic offloading of large tool results to Backend
+	// optional, false(enabled) by default
+	WithoutLargeToolResultOffloading bool
+	// LargeToolResultOffloadingTokenLimit sets the token threshold to trigger offloading
+	// optional, 20000 by default
+	LargeToolResultOffloadingTokenLimit int
+	// LargeToolResultOffloadingPathGen generates the write path for offloaded results based on context and ToolInput
+	// optional, "/large_tool_result/{ToolCallID}" by default
+	LargeToolResultOffloadingPathGen func(ctx context.Context, input *compose.ToolInput) (string, error)
+
 	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
 	// optional, ToolsSystemPrompt by default
 	CustomSystemPrompt *string
@@ -350,6 +360,9 @@ func (c *MiddlewareConfig) mergeToolConfigWithDesc(
 //
 // The middleware provides filesystem tools (ls, read_file, write_file, edit_file, glob, grep)
 // and optionally an execute tool if the Backend implements ShellBackend or StreamingShellBackend.
+//
+// Large tool results are automatically offloaded to the Backend unless
+// WithoutLargeToolResultOffloading is set, mirroring the behavior of NewMiddleware.
 func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) (adk.TypedChatModelAgentMiddleware[M], error) {
 	err := config.Validate()
 	if err != nil {
@@ -364,9 +377,19 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 		systemPrompt = *config.CustomSystemPrompt
 	}
 
+	var offloading compose.ToolMiddleware
+	if !config.WithoutLargeToolResultOffloading {
+		offloading = newToolResultOffloading(ctx, &toolResultOffloadingConfig{
+			Backend:       config.Backend,
+			TokenLimit:    config.LargeToolResultOffloadingTokenLimit,
+			PathGenerator: config.LargeToolResultOffloadingPathGen,
+		})
+	}
+
 	m := &typedFilesystemMiddleware[M]{
 		additionalInstruction: systemPrompt,
 		additionalTools:       ts,
+		toolOffloading:        offloading,
 	}
 
 	return m, nil
@@ -381,6 +404,9 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) 
 //
 // The middleware provides filesystem tools (ls, read_file, write_file, edit_file, glob, grep)
 // and optionally an execute tool if the Backend implements ShellBackend or StreamingShellBackend.
+//
+// Large tool results are automatically offloaded to the Backend unless
+// WithoutLargeToolResultOffloading is set.
 //
 // Example usage:
 //
@@ -399,6 +425,7 @@ type typedFilesystemMiddleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
 	additionalInstruction string
 	additionalTools       []tool.BaseTool
+	toolOffloading        compose.ToolMiddleware
 }
 
 func (m *typedFilesystemMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
@@ -412,6 +439,71 @@ func (m *typedFilesystemMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *
 	}
 	nRunCtx.Tools = append(nRunCtx.Tools, m.additionalTools...)
 	return ctx, &nRunCtx, nil
+}
+
+// WrapInvokableToolCall offloads large tool results to the Backend, matching the
+// behavior of the deprecated struct-based NewMiddleware path.
+func (m *typedFilesystemMiddleware[M]) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
+	offload := m.toolOffloading.Invokable
+	if offload == nil {
+		return endpoint, nil
+	}
+	name, callID := toolCtxFields(tCtx)
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		inner := compose.InvokableToolEndpoint(func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			result, err := endpoint(ctx, input.Arguments, input.CallOptions...)
+			if err != nil {
+				return nil, err
+			}
+			return &compose.ToolOutput{Result: result}, nil
+		})
+		out, err := offload(inner)(ctx, &compose.ToolInput{
+			Name:        name,
+			Arguments:   argumentsInJSON,
+			CallID:      callID,
+			CallOptions: opts,
+		})
+		if err != nil {
+			return "", err
+		}
+		return out.Result, nil
+	}, nil
+}
+
+// WrapStreamableToolCall offloads large concatenated tool results to the Backend,
+// matching the behavior of the deprecated struct-based NewMiddleware path.
+func (m *typedFilesystemMiddleware[M]) WrapStreamableToolCall(ctx context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
+	offload := m.toolOffloading.Streamable
+	if offload == nil {
+		return endpoint, nil
+	}
+	name, callID := toolCtxFields(tCtx)
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		inner := compose.StreamableToolEndpoint(func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			sr, err := endpoint(ctx, input.Arguments, input.CallOptions...)
+			if err != nil {
+				return nil, err
+			}
+			return &compose.StreamToolOutput{Result: sr}, nil
+		})
+		out, err := offload(inner)(ctx, &compose.ToolInput{
+			Name:        name,
+			Arguments:   argumentsInJSON,
+			CallID:      callID,
+			CallOptions: opts,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return out.Result, nil
+	}, nil
+}
+
+func toolCtxFields(tCtx *adk.ToolContext) (name, callID string) {
+	if tCtx != nil {
+		name, callID = tCtx.Name, tCtx.CallID
+	}
+	return name, callID
 }
 
 // toolSpec defines a specification for creating a filesystem tool.
