@@ -41,6 +41,10 @@ linters:
         text: "argument-limit: maximum number of arguments per function exceeded"
         linters:
           - revive
+      - path: "components/decision/jev/branch.go"
+        text: "argument-limit: maximum number of arguments per function exceeded"
+        linters:
+          - revive
       - path: "compose/graph_run.go"
         text: "argument-limit: maximum number of arguments per function exceeded"
         linters:
