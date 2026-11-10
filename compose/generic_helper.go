@@ -210,8 +210,8 @@ func defaultStreamMapFilter[T any](key string, isr streamReader) (streamReader, 
 		vv, ok_ := v.(T)
 		if !ok_ {
 			return t, fmt.Errorf(
-				"[defaultStreamMapFilter]fail, key[%s]'s value type[%s] isn't expected type[%s]",
-				key, reflect.TypeOf(v).String(),
+				"[defaultStreamMapFilter]fail, key[%s]'s value type[%v] isn't expected type[%s]",
+				key, reflect.TypeOf(v),
 				generic.TypeOf[T]().String())
 		}
 		return vv, nil
