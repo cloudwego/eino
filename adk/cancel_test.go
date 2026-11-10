@@ -1387,6 +1387,70 @@ func TestCancelMonitoredToolHandler_EnhancedStreamableToolCall(t *testing.T) {
 	})
 }
 
+func TestWrapStreamWithCancelMonitoringCopiedStream(t *testing.T) {
+	r, w := schema.Pipe[int](0)
+	copies := r.Copy(2)
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	defer stopOnce.Do(func() { close(stop) })
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer w.Close()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if w.Send(i, nil) {
+				return
+			}
+		}
+	}()
+	observerDone := make(chan struct{})
+	go func() {
+		defer close(observerDone)
+		defer copies[1].Close()
+		for expected := 0; ; expected++ {
+			value, err := copies[1].Recv()
+			if err == io.EOF {
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, expected, value)
+		}
+	}()
+	cc := newCancelContext()
+	wrapped := wrapStreamWithCancelMonitoring(copies[0], cc)
+	defer wrapped.Close()
+	value, err := wrapped.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, 0, value)
+	close(cc.immediateChan)
+	canceled := make(chan error, 1)
+	go func() {
+		for {
+			_, recvErr := wrapped.Recv()
+			if recvErr != nil {
+				canceled <- recvErr
+				return
+			}
+		}
+	}()
+	select {
+	case err = <-canceled:
+		assert.ErrorIs(t, err, ErrStreamCanceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("copied stream did not honor immediate cancellation")
+	}
+	stopOnce.Do(func() { close(stop) })
+	<-producerDone
+	<-observerDone
+	_, err = wrapped.Recv()
+	assert.ErrorIs(t, err, io.EOF)
+}
+
 func TestCancelContextKey(t *testing.T) {
 	t.Run("WithAndGet_RoundTrips", func(t *testing.T) {
 		cc := newCancelContext()
