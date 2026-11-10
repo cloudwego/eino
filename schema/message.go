@@ -1436,7 +1436,7 @@ func canMergeOutputParts(current, next MessageOutputPart) bool {
 		return false
 	}
 
-	if !isMergeableOutputPartType(current) {
+	if !isMergeableOutputPartType(current) || !isMergeableOutputPartType(next) {
 		return false
 	}
 
