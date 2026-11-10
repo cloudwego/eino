@@ -181,9 +181,10 @@ func runFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, input *
 	}
 
 	ctx = setRunCtx(ctx, &runContext{
-		Session:   isolatedSession,
-		RootInput: parentRunCtx.RootInput,
-		RunPath:   parentRunCtx.RunPath,
+		Session:      isolatedSession,
+		RootInput:    parentRunCtx.RootInput,
+		RunPath:      parentRunCtx.RunPath,
+		InvocationID: parentRunCtx.InvocationID,
 	})
 
 	iter := fa.Run(ctx, input, options...)
@@ -218,9 +219,10 @@ func resumeFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, info
 	}
 
 	ctx = setRunCtx(ctx, &runContext{
-		Session:   isolatedSession,
-		RootInput: parentRunCtx.RootInput,
-		RunPath:   parentRunCtx.RunPath,
+		Session:      isolatedSession,
+		RootInput:    parentRunCtx.RootInput,
+		RunPath:      parentRunCtx.RunPath,
+		InvocationID: parentRunCtx.InvocationID,
 	})
 
 	iter := fa.Resume(ctx, info, opts...)

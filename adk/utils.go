@@ -239,10 +239,11 @@ func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent
 	copy(rp, ae.RunPath)
 
 	copied := &TypedAgentEvent[M]{
-		AgentName: ae.AgentName,
-		RunPath:   rp,
-		Action:    ae.Action,
-		Err:       ae.Err,
+		AgentName:    ae.AgentName,
+		InvocationID: ae.InvocationID,
+		RunPath:      rp,
+		Action:       ae.Action,
+		Err:          ae.Err,
 	}
 
 	if ae.Output == nil {
