@@ -402,6 +402,12 @@ func TestAgenticChatModelAgentRun_WithMiddleware(t *testing.T) {
 
 	mw := &testAgenticMiddleware{
 		beforeFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+			currentMessages, err := TypedGetMessages[*schema.AgenticMessage](ctx)
+			require.NoError(t, err)
+			require.Equal(t, state.Messages, currentMessages)
+			currentMessages[0] = nil
+			require.NotNil(t, state.Messages[0], "returned slice must not alias state slice")
+
 			state.Messages = append(state.Messages, schema.UserAgenticMessage("extra"))
 			return ctx, state, nil
 		},

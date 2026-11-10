@@ -671,26 +671,9 @@ func isNilMessage[M adk.MessageType](msg M) bool {
 }
 
 func (s *typedSkillTool[M]) getMessagesFromState(ctx context.Context) ([]M, error) {
-	var messages []M
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		err := compose.ProcessState(ctx, func(_ context.Context, st *adk.State) error {
-			messages = make([]M, len(st.Messages))
-			for i, m := range st.Messages {
-				messages[i] = any(m).(M)
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to process state: %w", err)
-		}
-	case *schema.AgenticMessage:
-		// Fork mode is not supported for AgenticMessage because the internal
-		// agent state type (agenticState) is unexported from the adk package,
-		// making it inaccessible via compose.ProcessState from middleware packages.
-		// Agent mode (the default) works normally for AgenticMessage.
-		return nil, fmt.Errorf("fork mode is not supported for AgenticMessage; use agent mode instead")
+	messages, err := adk.TypedGetMessages[M](ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agent messages: %w", err)
 	}
 	return messages, nil
 }
