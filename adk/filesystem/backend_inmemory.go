@@ -512,6 +512,7 @@ func matchFileType(ext, fileType string) bool {
 }
 
 // applyContext adds context lines around matches.
+// The caller must hold b.mu's read lock for the entire operation.
 func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []GrepMatch {
 	if len(matches) == 0 {
 		return matches
@@ -551,9 +552,7 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 		fileMatches := matchesByFile[filePath]
 
 		// Get file content once per file
-		b.mu.RLock()
 		entry, exists := b.files[filePath]
-		b.mu.RUnlock()
 
 		if !exists {
 			// If file doesn't exist, keep original matches
