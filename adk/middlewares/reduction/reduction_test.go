@@ -567,7 +567,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("source error after truncation replays swallowed chunks before error", func(t *testing.T) {
+		t.Run("source error after truncation emits truncation notice before error", func(t *testing.T) {
 			wantErr := errors.New("stream source error after truncation")
 			cfg := &ToolReductionConfig{Backend: backend}
 			resp := mw.wrapDefaultStreamableTruncation(ctx, cfg, tCtx, `{}`, stringStreamWithError(
@@ -580,11 +580,17 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.NoError(t, err)
 			assert.Equal(t, "abc", got)
 
-			replayed, err := resp.Recv()
+			notice, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, "defghijklmnoptail", replayed)
+			assert.True(t, strings.HasPrefix(notice, "defghij"))
+			assert.Contains(t, notice, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, notice, "Full output saved to: /tmp/trunc/stream_branches.")
 			_, err = resp.Recv()
 			assert.Equal(t, wantErr, err)
+
+			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/stream_branches"})
+			assert.NoError(t, err)
+			assert.Equal(t, "abcdefghijklmnoptail", content.Content)
 		})
 	})
 
@@ -781,7 +787,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.Equal(t, io.EOF, err)
 		})
 
-		t.Run("source error after truncation replays swallowed chunks before error", func(t *testing.T) {
+		t.Run("source error after truncation emits truncation notice before error", func(t *testing.T) {
 			wantErr := errors.New("enhanced source stream error after truncation")
 			cfg := &ToolReductionConfig{Backend: backend}
 			resp := mw.wrapDefaultEnhancedStreamableTruncation(ctx, cfg, tCtx, toolArg, toolResultStreamWithError(
@@ -798,12 +804,20 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 			assert.NoError(t, err)
 			assert.Equal(t, "abc", got.Parts[0].Text)
 
-			replayed, err := resp.Recv()
+			notice, err := resp.Recv()
 			assert.NoError(t, err)
-			assert.Equal(t, "defghijklmnop", replayed.Parts[0].Text)
-			assert.Equal(t, "tail", replayed.Parts[1].Text)
+			assert.NotEmpty(t, notice.Parts)
+			assert.True(t, strings.HasPrefix(notice.Parts[0].Text, "defghij"))
+			noticeText := stringifyToolOutputParts(notice.Parts)
+			assert.Contains(t, noticeText, "Output truncated after 10 bytes were streamed")
+			assert.Contains(t, noticeText, "Full output saved to: /tmp/trunc/enhanced_stream_branches.")
 			_, err = resp.Recv()
 			assert.Equal(t, wantErr, err)
+
+			content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/enhanced_stream_branches"})
+			assert.NoError(t, err)
+			assert.Contains(t, content.Content, `"text": "defghijklmnop"`)
+			assert.Contains(t, content.Content, `"text": "tail"`)
 		})
 	})
 
