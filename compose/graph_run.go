@@ -602,7 +602,7 @@ func (r *runner) handleInterrupt(
 		return fmt.Errorf("failed to interrupt: %w", err)
 	}
 
-	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	cp.InterruptID2Addr, cp.InterruptID2State, cp.InterruptID2Info = core.SignalToPersistenceMaps(is)
 
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
@@ -748,7 +748,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		return fmt.Errorf("failed to interrupt: %w", err)
 	}
 
-	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	cp.InterruptID2Addr, cp.InterruptID2State, cp.InterruptID2Info = core.SignalToPersistenceMaps(is)
 
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)

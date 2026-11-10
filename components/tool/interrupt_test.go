@@ -132,3 +132,31 @@ func TestGetResumeContext(t *testing.T) {
 		assert.Empty(t, data)
 	})
 }
+
+func TestGetInterruptInfo(t *testing.T) {
+	t.Run("not interrupted returns false", func(t *testing.T) {
+		ctx := context.Background()
+		wasInterrupted, hasInfo, info := GetInterruptInfo[string](ctx)
+		assert.False(t, wasInterrupted)
+		assert.False(t, hasInfo)
+		assert.Empty(t, info)
+	})
+
+	t.Run("interrupt with info survives persistence round trip", func(t *testing.T) {
+		ctx := context.Background()
+		err := StatefulInterrupt(ctx, "approval prompt", "stored args")
+		assert.Error(t, err)
+
+		var signal *core.InterruptSignal
+		assert.True(t, errors.As(err, &signal))
+		assert.Equal(t, "approval prompt", signal.InterruptInfo.Info)
+
+		_, id2State, id2Info := core.SignalToPersistenceMaps(signal)
+		for _, st := range id2State {
+			assert.Equal(t, "stored args", st.State)
+		}
+		for _, info := range id2Info {
+			assert.Equal(t, "approval prompt", info.Info)
+		}
+	})
+}
