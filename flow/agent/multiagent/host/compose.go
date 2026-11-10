@@ -43,9 +43,6 @@ type state struct {
 
 // NewMultiAgent creates a new host multi-agent system.
 //
-// IMPORTANT!! For models that don't output tool calls in the first streaming chunk (e.g. Claude)
-// the default StreamToolCallChecker may not work properly since it only checks the first chunk for tool calls.
-// In such cases, you need to implement a custom StreamToolCallChecker that can properly detect tool calls.
 func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
@@ -71,7 +68,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 	}
 
 	if toolCallChecker == nil {
-		toolCallChecker = firstChunkStreamToolCallChecker
+		toolCallChecker = defaultStreamToolCallChecker
 	}
 
 	g := compose.NewGraph[[]*schema.Message, *schema.Message](
