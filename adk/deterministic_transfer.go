@@ -166,6 +166,11 @@ func forwardEventsAndAppendTransfer(iter *AsyncIterator[*AgentEvent],
 func runFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, input *AgentInput,
 	toAgentNames []string, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
+	if getRunCtx(ctx) == nil {
+		// Direct calls have no parent run context. Let fa.Run add its own run step.
+		ctx = ctxWithNewTypedRunCtx(ctx, input, false)
+	}
+
 	parentSession := getSession(ctx)
 	parentRunCtx := getRunCtx(ctx)
 
@@ -204,6 +209,9 @@ func resumeFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, info
 
 	parentSession := getSession(ctx)
 	parentRunCtx := getRunCtx(ctx)
+	if parentRunCtx == nil || parentSession == nil {
+		return genErrorIter(errors.New("missing run context for flowAgent resume in deterministic transfer"))
+	}
 
 	isolatedSession := &runSession{
 		Values:    parentSession.Values,
