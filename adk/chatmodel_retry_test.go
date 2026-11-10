@@ -517,9 +517,15 @@ func TestChatModelAgentRetry_MaxRetriesExhausted(t *testing.T) {
 	var retryErr *RetryExhaustedError
 	assert.True(t, errors.As(event.Err, &retryErr))
 	assert.True(t, errors.Is(retryErr.LastErr, errRetryAble))
+	assert.True(t, errors.Is(retryErr.RootCause(), errRetryAble))
 
 	_, ok = iterator.Next()
 	assert.False(t, ok)
+}
+
+func TestRetryExhaustedErrorRootCauseNilReceiver(t *testing.T) {
+	var err *RetryExhaustedError
+	assert.NoError(t, err.RootCause())
 }
 
 func TestChatModelAgentRetry_BackoffFunction(t *testing.T) {

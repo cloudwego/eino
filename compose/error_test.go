@@ -45,6 +45,7 @@ func TestCommonError(t *testing.T) {
 
 	assert.True(t, errors.As(err, &ie))
 	assert.Equal(t, "my error", ie.origError.Error())
+	assert.Equal(t, "NodeRunError", ie.ErrorKind())
 
 	// wrapper error
 	sr, sw := schema.Pipe[string](0)
@@ -53,6 +54,7 @@ func TestCommonError(t *testing.T) {
 	assert.True(t, errors.As(err, &ie))
 	assert.ErrorContains(t, ie.origError, "stream reader is empty, concat fail")
 	assert.Equal(t, []string{"1"}, ie.nodePath.path)
+	assert.Equal(t, []string{"1"}, ie.NodePath())
 	println(err.Error())
 }
 
@@ -77,6 +79,16 @@ func TestSubGraphNodeError(t *testing.T) {
 	assert.True(t, errors.As(err, &ie))
 	assert.Equal(t, "my error", ie.origError.Error())
 	assert.Equal(t, []string{"a", "1"}, ie.nodePath.path)
+
+	nodePath := ie.NodePath()
+	nodePath[0] = "mutated"
+	assert.Equal(t, []string{"a", "1"}, ie.NodePath())
+}
+
+func TestInternalErrorDiagnosticAccessorsEmpty(t *testing.T) {
+	err := &internalError{}
+	assert.Empty(t, err.ErrorKind())
+	assert.Nil(t, err.NodePath())
 }
 
 func TestContextCancelDuringRun(t *testing.T) {

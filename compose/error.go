@@ -109,3 +109,18 @@ func (i *internalError) Error() string {
 func (i *internalError) Unwrap() error {
 	return i.origError
 }
+
+// ErrorKind returns the graph error kind while keeping the concrete error type internal.
+func (i *internalError) ErrorKind() string {
+	return string(i.typ)
+}
+
+// NodePath returns a copy of the graph node path where the error occurred.
+func (i *internalError) NodePath() []string {
+	if len(i.nodePath.path) == 0 {
+		return nil
+	}
+	path := make([]string, len(i.nodePath.path))
+	copy(path, i.nodePath.path)
+	return path
+}
