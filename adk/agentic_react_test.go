@@ -1579,3 +1579,61 @@ func TestCoverage_ConsumeStream_Idempotent(t *testing.T) {
 
 	assert.Equal(t, msg1, msg2, "second call should be no-op")
 }
+
+func TestExitToolOnAgenticChatModelAgent(t *testing.T) {
+	ctx := context.Background()
+	mdl := &sequentialAgenticModel{
+		responses: []*schema.AgenticMessage{
+			agenticToolCallMsg("exit", "tool-call-1", `{"final_result":"This is the final result"}`),
+		},
+	}
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "AgenticExitAgent",
+		Description: "Agentic agent with Exit tool",
+		Instruction: "You are a helpful assistant.",
+		Model:       mdl,
+		Exit:        &ExitTool{},
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("Please exit with a final result")},
+	})
+
+	var exitEvent *TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.Nil(t, e.Err, "unexpected event error: %v", e.Err)
+		if e.Action != nil && e.Action.Exit {
+			exitEvent = e
+		}
+	}
+	require.NotNil(t, exitEvent, "expected Exit action on AgenticMessage graph")
+	require.NotNil(t, exitEvent.Output)
+	require.NotNil(t, exitEvent.Output.MessageOutput)
+	require.NotNil(t, exitEvent.Output.MessageOutput.Message)
+	assert.Contains(t, agenticToolResultText(exitEvent.Output.MessageOutput.Message), "This is the final result")
+}
+
+func agenticToolResultText(msg *schema.AgenticMessage) string {
+	if msg == nil {
+		return ""
+	}
+	if s := agenticTextContent(msg); s != "" {
+		return s
+	}
+	for _, b := range msg.ContentBlocks {
+		if b == nil || b.FunctionToolResult == nil {
+			continue
+		}
+		for _, c := range b.FunctionToolResult.Content {
+			if c != nil && c.Text != nil {
+				return c.Text.Text
+			}
+		}
+	}
+	return ""
+}
