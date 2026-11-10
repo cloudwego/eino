@@ -1049,7 +1049,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 			baseOpts := &model.Options{Tools: baseToolInfos}
 			commonOpts := model.GetCommonOptions(baseOpts, opts...)
-			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
 			wrappedModel, err := handler.WrapModel(ctx, &typedEndpointModel[M]{generate: innerEndpoint}, mc)
 			if err != nil {
 				var zero M
@@ -1137,7 +1137,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 			baseOpts := &model.Options{Tools: baseToolInfos}
 			commonOpts := model.GetCommonOptions(baseOpts, opts...)
-			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
 			wrappedModel, err := handler.WrapModel(ctx, &typedEndpointModel[M]{stream: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err

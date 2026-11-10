@@ -213,3 +213,129 @@ func TestFailoverAcceptsAgenticAgent(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, agent)
 }
+
+func TestHandlersReceiveModelFailoverConfig(t *testing.T) {
+	t.Run("CustomHandlerReceivesModelFailoverConfigInGenerateAndStream", func(t *testing.T) {
+		ctx := context.Background()
+
+		m := &fakeChatModel{
+			callbacksEnabled: true,
+			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+				return schema.AssistantMessage("ok", nil), nil
+			},
+			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
+			},
+		}
+
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
+			MaxRetries:     1,
+			ShouldFailover: func(context.Context, *schema.Message, error) bool { return false },
+			GetFailoverModel: func(context.Context, *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
+				return m, nil, nil
+			},
+		}
+
+		var gotGenerateFailoverCfg *ModelFailoverConfig[*schema.Message]
+		var gotStreamFailoverCfg *ModelFailoverConfig[*schema.Message]
+
+		handler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(_ context.Context, cm model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				if gotGenerateFailoverCfg == nil {
+					gotGenerateFailoverCfg = mc.ModelFailoverConfig
+				} else {
+					gotStreamFailoverCfg = mc.ModelFailoverConfig
+				}
+				return cm
+			},
+		}
+
+		wrapped := buildModelWrappers[*schema.Message](m, &modelWrapperConfig{
+			failoverConfig: failoverCfg,
+			handlers:       []ChatModelAgentMiddleware{handler},
+		})
+
+		execCtx := withTypedChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m,
+		})
+		_, err := wrapped.Generate(execCtx, []*schema.Message{schema.UserMessage("hi")})
+		require.NoError(t, err)
+		require.Same(t, failoverCfg, gotGenerateFailoverCfg)
+
+		sr, err := wrapped.Stream(execCtx, []*schema.Message{schema.UserMessage("hi")})
+		require.NoError(t, err)
+		_, err = drainMessageStream(sr)
+		require.NoError(t, err)
+		require.Same(t, failoverCfg, gotStreamFailoverCfg)
+	})
+
+	t.Run("CustomEventSenderHandlerEmitsWillRetryErrorOnStreamFailover", func(t *testing.T) {
+		ctx := context.Background()
+		midErr := errors.New("stream broken mid-way")
+
+		m1 := &fakeChatModel{
+			callbacksEnabled: true,
+			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+				return nil, errors.New("unused")
+			},
+			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return streamWithMidError([]*schema.Message{
+					schema.AssistantMessage("partial", nil),
+				}, midErr), nil
+			},
+		}
+		m2 := &fakeChatModel{
+			callbacksEnabled: true,
+			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+				return nil, errors.New("unused")
+			},
+			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{
+					schema.AssistantMessage("recovered", nil),
+				}), nil
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamFailoverEventSenderAgent",
+			Description: "Agent with custom NewEventSenderModelWrapper and ModelFailoverConfig",
+			Model:       m1,
+			Handlers:    []ChatModelAgentMiddleware{NewEventSenderModelWrapper()},
+			ModelFailoverConfig: &ModelFailoverConfig[*schema.Message]{
+				MaxRetries: 1,
+				ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+					return err != nil
+				},
+				GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
+					return m2, nil, nil
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+		iter := runner.Run(ctx, []Message{schema.UserMessage("hello")})
+
+		var streamErrs []error
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
+				_, recvErr := drainMessageStream(event.Output.MessageOutput.MessageStream)
+				if recvErr != nil {
+					streamErrs = append(streamErrs, recvErr)
+				}
+			}
+		}
+
+		require.Len(t, streamErrs, 1)
+		var willRetry *WillRetryError
+		require.ErrorAs(t, streamErrs[0], &willRetry)
+	})
+}
