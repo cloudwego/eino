@@ -372,7 +372,7 @@ func (m *TypedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTo
 
 func (m *TypedMiddleware[M]) getTriggerContextTokens() int {
 	const defaultTriggerContextTokens = 160000
-	if m.cfg.Trigger != nil {
+	if m.cfg.Trigger != nil && m.cfg.Trigger.ContextTokens > 0 {
 		return m.cfg.Trigger.ContextTokens
 	}
 	return defaultTriggerContextTokens
