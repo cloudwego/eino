@@ -823,6 +823,7 @@ func TestToolRerun(t *testing.T) {
 	assert.Equal(t, []string{"tool node"}, info.RerunNodes)
 	assert.Equal(t, &ToolsInterruptAndRerunExtra{
 		ToolCalls:     tc,
+		ToolCallKeys:  []string{"3", "4", "1", "2"},
 		RerunTools:    []string{"1", "2"},
 		RerunExtraMap: map[string]any{"1": "tool1 rerun extra", "2": "tool2 rerun extra"},
 		ExecutedTools: map[string]string{

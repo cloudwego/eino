@@ -290,16 +290,21 @@ type ToolsInterruptAndRerunExtra struct {
 	// ToolCalls contains all tool calls from the original assistant message.
 	ToolCalls []schema.ToolCall
 
-	// ExecutedTools maps tool call IDs to their string output for successfully executed standard tools.
+	// ToolCallKeys aligns with ToolCalls and identifies each call in the maps below.
+	// Unique non-empty model IDs are preserved. Empty or repeated IDs receive
+	// deterministic batch-local keys; callers should treat these keys as opaque.
+	ToolCallKeys []string
+
+	// ExecutedTools maps stable per-batch tool keys to string output for successfully executed standard tools.
 	ExecutedTools map[string]string
 
-	// ExecutedEnhancedTools maps tool call IDs to their structured multimodal output for successfully executed enhanced tools.
+	// ExecutedEnhancedTools maps ToolCallKeys to structured output for successfully executed enhanced tools.
 	ExecutedEnhancedTools map[string]*schema.ToolResult
 
-	// RerunTools contains the IDs of tool calls that need to be re-executed.
+	// RerunTools contains stable per-batch keys of tool calls that need to be re-executed.
 	RerunTools []string
 
-	// RerunExtraMap stores additional metadata for each tool call that needs rerun, keyed by tool call ID.
+	// RerunExtraMap stores additional metadata for each tool call that needs rerun, keyed by stable per-batch key.
 	RerunExtraMap map[string]any
 }
 
@@ -309,6 +314,7 @@ func init() {
 }
 
 type toolsInterruptAndRerunState struct {
+	ToolKeyVersion        int
 	Input                 *schema.Message
 	ExecutedTools         map[string]string
 	ExecutedEnhancedTools map[string]*schema.ToolResult
@@ -347,21 +353,21 @@ func newToolStreamCheckpointTracker(input *schema.Message) *toolStreamCheckpoint
 	}
 }
 
-func (t *toolStreamCheckpointTracker) recordTool(callID, output string) {
+func (t *toolStreamCheckpointTracker) recordTool(taskKey, output string) {
 	t.mu.Lock()
-	t.executedTools[callID] = output
+	t.executedTools[taskKey] = output
 	t.mu.Unlock()
 }
 
-func (t *toolStreamCheckpointTracker) recordEnhancedTool(callID string, output *schema.ToolResult) {
+func (t *toolStreamCheckpointTracker) recordEnhancedTool(taskKey string, output *schema.ToolResult) {
 	t.mu.Lock()
-	t.executedEnhancedTools[callID] = output
+	t.executedEnhancedTools[taskKey] = output
 	t.mu.Unlock()
 }
 
-func (t *toolStreamCheckpointTracker) recordRerun(callID string) {
+func (t *toolStreamCheckpointTracker) recordRerun(taskKey string) {
 	t.mu.Lock()
-	t.rerunTools[callID] = struct{}{}
+	t.rerunTools[taskKey] = struct{}{}
 	t.mu.Unlock()
 }
 
@@ -373,9 +379,9 @@ func (t *toolStreamCheckpointTracker) interrupt(ctx context.Context) error {
 	}
 
 	rerunTools := make([]string, 0, len(t.rerunTools))
-	for _, call := range t.input.ToolCalls {
-		if _, ok := t.rerunTools[call.ID]; ok {
-			rerunTools = append(rerunTools, call.ID)
+	for _, taskKey := range toolCallKeys(t.input.ToolCalls) {
+		if _, ok := t.rerunTools[taskKey]; ok {
+			rerunTools = append(rerunTools, taskKey)
 		}
 	}
 	executedTools := make(map[string]string, len(t.executedTools))
@@ -388,12 +394,14 @@ func (t *toolStreamCheckpointTracker) interrupt(ctx context.Context) error {
 	}
 	extra := &ToolsInterruptAndRerunExtra{
 		ToolCalls:             t.input.ToolCalls,
+		ToolCallKeys:          toolCallKeys(t.input.ToolCalls),
 		ExecutedTools:         executedTools,
 		ExecutedEnhancedTools: executedEnhancedTools,
 		RerunTools:            rerunTools,
 		RerunExtraMap:         make(map[string]any),
 	}
 	state := &toolsInterruptAndRerunState{
+		ToolKeyVersion:        1,
 		Input:                 t.input,
 		ExecutedTools:         executedTools,
 		ExecutedEnhancedTools: executedEnhancedTools,
@@ -869,7 +877,12 @@ type toolCallTask struct {
 	name                       string
 	arg                        string
 	callID                     string
-	useEnhanced                bool
+	// taskKey is stable for the lifetime of one assistant tool-call batch.
+	// Model-generated call IDs are retained for normal calls, while empty or
+	// duplicate IDs receive a framework-owned positional key for checkpoint
+	// maps and interrupt addresses.
+	taskKey     string
+	useEnhanced bool
 
 	// out
 	executed        bool
@@ -878,6 +891,46 @@ type toolCallTask struct {
 	enhancedOutput  *schema.ToolResult
 	enhancedSOutput *schema.StreamReader[*schema.ToolResult]
 	err             error
+}
+
+// toolCallKeys reserves a prefix outside the entire model ID namespace before
+// assigning positional keys. This avoids collisions even with model IDs that
+// resemble generated keys, while retaining existing unique-ID checkpoints.
+func toolCallKeys(calls []schema.ToolCall) []string {
+	counts := make(map[string]int, len(calls))
+	prefix := "__eino_tool_call_"
+	for _, call := range calls {
+		counts[call.ID]++
+		if strings.HasPrefix(call.ID, prefix) {
+			prefix = call.ID + "_"
+		}
+	}
+	keys := make([]string, len(calls))
+	for i, call := range calls {
+		if call.ID != "" && counts[call.ID] == 1 {
+			keys[i] = call.ID
+		} else {
+			keys[i] = fmt.Sprintf("%s%d", prefix, i)
+		}
+	}
+	return keys
+}
+
+func validateToolCheckpointKeys(state *toolsInterruptAndRerunState) error {
+	if state.ToolKeyVersion == 1 {
+		return nil
+	}
+	if state.ToolKeyVersion != 0 {
+		return fmt.Errorf("unsupported tool checkpoint key version: %d", state.ToolKeyVersion)
+	}
+	for i, key := range toolCallKeys(state.Input.ToolCalls) {
+		if key != state.Input.ToolCalls[i].ID {
+			// Old maps may already have overwritten a result. Never guess and
+			// accidentally replay a completed tool with external side effects.
+			return fmt.Errorf("cannot resume legacy tool checkpoint with empty or duplicate tool call IDs")
+		}
+	}
+	return nil
 }
 
 func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
@@ -893,13 +946,16 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 	}
 
 	toolCallTasks := make([]toolCallTask, n)
+	keys := toolCallKeys(input.ToolCalls)
 
 	for i := 0; i < n; i++ {
 		toolCall := input.ToolCalls[i]
-		if enhancedResult, executed := executedEnhancedTools[toolCall.ID]; executed {
+		taskKey := keys[i]
+		if enhancedResult, executed := executedEnhancedTools[taskKey]; executed {
 			toolCallTasks[i].name = toolCall.Function.Name
 			toolCallTasks[i].arg = toolCall.Function.Arguments
 			toolCallTasks[i].callID = toolCall.ID
+			toolCallTasks[i].taskKey = taskKey
 			toolCallTasks[i].executed = true
 			toolCallTasks[i].useEnhanced = true
 			if isStream {
@@ -909,10 +965,11 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 			}
 			continue
 		}
-		if result, executed := executedTools[toolCall.ID]; executed {
+		if result, executed := executedTools[taskKey]; executed {
 			toolCallTasks[i].name = toolCall.Function.Name
 			toolCallTasks[i].arg = toolCall.Function.Arguments
 			toolCallTasks[i].callID = toolCall.ID
+			toolCallTasks[i].taskKey = taskKey
 			toolCallTasks[i].executed = true
 			toolCallTasks[i].useEnhanced = false
 			if isStream {
@@ -928,10 +985,12 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 				return nil, fmt.Errorf("tool %s not found in toolsNode indexes", toolCall.Function.Name)
 			}
 			toolCallTasks[i] = newUnknownToolTask(toolCall.Function.Name, toolCall.Function.Arguments, toolCall.ID, tn.unknownToolHandler)
+			toolCallTasks[i].taskKey = taskKey
 		} else {
 			toolCallTasks[i].meta = tuple.meta[index]
 			toolCallTasks[i].name = toolCall.Function.Name
 			toolCallTasks[i].callID = toolCall.ID
+			toolCallTasks[i].taskKey = taskKey
 
 			if tuple.enhancedInvokableEndpoints[index] != nil && tuple.enhancedStreamableEndpoints[index] != nil {
 				toolCallTasks[i].enhancedInvokableEndpoint = tuple.enhancedInvokableEndpoints[index]
@@ -1006,7 +1065,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = appendToolAddressSegment(ctx, task.name, task.callID)
+	ctx = appendToolAddressSegment(ctx, task.name, task.taskKey)
 
 	if task.useEnhanced {
 		enhancedOutput, err := task.enhancedInvokableEndpoint(ctx, &ToolInput{
@@ -1045,7 +1104,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = appendToolAddressSegment(ctx, task.name, task.callID)
+	ctx = appendToolAddressSegment(ctx, task.name, task.taskKey)
 
 	if task.useEnhanced {
 		enhancedOutput, err := task.enhancedStreamableEndpoint(ctx, &ToolInput{
@@ -1165,6 +1224,9 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	var executedTools map[string]string
 	var executedEnhancedTools map[string]*schema.ToolResult
 	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
+		if err := validateToolCheckpointKeys(tnState); err != nil {
+			return nil, err
+		}
 		input = tnState.Input
 		if tnState.ExecutedTools != nil {
 			executedTools = tnState.ExecutedTools
@@ -1190,11 +1252,13 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 
 	rerunExtra := &ToolsInterruptAndRerunExtra{
 		ToolCalls:             input.ToolCalls,
+		ToolCallKeys:          toolCallKeys(input.ToolCalls),
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 		RerunExtraMap:         make(map[string]any),
 	}
 	rerunState := &toolsInterruptAndRerunState{
+		ToolKeyVersion:        1,
 		Input:                 input,
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
@@ -1208,24 +1272,24 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 				return nil, fmt.Errorf("failed to invoke tool[name:%s id:%s]: %w", tasks[i].name, tasks[i].callID, tasks[i].err)
 			}
 
-			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].callID)
-			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].callID)
+			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].taskKey)
+			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].taskKey)
 			if info != nil {
-				rerunExtra.RerunExtraMap[tasks[i].callID] = info
+				rerunExtra.RerunExtraMap[tasks[i].taskKey] = info
 			}
 
 			iErr := WrapInterruptAndRerunIfNeeded(ctx,
-				AddressSegment{ID: tasks[i].callID, Type: AddressSegmentTool}, tasks[i].err)
+				AddressSegment{ID: tasks[i].name, SubID: tasks[i].taskKey, Type: AddressSegmentTool}, tasks[i].err)
 			errs = append(errs, iErr)
 			continue
 		}
 		if tasks[i].executed {
 			if tasks[i].useEnhanced {
-				rerunExtra.ExecutedEnhancedTools[tasks[i].callID] = tasks[i].enhancedOutput
-				rerunState.ExecutedEnhancedTools[tasks[i].callID] = tasks[i].enhancedOutput
+				rerunExtra.ExecutedEnhancedTools[tasks[i].taskKey] = tasks[i].enhancedOutput
+				rerunState.ExecutedEnhancedTools[tasks[i].taskKey] = tasks[i].enhancedOutput
 			} else {
-				rerunExtra.ExecutedTools[tasks[i].callID] = tasks[i].output
-				rerunState.ExecutedTools[tasks[i].callID] = tasks[i].output
+				rerunExtra.ExecutedTools[tasks[i].taskKey] = tasks[i].output
+				rerunState.ExecutedTools[tasks[i].taskKey] = tasks[i].output
 			}
 		}
 
@@ -1267,6 +1331,9 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	var executedTools map[string]string
 	var executedEnhancedTools map[string]*schema.ToolResult
 	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
+		if err := validateToolCheckpointKeys(tnState); err != nil {
+			return nil, err
+		}
 		input = tnState.Input
 		if tnState.ExecutedTools != nil {
 			executedTools = tnState.ExecutedTools
@@ -1291,11 +1358,13 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 
 	rerunExtra := &ToolsInterruptAndRerunExtra{
 		ToolCalls:             input.ToolCalls,
+		ToolCallKeys:          toolCallKeys(input.ToolCalls),
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 		RerunExtraMap:         make(map[string]any),
 	}
 	rerunState := &toolsInterruptAndRerunState{
+		ToolKeyVersion:        1,
 		Input:                 input,
 		ExecutedTools:         make(map[string]string),
 		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
@@ -1309,13 +1378,13 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 				return nil, fmt.Errorf("failed to stream tool call %s: %w", tasks[i].callID, tasks[i].err)
 			}
 
-			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].callID)
-			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].callID)
+			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].taskKey)
+			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].taskKey)
 			if info != nil {
-				rerunExtra.RerunExtraMap[tasks[i].callID] = info
+				rerunExtra.RerunExtraMap[tasks[i].taskKey] = info
 			}
 			iErr := WrapInterruptAndRerunIfNeeded(ctx,
-				AddressSegment{ID: tasks[i].callID, Type: AddressSegmentTool}, tasks[i].err)
+				AddressSegment{ID: tasks[i].name, SubID: tasks[i].taskKey, Type: AddressSegmentTool}, tasks[i].err)
 			errs = append(errs, iErr)
 			continue
 		}
@@ -1330,16 +1399,16 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 					if err_ != nil {
 						return nil, fmt.Errorf("failed to concat enhanced tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)
 					}
-					rerunExtra.ExecutedEnhancedTools[t.callID] = eo
-					rerunState.ExecutedEnhancedTools[t.callID] = eo
+					rerunExtra.ExecutedEnhancedTools[t.taskKey] = eo
+					rerunState.ExecutedEnhancedTools[t.taskKey] = eo
 
 				} else {
 					o, err_ := concatStreamReader(t.sOutput)
 					if err_ != nil {
 						return nil, fmt.Errorf("failed to concat tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)
 					}
-					rerunExtra.ExecutedTools[t.callID] = o
-					rerunState.ExecutedTools[t.callID] = o
+					rerunExtra.ExecutedTools[t.taskKey] = o
+					rerunState.ExecutedTools[t.taskKey] = o
 				}
 			}
 		}
@@ -1354,7 +1423,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		index := i
 		callID := tasks[i].callID
 		callName := tasks[i].name
-		sourceNames[i] = callID
+		sourceNames[i] = tasks[i].taskKey
 		if tasks[i].useEnhanced {
 			var chunks []*schema.ToolResult
 			canceled := false
@@ -1375,7 +1444,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 				schema.WithErrWrapper(func(streamErr error) error {
 					if errors.Is(streamErr, core.ErrStreamCanceled) {
 						canceled = true
-						tracker.recordRerun(callID)
+						tracker.recordRerun(tasks[index].taskKey)
 						return nil
 					}
 					return streamErr
@@ -1390,7 +1459,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 					if concatErr != nil {
 						return nil, concatErr
 					}
-					tracker.recordEnhancedTool(callID, output)
+					tracker.recordEnhancedTool(tasks[index].taskKey, output)
 					return nil, io.EOF
 				}),
 			)
@@ -1409,7 +1478,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 				schema.WithErrWrapper(func(streamErr error) error {
 					if errors.Is(streamErr, core.ErrStreamCanceled) {
 						canceled = true
-						tracker.recordRerun(callID)
+						tracker.recordRerun(tasks[index].taskKey)
 						return nil
 					}
 					return streamErr
@@ -1424,7 +1493,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 					if concatErr != nil {
 						return nil, concatErr
 					}
-					tracker.recordTool(callID, output)
+					tracker.recordTool(tasks[index].taskKey, output)
 					return nil, io.EOF
 				}),
 			)
