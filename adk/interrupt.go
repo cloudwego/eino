@@ -198,11 +198,12 @@ func WithCheckPointID(id string) AgentRunOption {
 func init() {
 	schema.RegisterName[*serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
-	// Register []byte for gob: the cancel refactor routes bridge store checkpoint
-	// bytes ([]byte) through InterruptState.State (type any) inside the outer
-	// serialization struct. Gob requires concrete types behind interface fields
-	// to be registered.
+	// Register concrete types stored behind interface fields in checkpoints.
+	// The cancel refactor routes bridge-store bytes through InterruptState.State,
+	// while JSON-decoded session values use map[string]interface{} and []interface{}.
 	gob.Register([]byte{})
+	gob.Register(map[string]interface{}{})
+	gob.Register([]interface{}{})
 }
 
 // serialization CheckpointSchema: root checkpoint payload (gob).
