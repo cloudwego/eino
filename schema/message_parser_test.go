@@ -46,6 +46,16 @@ func TestMessageJSONParser(t *testing.T) {
 		assert.Equal(t, 1, parsed.ID)
 	})
 
+	t.Run("default source leaves the config unchanged", func(t *testing.T) {
+		config := &MessageJSONParseConfig{ParseKeyPath: "id"}
+		parser := NewMessageJSONParser[int](config)
+
+		parsed, err := parser.Parse(ctx, &Message{Content: `{"id": 7}`})
+		assert.NoError(t, err)
+		assert.Equal(t, 7, parsed)
+		assert.Equal(t, &MessageJSONParseConfig{ParseKeyPath: "id"}, config)
+	})
+
 	t.Run("parse from tool call", func(t *testing.T) {
 		t.Run("only one tool call, default use first tool call", func(t *testing.T) {
 			parser := NewMessageJSONParser[TestStructForParse](&MessageJSONParseConfig{

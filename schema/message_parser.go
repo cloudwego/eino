@@ -50,17 +50,18 @@ type MessageJSONParseConfig struct {
 
 // NewMessageJSONParser creates a new MessageJSONParser.
 func NewMessageJSONParser[T any](config *MessageJSONParseConfig) MessageParser[T] {
-	if config == nil {
-		config = &MessageJSONParseConfig{}
+	var parseConfig MessageJSONParseConfig
+	if config != nil {
+		parseConfig = *config
 	}
 
-	if config.ParseFrom == "" {
-		config.ParseFrom = MessageParseFromContent
+	if parseConfig.ParseFrom == "" {
+		parseConfig.ParseFrom = MessageParseFromContent
 	}
 
 	return &MessageJSONParser[T]{
-		ParseFrom:    config.ParseFrom,
-		ParseKeyPath: config.ParseKeyPath,
+		ParseFrom:    parseConfig.ParseFrom,
+		ParseKeyPath: parseConfig.ParseKeyPath,
 	}
 }
 
