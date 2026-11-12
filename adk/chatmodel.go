@@ -19,23 +19,24 @@ package adk
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"math"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/internal/agenttool"
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -49,21 +50,54 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 
 	failoverLastSuccessModel model.BaseModel[M]
 
-	// suppressEventSend prevents eventSenderModel from emitting AgentEvents for the current
-	// Generate call. Set to true before each rejected retry attempt and reset to false after.
-	// Invariant: any code path that emits model output events MUST check this flag.
+	// Successful Generate calls wait for ShouldRetry before ending the span or accepting output.
 	suppressEventSend  bool
+	completeGenerate   func(accepted bool, verdictErr error) error
 	retryVerdictSignal *retryVerdictSignal
 
-	afterToolCallsHook func(ctx context.Context) error
+	afterToolCallsHook     func(ctx context.Context) error
+	timelineEvents         bool
+	internalTimelineEvents bool
 }
 
-func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
+func (e *typedChatModelAgentExecCtx[M]) send(ctx context.Context, event *TypedAgentEvent[M]) {
 	if e == nil || e.generator == nil {
 		return
 	}
 	if e.cancelCtx != nil && e.cancelCtx.isImmediateCancelled() {
 		return
+	}
+	if event == nil {
+		return
+	}
+	if !e.timelineEvents && !e.internalTimelineEvents {
+		event = stripSessionEventFields(event)
+		if event == nil {
+			return
+		}
+	}
+	ensureTypedAgentEventMessageIDs(event)
+	sc := sessionEventContextFromContext[M](ctx)
+	if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
+		se := *event.SessionEventVariant.Event
+		stampSessionEventTurnID(&se, sc.turnID)
+		if se.EventID == "" {
+			gen := sc.generator
+			if gen == nil {
+				gen = DefaultSessionEventIDGenerator[M]
+			}
+			if err := prepareSessionEventEnvelope(ctx, &se, gen, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
+				event.Err = err
+			}
+		} else if err := ValidateEmittedSessionEventKind(&se); err != nil {
+			event.Err = err
+		}
+		event.SessionEventVariant.Event = &se
+	}
+	if event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
+		if sc.turnID != "" {
+			event.SessionEventVariant.MessageStreamRef.TurnID = sc.turnID
+		}
 	}
 	e.generator.trySend(event)
 }
@@ -81,6 +115,30 @@ func getTypedChatModelAgentExecCtx[M MessageType](ctx context.Context) *typedCha
 		return v.(*typedChatModelAgentExecCtx[M])
 	}
 	return nil
+}
+
+func newTypedChatModelAgentExecCtx[M MessageType](generator *AsyncGenerator[*TypedAgentEvent[M]], cancelCtx *cancelContext, timelineEvents bool, internalTimelineEvents bool) *typedChatModelAgentExecCtx[M] {
+	return &typedChatModelAgentExecCtx[M]{
+		generator:              generator,
+		cancelCtx:              cancelCtx,
+		timelineEvents:         timelineEvents,
+		internalTimelineEvents: internalTimelineEvents,
+	}
+}
+
+func initTypedChatModelAgentExecCtx[M MessageType](ctx context.Context, generator *AsyncGenerator[*TypedAgentEvent[M]], cancelCtx *cancelContext, timelineEvents bool, internalTimelineEvents bool) (context.Context, *typedChatModelAgentExecCtx[M]) {
+	execCtx := newTypedChatModelAgentExecCtx(generator, cancelCtx, timelineEvents, internalTimelineEvents)
+	ctx = withTypedChatModelAgentExecCtx(ctx, execCtx)
+	sender := startwindow.EventSender(func(parentCtx context.Context, event any) error {
+		typedEvent, ok := event.(*TypedAgentEvent[M])
+		if !ok {
+			return fmt.Errorf("adk: start-window event type mismatch: got %T", event)
+		}
+		execCtx.send(parentCtx, typedEvent)
+		return nil
+	})
+	ctx = startwindow.WithSender(ctx, sender)
+	return ctx, execCtx
 }
 
 type chatModelAgentRunOptions struct {
@@ -138,6 +196,7 @@ type ToolsConfig struct {
 
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
+	// Tools can also request direct return dynamically with SetToolReturnDirectly.
 	ReturnDirectly map[string]bool
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
@@ -165,7 +224,7 @@ type TypedGenModelInput[M MessageType] func(ctx context.Context, instruction str
 type GenModelInput = TypedGenModelInput[*schema.Message]
 
 func defaultGenModelInput(ctx context.Context, instruction string, input *AgentInput) ([]Message, error) {
-	msgs := make([]Message, 0, len(input.Messages)+1)
+	inputMessages := input.Messages
 
 	if instruction != "" {
 		sp := schema.SystemMessage(instruction)
@@ -184,11 +243,14 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 			sp = ms[0]
 		}
 
+		msgs := make([]Message, 0, len(inputMessages)+1)
 		msgs = append(msgs, sp)
+		msgs = append(msgs, inputMessages...)
+		return msgs, nil
 	}
 
-	msgs = append(msgs, input.Messages...)
-
+	msgs := make([]Message, 0, len(inputMessages))
+	msgs = append(msgs, inputMessages...)
 	return msgs, nil
 }
 
@@ -199,15 +261,66 @@ func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 		return any(GenModelInput(defaultGenModelInput)).(TypedGenModelInput[M])
 	case *schema.AgenticMessage:
 		return any(TypedGenModelInput[*schema.AgenticMessage](func(_ context.Context, instruction string, input *TypedAgentInput[*schema.AgenticMessage]) ([]*schema.AgenticMessage, error) {
-			msgs := make([]*schema.AgenticMessage, 0, len(input.Messages)+1)
+			inputMessages := input.Messages
 			if instruction != "" {
+				msgs := make([]*schema.AgenticMessage, 0, len(inputMessages)+1)
 				msgs = append(msgs, schema.SystemAgenticMessage(instruction))
+				msgs = append(msgs, inputMessages...)
+				return msgs, nil
 			}
-			msgs = append(msgs, input.Messages...)
+			msgs := make([]*schema.AgenticMessage, 0, len(inputMessages))
+			msgs = append(msgs, inputMessages...)
 			return msgs, nil
 		})).(TypedGenModelInput[M])
 	default:
 		panic("unreachable: unknown MessageType")
+	}
+}
+
+const extraKeyRuntimeGeneratedSystemMessage = "_eino_adk_runtime_generated_system_message"
+
+func ensureGeneratedMessageIDs[M MessageType](messages []M) {
+	for _, msg := range messages {
+		EnsureMessageID(msg)
+	}
+}
+
+func isSystemRoleMessage[M MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.System
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeSystem
+	}
+	return false
+}
+
+func markRuntimeGeneratedLeadingSystem[M MessageType](inputMsgs, generatedMsgs []M) {
+	inputIDs := make(map[string]struct{})
+	for _, msg := range inputMsgs {
+		if isNilMessage(msg) {
+			continue
+		}
+		id := GetMessageID(msg)
+		if id != "" {
+			inputIDs[id] = struct{}{}
+		}
+	}
+	for i := 0; i < len(generatedMsgs); i++ {
+		msg := generatedMsgs[i]
+		if isNilMessage(msg) || !isSystemRoleMessage(msg) {
+			break
+		}
+		id := GetMessageID(msg)
+		if id == "" {
+			internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+			continue
+		}
+		if _, ok := inputIDs[id]; !ok {
+			internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		} else {
+			break
+		}
 	}
 }
 
@@ -357,9 +470,10 @@ type TypedChatModelAgentConfig[M MessageType] struct {
 	//  1. eventSenderToolWrapper (internal ToolMiddleware - sends tool result events after all processing)
 	//  2. ToolsConfig.ToolCallMiddlewares (ToolMiddleware)
 	//  3. AgentMiddleware.WrapToolCall (ToolMiddleware)
-	//  4. ChatModelAgentMiddleware.WrapToolCall (wrapper, first registered is outermost)
-	//  5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
-	//  6. Tool.InvokableRun/StreamableRun
+	//  4. cancelMonitoredToolHandler (internal - sets up cancel monitoring for stream tools)
+	//  5. ChatModelAgentMiddleware.WrapToolCall (wrapper, first registered is outermost)
+	//  6. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
+	//  7. Tool.InvokableRun/StreamableRun
 	//
 	// Custom Tool Event Sender Position:
 	// By default, tool result events are emitted by an internal event sender placed before
@@ -458,14 +572,17 @@ type ChatModelAgent = TypedChatModelAgent[*schema.Message]
 
 // typedRunParams holds the parameters for a typedRunFunc invocation.
 type typedRunParams[M MessageType] struct {
-	input          *TypedAgentInput[M]
-	generator      *AsyncGenerator[*TypedAgentEvent[M]]
-	store          *bridgeStore
-	instruction    string
-	returnDirectly map[string]bool
-	cancelCtx      *cancelContext
-	cancelCtxOwned bool
-	composeOpts    []compose.Option
+	input                  *TypedAgentInput[M]
+	generator              *AsyncGenerator[*TypedAgentEvent[M]]
+	store                  *bridgeStore
+	instruction            string
+	returnDirectly         map[string]bool
+	cancelCtx              *cancelContext
+	cancelCtxOwned         bool
+	composeOpts            []compose.Option
+	sessionEvents          bool
+	timelineEvents         bool
+	internalTimelineEvents bool
 
 	afterToolCallsHook func(ctx context.Context) error
 }
@@ -505,7 +622,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 }
 
 // NewTypedChatModelAgent creates a new TypedChatModelAgent with the given config.
-func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
+func NewTypedChatModelAgent[M MessageType](_ context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
 	if config.ModelFailoverConfig != nil {
 		if config.ModelFailoverConfig.GetFailoverModel == nil {
 			return nil, errors.New("ModelFailoverConfig.GetFailoverModel is required when ModelFailoverConfig is set")
@@ -531,21 +648,24 @@ func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedCha
 	tc := config.ToolsConfig
 
 	// Tool call middleware execution order (outermost to innermost):
-	// 1. eventSenderToolWrapper (internal - sends tool result events after all modifications)
+	// 1. eventSenderToolWrapper (internal — emits tool result AgentEvents and
+	//    tool_call_start/end SessionEvents; persistence-aware so a tool call's
+	//    start and end may straddle interrupt/resume boundaries)
 	// 2. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	// 3. Middlewares' WrapToolCall (in registration order)
-	// 4. ChatModelAgentMiddleware.WrapToolCall (in registration order)
-	// 5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
+	// 4. cancelMonitoredToolHandler (internal - cancel monitoring for stream tools)
+	// 5. ChatModelAgentMiddleware.WrapToolCall (in registration order)
+	// 6. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
 	if !hasUserEventSenderToolWrapper(config.Handlers) {
 		defaultToolEventSender := handlersToToolMiddlewares([]TypedChatModelAgentMiddleware[M]{newTypedEventSenderToolWrapper[M]()})
 		tc.ToolCallMiddlewares = append(defaultToolEventSender, tc.ToolCallMiddlewares...)
 	}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	// Cancel monitoring middleware (innermost — close to the tool endpoint).
-	// This allows early abort of the raw tool result stream when immediateChan fires
-	// (CancelImmediate or timeout escalation), while requiring outer wrappers to
-	// propagate stream errors such as ErrStreamCanceled without swallowing them.
+	// Cancel monitoring middleware — wraps around ChatModelAgentMiddleware handlers.
+	// Pre-processing sets up cancel signals; when immediateChan fires
+	// (CancelImmediate or timeout escalation), the raw tool result stream is aborted.
+	// Outer wrappers must propagate stream errors such as ErrStreamCanceled without swallowing them.
 	cancelToolHandler := &cancelMonitoredToolHandler{}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
 		Streamable:         cancelToolHandler.WrapStreamableToolCall,
@@ -750,20 +870,7 @@ func init() {
 }
 
 func extractTextContent[M MessageType](msg M) string {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		return v.Content
-	case *schema.AgenticMessage:
-		var texts []string
-		for _, block := range v.ContentBlocks {
-			if block != nil && block.Type == schema.ContentBlockTypeAssistantGenText && block.AssistantGenText != nil {
-				texts = append(texts, block.AssistantGenText.Text)
-			}
-		}
-		return strings.Join(texts, "\n")
-	default:
-		return ""
-	}
+	return agenttool.ExtractTextContent(msg)
 }
 
 func setOutputToSession[M MessageType](ctx context.Context, msg M, msgStream *schema.StreamReader[M], outputKey string) error {
@@ -772,7 +879,7 @@ func setOutputToSession[M MessageType](ctx context.Context, msg M, msgStream *sc
 		return nil
 	}
 
-	concatenated, err := concatMessageStream(msgStream)
+	concatenated, err := internalschema.ConcatMessageStream(msgStream)
 	if err != nil {
 		return err
 	}
@@ -809,9 +916,12 @@ type execContext struct {
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
 
-func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext) (context.Context, *execContext, error) {
-	runCtx := &ChatModelAgentContext{
+func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext, agentInput *TypedAgentInput[M]) (
+	context.Context, *execContext, *TypedAgentInput[M], error) {
+
+	runCtx := &TypedChatModelAgentContext[M]{
 		Instruction:    ec.instruction,
+		AgentInput:     agentInput,
 		Tools:          cloneSlice(ec.unwrappedTools),
 		ReturnDirectly: copyMap(ec.returnDirectly),
 	}
@@ -820,7 +930,7 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 	for i, handler := range a.handlers {
 		ctx, runCtx, err = handler.BeforeAgent(ctx, runCtx)
 		if err != nil {
-			return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, handler, err)
+			return ctx, nil, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, handler, err)
 		}
 	}
 
@@ -840,12 +950,12 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 
 	toolInfos, err := genToolInfos(ctx, &runtimeEC.toolsNodeConf)
 	if err != nil {
-		return ctx, nil, err
+		return ctx, nil, nil, err
 	}
 
 	runtimeEC.toolInfos = toolInfos
 
-	return ctx, runtimeEC, nil
+	return ctx, runtimeEC, runCtx.AgentInput, nil
 }
 
 func (a *TypedChatModelAgent[M]) applyAfterAgent(ctx context.Context) (context.Context, error) {
@@ -978,6 +1088,14 @@ func (a *TypedChatModelAgent[M]) handleRunFuncError(
 		return
 	}
 
+	if cancelCtxOwned && cancelCtx != nil && cancelCtx.shouldCancel() && errors.Is(err, ErrStreamCanceled) {
+		cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
+		if ok {
+			generator.Send(&TypedAgentEvent[M]{Err: cancelErr})
+		}
+		return
+	}
+
 	if cancelCtxOwned && cancelCtx != nil {
 		cancelCtx.markDone()
 	}
@@ -1022,6 +1140,10 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			if err != nil {
 				return nil, err
 			}
+			if p.sessionEvents {
+				ensureGeneratedMessageIDs(messages)
+				markRuntimeGeneratedLeadingSystem(in.input.Messages, messages)
+			}
 			if err := compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = append(st.Messages, messages...)
 				return nil
@@ -1033,18 +1155,20 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 
 		appendModelToChain(chain, wrappedModel)
 
-		if len(a.handlers) > 0 {
-			chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg M) (M, error) {
-				_, err := a.applyAfterAgent(ctx)
-				return msg, err
-			}))
-		}
+		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg M) (M, error) {
+			if len(a.handlers) > 0 {
+				if _, err := a.applyAfterAgent(ctx); err != nil {
+					return msg, err
+				}
+			}
+			return msg, nil
+		}))
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(p.store),
-			compose.WithSerializer(&gobSerializer{}))
+			compose.WithSerializer(&schema.GobSerializer{}))
 
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
@@ -1058,11 +1182,8 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
-			generator:                p.generator,
-			cancelCtx:                cancelCtx,
-			failoverLastSuccessModel: a.model,
-		})
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		execCtx.failoverLastSuccessModel = a.model
 
 		if checkPreExecCancel(cancelCtx, p.generator) {
 			return
@@ -1083,6 +1204,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 				err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 				if err != nil {
 					p.generator.Send(&TypedAgentEvent[M]{Err: err})
+					return
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
@@ -1131,13 +1253,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 	}
-	if len(a.handlers) > 0 {
-		msgAgent := any(a).(*TypedChatModelAgent[*schema.Message])
-		msgConf.afterAgentFunc = func(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
-			_, err := msgAgent.applyAfterAgent(ctx)
-			return msg, err
-		}
-	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		mp := any(p).(*typedRunParams[*schema.Message])
@@ -1147,6 +1262,17 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			msgConf.modelWrapperConf.cancelContext = cancelCtx
 		}
 		ctx = withCancelContext(ctx, cancelCtx)
+
+		msgAgent := any(a).(*TypedChatModelAgent[*schema.Message])
+		msgConf.afterAgentFunc = func(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
+			if len(a.handlers) > 0 {
+				_, err := msgAgent.applyAfterAgent(ctx)
+				if err != nil {
+					return msg, err
+				}
+			}
+			return msg, nil
+		}
 
 		g, err := newReact(ctx, msgConf)
 		if err != nil {
@@ -1161,6 +1287,10 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 					if genErr != nil {
 						return nil, genErr
 					}
+					if mp.sessionEvents {
+						ensureGeneratedMessageIDs(messages)
+						markRuntimeGeneratedLeadingSystem(in.input.Messages, messages)
+					}
 					return &reactInput{
 						Messages: messages,
 					}, nil
@@ -1172,7 +1302,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(mp.store),
-			compose.WithSerializer(&gobSerializer{}),
+			compose.WithSerializer(&schema.GobSerializer{}),
 			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
@@ -1187,13 +1317,10 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
-			runtimeReturnDirectly:    mp.returnDirectly,
-			generator:                mp.generator,
-			cancelCtx:                cancelCtx,
-			failoverLastSuccessModel: msgModel,
-			afterToolCallsHook:       mp.afterToolCallsHook,
-		})
+		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
+		execCtx.runtimeReturnDirectly = mp.returnDirectly
+		execCtx.failoverLastSuccessModel = msgModel
+		execCtx.afterToolCallsHook = mp.afterToolCallsHook
 
 		if checkPreExecCancel(cancelCtx, mp.generator) {
 			return
@@ -1207,7 +1334,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		var runOpts []compose.Option
 		runOpts = append(runOpts, mp.composeOpts...)
 		if a.toolsConfig.EmitInternalEvents {
-			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEventGenerator(mp.generator))))
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withParentEventReceiver(mp.generator))))
 		}
 		if mp.input.EnableStreaming {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
@@ -1226,6 +1353,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 				err_ = setOutputToSession[*schema.Message](ctx, msg, msgStream, a.outputKey)
 				if err_ != nil {
 					mp.generator.Send(&AgentEvent{Err: err_})
+					return
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
@@ -1261,13 +1389,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 	}
-	if len(a.handlers) > 0 {
-		agenticAgent := any(a).(*TypedChatModelAgent[*schema.AgenticMessage])
-		agenticConf.afterAgentFunc = func(ctx context.Context, msg *schema.AgenticMessage) (*schema.AgenticMessage, error) {
-			_, err := agenticAgent.applyAfterAgent(ctx)
-			return msg, err
-		}
-	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		ap := any(p).(*typedRunParams[*schema.AgenticMessage])
@@ -1277,6 +1398,17 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			agenticConf.modelWrapperConf.cancelContext = cancelCtx
 		}
 		ctx = withCancelContext(ctx, cancelCtx)
+
+		agenticAgent := any(a).(*TypedChatModelAgent[*schema.AgenticMessage])
+		agenticConf.afterAgentFunc = func(ctx context.Context, msg *schema.AgenticMessage) (*schema.AgenticMessage, error) {
+			if len(a.handlers) > 0 {
+				_, err := agenticAgent.applyAfterAgent(ctx)
+				if err != nil {
+					return msg, err
+				}
+			}
+			return msg, nil
+		}
 
 		g, err := newAgenticReact(ctx, agenticConf)
 		if err != nil {
@@ -1291,18 +1423,22 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 					if genErr != nil {
 						return nil, genErr
 					}
+					if ap.sessionEvents {
+						ensureGeneratedMessageIDs(messages)
+						markRuntimeGeneratedLeadingSystem(in.input.Messages, messages)
+					}
 					return &agenticReactInput{
 						Messages: messages,
 					}, nil
 				}),
 			).
-			AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
+			AppendGraph(g, compose.WithNodeName("AgenticReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(ap.store),
-			compose.WithSerializer(&gobSerializer{}),
+			compose.WithSerializer(&schema.GobSerializer{}),
 			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
@@ -1317,13 +1453,10 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
-			runtimeReturnDirectly:    ap.returnDirectly,
-			generator:                ap.generator,
-			cancelCtx:                cancelCtx,
-			failoverLastSuccessModel: agenticModel,
-			afterToolCallsHook:       ap.afterToolCallsHook,
-		})
+		execCtx := getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx)
+		execCtx.runtimeReturnDirectly = ap.returnDirectly
+		execCtx.failoverLastSuccessModel = agenticModel
+		execCtx.afterToolCallsHook = ap.afterToolCallsHook
 
 		if checkPreExecCancel(cancelCtx, ap.generator) {
 			return
@@ -1334,7 +1467,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		var runOpts []compose.Option
 		runOpts = append(runOpts, ap.composeOpts...)
 		if a.toolsConfig.EmitInternalEvents {
-			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withTypedAgentToolEventGenerator[*schema.AgenticMessage](ap.generator))))
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withParentEventReceiver[*schema.AgenticMessage](ap.generator))))
 		}
 		if ap.input.EnableStreaming {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
@@ -1353,6 +1486,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 				err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 				if err_ != nil {
 					ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err_})
+					return
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
@@ -1400,12 +1534,12 @@ func (a *TypedChatModelAgent[M]) buildRunFunc(ctx context.Context) typedRunFunc[
 	return a.run
 }
 
-func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Context, typedRunFunc[M], *execContext, error) {
+func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context, agentInput *TypedAgentInput[M]) (context.Context, typedRunFunc[M], *execContext, *TypedAgentInput[M], error) {
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.exeCtx
 
 	if bc == nil {
-		return ctx, defaultRun, bc, nil
+		return ctx, defaultRun, bc, agentInput, nil
 	}
 
 	if len(a.handlers) == 0 {
@@ -1415,32 +1549,32 @@ func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Contex
 			returnDirectly: bc.returnDirectly,
 			toolInfos:      bc.toolInfos,
 		}
-		return ctx, defaultRun, runtimeBC, nil
+		return ctx, defaultRun, runtimeBC, agentInput, nil
 	}
 
-	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc)
+	ctx, runtimeBC, agentInput, err := a.applyBeforeAgent(ctx, bc, agentInput)
 	if err != nil {
-		return ctx, nil, nil, err
+		return ctx, nil, nil, nil, err
 	}
 
 	if !runtimeBC.rebuildGraph {
-		return ctx, defaultRun, runtimeBC, nil
+		return ctx, defaultRun, runtimeBC, agentInput, nil
 	}
 
 	var tempRun typedRunFunc[M]
 	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
 		tempRun, err = a.buildNoToolsRunFunc(ctx)
 		if err != nil {
-			return ctx, nil, nil, err
+			return ctx, nil, nil, nil, err
 		}
 	} else {
 		tempRun, err = a.buildReActRunFunc(ctx, runtimeBC)
 		if err != nil {
-			return ctx, nil, nil, err
+			return ctx, nil, nil, nil, err
 		}
 	}
 
-	return ctx, tempRun, runtimeBC, nil
+	return ctx, tempRun, runtimeBC, agentInput, nil
 }
 
 func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
@@ -1452,13 +1586,10 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	if cancelCtxOwned && cancelCtx != nil && cancelCtx.abortOnly {
 		ctx, abortOnlyCancel = withAbortOnlyCancelContext(ctx, cancelCtx)
 	}
-	ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
-		generator:                generator,
-		cancelCtx:                cancelCtx,
-		failoverLastSuccessModel: a.model,
-	})
+	ctx, execCtx := initTypedChatModelAgentExecCtx(ctx, generator, cancelCtx, o.enableTimelineEvents, o.enableInternalTimelineEvents)
+	execCtx.failoverLastSuccessModel = a.model
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, input, err := a.getRunFunc(ctx, input)
 	if err != nil {
 		go func() {
 			if abortOnlyCancel != nil {
@@ -1514,15 +1645,18 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:              input,
-			generator:          generator,
-			store:              newBridgeStore(),
-			instruction:        instruction,
-			returnDirectly:     returnDirectly,
-			cancelCtx:          cancelCtx,
-			cancelCtxOwned:     cancelCtxOwned,
-			composeOpts:        co,
-			afterToolCallsHook: runOps.afterToolCallsHook,
+			input:                  input,
+			generator:              generator,
+			store:                  newBridgeStore(),
+			instruction:            instruction,
+			returnDirectly:         returnDirectly,
+			cancelCtx:              cancelCtx,
+			cancelCtxOwned:         cancelCtxOwned,
+			composeOpts:            co,
+			sessionEvents:          o.enableSessionEvents,
+			timelineEvents:         o.enableTimelineEvents,
+			internalTimelineEvents: o.enableInternalTimelineEvents,
+			afterToolCallsHook:     runOps.afterToolCallsHook,
 		})
 	}()
 
@@ -1541,13 +1675,10 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	if cancelCtxOwned && cancelCtx != nil && cancelCtx.abortOnly {
 		ctx, abortOnlyCancel = withAbortOnlyCancelContext(ctx, cancelCtx)
 	}
-	ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
-		generator:                generator,
-		cancelCtx:                cancelCtx,
-		failoverLastSuccessModel: a.model,
-	})
+	ctx, execCtx := initTypedChatModelAgentExecCtx(ctx, generator, cancelCtx, o.enableTimelineEvents, o.enableInternalTimelineEvents)
+	execCtx.failoverLastSuccessModel = a.model
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, _, err := a.getRunFunc(ctx, nil)
 	if err != nil {
 		go func() {
 			if abortOnlyCancel != nil {
@@ -1653,15 +1784,18 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:              &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
-			generator:          generator,
-			store:              newResumeBridgeStore(bridgeCheckpointID, stateByte),
-			instruction:        instruction,
-			returnDirectly:     returnDirectly,
-			cancelCtx:          cancelCtx,
-			cancelCtxOwned:     cancelCtxOwned,
-			composeOpts:        co,
-			afterToolCallsHook: resumeRunOps.afterToolCallsHook,
+			input:                  &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
+			generator:              generator,
+			store:                  newResumeBridgeStore(bridgeCheckpointID, stateByte),
+			instruction:            instruction,
+			returnDirectly:         returnDirectly,
+			cancelCtx:              cancelCtx,
+			cancelCtxOwned:         cancelCtxOwned,
+			composeOpts:            co,
+			sessionEvents:          o.enableSessionEvents,
+			timelineEvents:         o.enableTimelineEvents,
+			internalTimelineEvents: o.enableInternalTimelineEvents,
+			afterToolCallsHook:     resumeRunOps.afterToolCallsHook,
 		})
 	}()
 
@@ -1700,22 +1834,6 @@ func getComposeOptions(opts []AgentRunOption) []compose.Option {
 	return co
 }
 
-type gobSerializer struct{}
-
-func (g *gobSerializer) Marshal(v any) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	err := gob.NewEncoder(buf).Encode(v)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (g *gobSerializer) Unmarshal(data []byte, v any) error {
-	buf := bytes.NewBuffer(data)
-	return gob.NewDecoder(buf).Decode(v)
-}
-
 // preprocessComposeCheckpoint migrates legacy compose checkpoints to the current format.
 // It handles the v0.8.0-v0.8.3 format:
 //   - gob name "_eino_adk_state_v080_" (already byte-patched by preprocessADKCheckpoint
@@ -1729,7 +1847,7 @@ func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
 	const lenPrefixedCompatName = "\x15" + stateGobNameV080
 	if bytes.Contains(data, []byte(lenPrefixedCompatName)) {
 		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
-		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
+		migrated, err := compose.MigrateCheckpointState(data, &schema.GobSerializer{}, func(state any) (any, bool, error) {
 			sc, ok := state.(*stateV080)
 			if !ok {
 				return state, false, nil

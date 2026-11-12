@@ -23,11 +23,16 @@ import (
 	"io"
 	"reflect"
 
+	"github.com/cloudwego/eino/adk/internal/startwindow"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+// ErrStartWindowClosed is returned by TypedSendEvent when a background managed
+// tool's explicit Start event relay has already closed.
+var ErrStartWindowClosed = startwindow.ErrWindowClosed
 
 // InvokableToolCallEndpoint is the function signature for invoking a tool synchronously.
 // Middleware authors implement wrappers around this endpoint to add custom behavior.
@@ -80,17 +85,20 @@ type TypedModelContext[M MessageType] struct {
 // ModelContext is the default model context type using *schema.Message.
 type ModelContext = TypedModelContext[*schema.Message]
 
-// ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
+// TypedChatModelAgentContext contains runtime information passed to handlers before each
+// TypedChatModelAgent run.
 // Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
 //
-// This type is specific to ChatModelAgent. Other agent types may define their own context types.
-type ChatModelAgentContext struct {
+// This type is specific to TypedChatModelAgent. Other agent types may define their own context types.
+type TypedChatModelAgentContext[M MessageType] struct {
 	// Instruction is the current instruction for the Agent execution.
 	// It includes the instruction configured for the agent, additional instructions appended by framework
 	// and AgentMiddleware, and modifications applied by previous BeforeAgent handlers.
 	// The finalized instruction after all BeforeAgent handlers are then passed to GenModelInput,
 	// to be (optionally) formatted with SessionValues and converted to system message.
 	Instruction string
+
+	AgentInput *TypedAgentInput[M]
 
 	// Tools are the raw tools (without any wrapper or tool middleware) currently configured for the Agent execution.
 	// They includes tools passed in AgentConfig, implicit tools added by framework such as transfer / exit tools,
@@ -106,6 +114,9 @@ type ChatModelAgentContext struct {
 	// When set by a BeforeAgent handler, the framework passes it to the model via model.WithToolSearchTool.
 	ToolSearchTool *schema.ToolInfo
 }
+
+// ChatModelAgentContext is the default agent context type using *schema.Message.
+type ChatModelAgentContext = TypedChatModelAgentContext[*schema.Message]
 
 // TypedChatModelAgentMiddleware defines the interface for customizing TypedChatModelAgent behavior.
 //
@@ -139,7 +150,7 @@ type ChatModelAgentContext struct {
 type TypedChatModelAgentMiddleware[M MessageType] interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
-	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
+	BeforeAgent(ctx context.Context, runCtx *TypedChatModelAgentContext[M]) (context.Context, *TypedChatModelAgentContext[M], error)
 
 	// AfterAgent is called after the agent run reaches a successful terminal state.
 	// Successful terminal states are: final answer (model response with no tool calls),
@@ -258,6 +269,31 @@ type TypedChatModelAgentMiddleware[M MessageType] interface {
 // See TypedChatModelAgentMiddleware for full documentation.
 type ChatModelAgentMiddleware = TypedChatModelAgentMiddleware[*schema.Message]
 
+// ChatModelAgentMiddlewareNamer is an optional interface a ChatModelAgent
+// middleware may implement to give itself a stable name.
+//
+// When to implement it:
+//   - Implement this if the middleware's tool-call wrapper can interrupt (e.g.
+//     it calls tool.StatefulInterrupt) and must persist and resume its own
+//     interrupt state independently of the wrapped tool. In that case, the name
+//     becomes the middleware's execution address frame:
+//     "...;tool:<tool>:<callID>;middleware:<name>".
+//   - Do NOT implement it for middleware that merely observes, transforms, or
+//     forwards tool calls without interrupting. Unnamed middleware shares the
+//     tool's address frame, which is the correct, cheaper default: without a
+//     distinct frame a middleware interrupt would collide with the wrapped tool's
+//     interrupt state at the same address, and either could then observe the
+//     other's persisted state on resume.
+//
+// The returned name must be non-empty and unique within a single tool call's
+// middleware stack. NewToolNode rejects duplicate names within the same
+// endpoint kind (see validateUniqueMiddlewareNames); returning "" is treated as
+// unnamed. Because the name becomes part of the persisted interrupt address, it
+// must remain stable across restarts for checkpoints to resume correctly.
+type ChatModelAgentMiddlewareNamer interface {
+	ChatModelAgentMiddlewareName() string
+}
+
 type TypedBaseChatModelAgentMiddleware[M MessageType] struct{}
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
@@ -296,7 +332,7 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m mo
 	return m, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *TypedChatModelAgentContext[M]) (context.Context, *TypedChatModelAgentContext[M], error) {
 	return ctx, runCtx, nil
 }
 
@@ -398,30 +434,48 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // TypedSendEvent sends a custom TypedAgentEvent to the event stream during agent execution.
 // This allows TypedChatModelAgentMiddleware implementations to emit custom events that will be
 // received by the caller iterating over the agent's event stream.
+// To emit custom session timeline events during a Runner run, wrap a SessionEvent
+// with Extension set and an x.* Kind in TypedAgentEvent.SessionEventVariant.Event. This is the
+// canonical in-run path because Runner materializes identity, emits the live
+// event, and persists it through the ordered session event pipeline.
 //
-// Note: TypedSendEvent is a pure transport — it does NOT auto-assign message IDs.
-// Framework-created messages (model output, tool results) receive IDs automatically
-// via internal wrapper layers. If your middleware constructs its own messages, call
-// EnsureMessageID before sending to assign an ID.
+// TypedSendEvent assigns message IDs for message-bearing events before enqueueing
+// them. Middleware authors only need to call EnsureMessageID directly when they
+// need the ID before emitting the event, for example to build another event that
+// references the message by ID.
 //
-// This function can only be called from within a TypedChatModelAgentMiddleware during agent execution.
-// Returns an error if called outside of an agent execution context.
+// During an explicit background managed-tool launch, TypedSendEvent also
+// supports synchronous events emitted from BackgroundTool.Start. That start
+// window closes when Start reaches its durable boundary, the parent context is
+// canceled, or the configured foreground timeout expires. After the sender-backed
+// window closes, TypedSendEvent returns ErrStartWindowClosed. Events emitted
+// later from background Wait or from goroutines outliving Start are not
+// delivered to the parent session.
+//
+// When called outside of an agent execution context or a managed-tool start
+// window, this function is a no-op.
 func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M]) error {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
-	if execCtx == nil || execCtx.generator == nil {
-		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
+	if execCtx != nil && execCtx.generator != nil {
+		execCtx.send(ctx, event)
+		return nil
 	}
 
-	execCtx.send(event)
+	handled, err := startwindow.TrySend(ctx, event)
+	if handled {
+		return err
+	}
 	return nil
 }
 
 // SendEvent sends a custom AgentEvent to the event stream during agent execution.
 // This allows ChatModelAgentMiddleware implementations to emit custom events that will be
 // received by the caller iterating over the agent's event stream.
+// For custom session timeline events during a Runner run, set AgentEvent.SessionEventVariant.Event
+// to an extension SessionEvent with an x.* Kind and send it through this function.
 //
-// This function can only be called from within a ChatModelAgentMiddleware during agent execution.
-// Returns an error if called outside of an agent execution context.
+// When called outside of an agent execution context, or from a path without an
+// event generator, this function is a no-op.
 func SendEvent(ctx context.Context, event *AgentEvent) error {
 	return TypedSendEvent(ctx, event)
 }

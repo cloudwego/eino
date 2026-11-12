@@ -30,6 +30,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1349,13 +1350,13 @@ func TestConcatMessageStream_AgenticClosesStream(t *testing.T) {
 		w.Send(agenticMsg("b"), nil)
 	}()
 
-	result, err := concatMessageStream(r)
+	result, err := internalschema.ConcatMessageStream(r)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
 	_, recvErr := r.Recv()
 	assert.Error(t, recvErr,
-		"stream should be closed after concatMessageStream returns")
+		"stream should be closed after ConcatMessageStream returns")
 }
 
 // --- Agentic retry/failover stream test helpers ---

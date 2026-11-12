@@ -35,6 +35,62 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type cancelAlwaysToolCallModel struct{}
+
+func (m *cancelAlwaysToolCallModel) Generate(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+	return agenticToolCallMsg("cancel_stream_tool", "call-1", `{"input":"x"}`), nil
+}
+
+func (m *cancelAlwaysToolCallModel) Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{msg}), nil
+}
+
+type cancelInterruptThenHangingStreamTool struct {
+	name        string
+	interrupted chan struct{}
+	resumed     chan struct{}
+	parked      chan struct{}
+	gate        chan struct{}
+	seen        int32
+	resumeOnce  sync.Once
+	parkOnce    sync.Once
+}
+
+func (t *cancelInterruptThenHangingStreamTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "interrupt then hanging stream tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *cancelInterruptThenHangingStreamTool) StreamableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	if atomic.CompareAndSwapInt32(&t.seen, 0, 1) {
+		close(t.interrupted)
+		return nil, tool.StatefulInterrupt(ctx, "approval_needed", argumentsInJSON)
+	}
+
+	t.resumeOnce.Do(func() { close(t.resumed) })
+	r, w := schema.Pipe[string](1)
+	go func() {
+		defer w.Close()
+		if closed := w.Send("resumed:"+argumentsInJSON, nil); closed {
+			return
+		}
+		if t.parked != nil {
+			t.parkOnce.Do(func() { close(t.parked) })
+		}
+		<-t.gate
+	}()
+	return r, nil
+}
+
 type cancelTestChatModel struct {
 	delayNs     int64
 	response    *schema.Message
@@ -209,6 +265,140 @@ func TestStreamCanceledErrorIs(t *testing.T) {
 	assert.True(t, streamCanceled.Is(ErrStreamCanceled))
 	assert.ErrorIs(t, streamCanceled, ErrStreamCanceled)
 	assert.NotErrorIs(t, streamCanceled, context.Canceled)
+}
+
+func TestWithCancel_AgenticResumeStreamableToolTimeout_DoesNotPersistTypedNil(t *testing.T) {
+	ctx := context.Background()
+	store := newCancelTestStore()
+	checkpointID := "agentic-resume-streamable-tool-timeout"
+	streamTool := &cancelInterruptThenHangingStreamTool{
+		name:        "cancel_stream_tool",
+		interrupted: make(chan struct{}),
+		resumed:     make(chan struct{}),
+		parked:      make(chan struct{}),
+		gate:        make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		close(streamTool.gate)
+	})
+
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "CancelAgenticResumeRepro",
+		Description: "repro agent",
+		Model:       &cancelAlwaysToolCallModel{},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{streamTool}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("go")}, WithCheckPointID(checkpointID))
+
+	var interruptID string
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Fatalf("initial run error: %v", event.Err)
+		}
+		if event.Action == nil || event.Action.Interrupted == nil {
+			continue
+		}
+		for _, ictx := range event.Action.Interrupted.InterruptContexts {
+			if ictx.IsRootCause {
+				interruptID = ictx.ID
+				break
+			}
+		}
+		if interruptID != "" {
+			break
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("root interrupt ID was not captured")
+	}
+	select {
+	case <-streamTool.interrupted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not interrupt")
+	}
+	if _, ok, getErr := store.Get(ctx, checkpointID); getErr != nil || !ok {
+		t.Fatalf("initial checkpoint missing: ok=%v err=%v", ok, getErr)
+	}
+
+	resumeCancelOpt, resumeCancelFn := WithCancel()
+	resumeIter, err := runner.ResumeWithParams(ctx, checkpointID, &ResumeParams{
+		Targets: map[string]any{interruptID: "approved"},
+	}, resumeCancelOpt)
+	if err != nil {
+		t.Fatalf("resume with params: %v", err)
+	}
+
+	select {
+	case <-streamTool.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not resume")
+	}
+	select {
+	case <-streamTool.parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streamable tool did not park")
+	}
+
+	cancelHandle, contributed := resumeCancelFn(
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithRecursive(),
+		WithAgentCancelTimeout(20*time.Millisecond),
+	)
+	if !contributed {
+		t.Fatal("resume cancel did not contribute to active run")
+	}
+	if cancelHandle == nil {
+		t.Fatal("resume cancel handle is nil")
+	}
+
+	cancelDone := make(chan error, 1)
+	go func() {
+		cancelDone <- cancelHandle.Wait()
+	}()
+	select {
+	case err = <-cancelDone:
+		assert.True(t, err == nil || errors.Is(err, ErrCancelTimeout) || errors.Is(err, ErrExecutionEnded),
+			"unexpected cancel wait error: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("resume cancel handle did not complete")
+	}
+	executionCompletedBeforeCancel := errors.Is(err, ErrExecutionEnded)
+
+	var hasCancelError bool
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err == nil {
+			continue
+		}
+		var ce *CancelError
+		if errors.As(event.Err, &ce) {
+			hasCancelError = true
+		}
+		errText := event.Err.Error()
+		assert.NotContains(t, errText, "gob marshal error")
+		assert.NotContains(t, errText, "cannot encode nil pointer")
+		assert.NotContains(t, errText, "*adk.agenticReactInput(nil=true")
+	}
+	assert.True(t, hasCancelError || executionCompletedBeforeCancel,
+		"expected CancelError in resume event stream unless execution completed before cancel")
 }
 
 func TestCancelContext(t *testing.T) {
@@ -2269,7 +2459,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}
 
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send after generator.Close must not panic")
 	})
 
@@ -2282,21 +2472,21 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}
 
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send after generator.Close must not panic even without cancelCtx (trySend safety net)")
 	})
 
 	t.Run("unit_send_nil_execCtx", func(t *testing.T) {
 		var execCtx *chatModelAgentExecCtx
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send on nil execCtx must not panic")
 	})
 
 	t.Run("unit_send_nil_generator", func(t *testing.T) {
 		execCtx := &chatModelAgentExecCtx{}
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "send with nil generator must not panic")
 	})
 
@@ -2317,7 +2507,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}
 
 		assert.NotPanics(t, func() {
-			execCtx.send(&AgentEvent{AgentName: "test"})
+			execCtx.send(context.Background(), &AgentEvent{AgentName: "test"})
 		}, "trySend must handle the case where isImmediateCancelled is false but generator is closed")
 	})
 
@@ -2346,7 +2536,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 
 	t.Run("unit_SendEvent_no_execCtx", func(t *testing.T) {
 		err := SendEvent(context.Background(), &AgentEvent{AgentName: "test"})
-		assert.Error(t, err, "SendEvent without execCtx should return error")
+		assert.NoError(t, err, "SendEvent without execCtx should be a no-op")
 	})
 
 	t.Run("integration_cancel_escalation_orphans_tool", func(t *testing.T) {
@@ -3614,4 +3804,102 @@ func TestBuildCancelFunc_CASFailStateDone(t *testing.T) {
 	} else {
 		t.Log("CAS race path not triggered (L743 remains a theoretical race edge)")
 	}
+}
+
+func TestAgentCancelFunc_MultiCall_EscalateToImmediate(t *testing.T) {
+	cc := newCancelContext()
+	var interruptCalls int32
+	cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+		atomic.AddInt32(&interruptCalls, 1)
+	})
+	cancelFn := cc.buildCancelFunc()
+
+	handle1, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2, _ := cancelFn(WithAgentCancelMode(CancelImmediate))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
+
+	cancelErr := cc.createCancelError()
+	assert.Equal(t, CancelImmediate, cancelErr.Info.Mode)
+	assert.True(t, cancelErr.Info.Escalated)
+	assert.False(t, cancelErr.Info.Timeout)
+
+	assert.True(t, cc.markCancelHandled())
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
+}
+
+func TestAgentCancelFunc_MultiCall_JoinSafePointModes(t *testing.T) {
+	cc := newCancelContext()
+	cancelFn := cc.buildCancelFunc()
+
+	handle1, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+
+	want := CancelAfterChatModel | CancelAfterToolCalls
+	assert.Equal(t, want, cc.getMode())
+
+	assert.True(t, cc.markCancelHandled())
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
+}
+
+func TestAgentCancelFunc_MultiCall_TimeoutDeadlineJoinUsesAbsoluteTime(t *testing.T) {
+	cc := newCancelContext()
+	cancelFn := cc.buildCancelFunc()
+
+	handle1, _ := cancelFn(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(200*time.Millisecond),
+	)
+
+	firstDeadline := cc.getDeadlineUnixNano()
+	assert.NotZero(t, firstDeadline)
+
+	time.Sleep(50 * time.Millisecond)
+
+	handle2, _ := cancelFn(
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithAgentCancelTimeout(60*time.Millisecond),
+	)
+
+	secondDeadline := cc.getDeadlineUnixNano()
+	assert.NotZero(t, secondDeadline)
+	assert.Less(t, secondDeadline, firstDeadline)
+
+	assert.True(t, cc.markCancelHandled())
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
+}
+
+func TestAgentCancelFunc_MultiCall_TimeoutEscalationReturnsErrCancelTimeout(t *testing.T) {
+	cc := newCancelContext()
+	var interruptCalls int32
+	interruptCh := make(chan struct{}, 1)
+	cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+		atomic.AddInt32(&interruptCalls, 1)
+		select {
+		case interruptCh <- struct{}{}:
+		default:
+		}
+	})
+	cancelFn := cc.buildCancelFunc()
+	handle, _ := cancelFn(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(30*time.Millisecond),
+	)
+
+	select {
+	case <-interruptCh:
+	case <-time.After(1 * time.Second):
+		t.Fatal("timeout escalation did not interrupt")
+	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
+
+	cancelErr := cc.createCancelError()
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.True(t, cancelErr.Info.Escalated)
+	assert.True(t, cancelErr.Info.Timeout)
+
+	assert.True(t, cc.markCancelHandled())
+	assert.Equal(t, ErrCancelTimeout, handle.Wait())
 }

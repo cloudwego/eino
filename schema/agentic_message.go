@@ -1038,6 +1038,11 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 		for _, idx := range blockIndices {
 			blocks = append(blocks, indexToBlock[idx])
 		}
+	} else if len(blocks) > 1 {
+		blocks, err = concatAdjacentFunctionToolResultBlocks(blocks)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(extraList) > 0 {
@@ -1362,6 +1367,33 @@ func genericGetTFromContentBlocks[T any](blocks []*ContentBlock, checkAndGetter 
 	return ret, nil
 }
 
+// concatStringField assembles a streamed string field from a list of chunks using a
+// single, pre-sized allocation. It first sums the fragment lengths, then grows a
+// strings.Builder once and writes every fragment in order. This keeps the total work
+// and bytes copied at O(total bytes), avoiding the quadratic intermediate strings that
+// repeated `+=` concatenation produces as the number of chunks grows. nil chunks are
+// skipped, matching the surrounding concat logic.
+func concatStringField[T any](items []*T, get func(*T) string) string {
+	total := 0
+	for _, it := range items {
+		if it != nil {
+			total += len(get(it))
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.Grow(total)
+	for _, it := range items {
+		if it != nil {
+			sb.WriteString(get(it))
+		}
+	}
+	return sb.String()
+}
+
 func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 	if len(reasons) == 0 {
 		return nil, fmt.Errorf("no reasoning found")
@@ -1369,17 +1401,15 @@ func concatReasoning(reasons []*Reasoning) (ret *Reasoning, err error) {
 
 	ret = &Reasoning{}
 
+	// Assemble the streamed string fields with a single pre-sized allocation each.
+	ret.Text = concatStringField(reasons, func(r *Reasoning) string { return r.Text })
+	ret.Signature = concatStringField(reasons, func(r *Reasoning) string { return r.Signature })
+
 	openaiExtensions := make([]*openai.ReasoningExtension, 0, len(reasons))
 
 	for _, r := range reasons {
 		if r == nil {
 			continue
-		}
-		if r.Text != "" {
-			ret.Text += r.Text
-		}
-		if r.Signature != "" {
-			ret.Signature += r.Signature
 		}
 		if r.OpenAIExtension != nil {
 			openaiExtensions = append(openaiExtensions, r.OpenAIExtension)
@@ -1466,6 +1496,9 @@ func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, 
 
 	ret = &AssistantGenText{}
 
+	// Assemble the streamed text with a single pre-sized allocation.
+	ret.Text = concatStringField(texts, func(t *AssistantGenText) string { return t.Text })
+
 	openaiExtensions := make([]*openai.AssistantGenTextExtension, 0, len(texts))
 	claudeExtensions := make([]*claude.AssistantGenTextExtension, 0, len(texts))
 
@@ -1478,8 +1511,6 @@ func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, 
 		if t == nil {
 			continue
 		}
-
-		ret.Text += t.Text
 
 		var isConsistent bool
 
@@ -1548,12 +1579,13 @@ func concatAssistantGenImages(images []*AssistantGenImage) (*AssistantGenImage, 
 
 	ret := &AssistantGenImage{}
 
+	// Assemble the streamed Base64 data with a single pre-sized allocation.
+	ret.Base64Data = concatStringField(images, func(i *AssistantGenImage) string { return i.Base64Data })
+
 	for _, img := range images {
 		if img == nil {
 			continue
 		}
-
-		ret.Base64Data += img.Base64Data
 
 		if ret.URL == "" {
 			ret.URL = img.URL
@@ -1581,12 +1613,13 @@ func concatAssistantGenAudios(audios []*AssistantGenAudio) (*AssistantGenAudio, 
 
 	ret := &AssistantGenAudio{}
 
+	// Assemble the streamed Base64 data with a single pre-sized allocation.
+	ret.Base64Data = concatStringField(audios, func(a *AssistantGenAudio) string { return a.Base64Data })
+
 	for _, audio := range audios {
 		if audio == nil {
 			continue
 		}
-
-		ret.Base64Data += audio.Base64Data
 
 		if ret.URL == "" {
 			ret.URL = audio.URL
@@ -1614,12 +1647,13 @@ func concatAssistantGenVideos(videos []*AssistantGenVideo) (*AssistantGenVideo, 
 
 	ret := &AssistantGenVideo{}
 
+	// Assemble the streamed Base64 data with a single pre-sized allocation.
+	ret.Base64Data = concatStringField(videos, func(v *AssistantGenVideo) string { return v.Base64Data })
+
 	for _, video := range videos {
 		if video == nil {
 			continue
 		}
-
-		ret.Base64Data += video.Base64Data
 
 		if ret.URL == "" {
 			ret.URL = video.URL
@@ -1647,6 +1681,9 @@ func concatFunctionToolCalls(calls []*FunctionToolCall) (*FunctionToolCall, erro
 
 	ret := &FunctionToolCall{}
 
+	// Assemble the streamed JSON arguments with a single pre-sized allocation.
+	ret.Arguments = concatStringField(calls, func(c *FunctionToolCall) string { return c.Arguments })
+
 	for _, c := range calls {
 		if c == nil {
 			continue
@@ -1663,8 +1700,6 @@ func concatFunctionToolCalls(calls []*FunctionToolCall) (*FunctionToolCall, erro
 		} else if c.Name != "" && c.Name != ret.Name {
 			return nil, fmt.Errorf("expected tool name '%s' for function tool call, but got '%s'", ret.Name, c.Name)
 		}
-
-		ret.Arguments += c.Arguments
 	}
 
 	return ret, nil
@@ -1679,6 +1714,12 @@ func concatFunctionToolResults(results []*FunctionToolResult) (*FunctionToolResu
 	}
 
 	ret := &FunctionToolResult{}
+
+	// Gather every content block from all chunks in one pass, then merge adjacent
+	// text runs a single time. This avoids the previous per-chunk `append(nil, left...)`
+	// copy and the pairwise `+` text growth, both of which were O(n^2) in the number
+	// of streamed result chunks.
+	var allContent []*FunctionToolResultContentBlock
 
 	for _, r := range results {
 		if r == nil {
@@ -1697,12 +1738,197 @@ func concatFunctionToolResults(results []*FunctionToolResult) (*FunctionToolResu
 			return nil, fmt.Errorf("expected tool name '%s' for function tool result, but got '%s'", ret.Name, r.Name)
 		}
 
-		for _, b := range r.Content {
-			if b == nil {
-				continue
-			}
-			ret.Content = append(ret.Content, b)
+		allContent = append(allContent, r.Content...)
+	}
+
+	if len(allContent) > 0 {
+		var err error
+		ret.Content, err = mergeFunctionToolResultContent(allContent)
+		if err != nil {
+			return nil, err
 		}
+	}
+
+	return ret, nil
+}
+
+func concatAdjacentFunctionToolResultBlocks(blocks []*ContentBlock) ([]*ContentBlock, error) {
+	if len(blocks) <= 1 {
+		return blocks, nil
+	}
+
+	ret := make([]*ContentBlock, 0, len(blocks))
+	for start := 0; start < len(blocks); {
+		block := blocks[start]
+		if block == nil || block.Type != ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
+			ret = append(ret, block)
+			start++
+			continue
+		}
+
+		// Track the entire run's identity without rebuilding its content or extras.
+		identity := &FunctionToolResult{CallID: block.FunctionToolResult.CallID, Name: block.FunctionToolResult.Name}
+		runBlock := NewContentBlock(identity)
+		end := start + 1
+		for end < len(blocks) && canConcatFunctionToolResultBlocks(runBlock, blocks[end]) {
+			result := blocks[end].FunctionToolResult
+			if identity.CallID == "" {
+				identity.CallID = result.CallID
+			}
+			if identity.Name == "" {
+				identity.Name = result.Name
+			}
+			end++
+		}
+
+		run := blocks[start:end]
+		merged, err := concatFunctionToolResultBlocks(run)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, merged)
+		start = end
+	}
+
+	return ret, nil
+}
+
+func canConcatFunctionToolResultBlocks(a, b *ContentBlock) bool {
+	if a == nil || b == nil ||
+		a.Type != ContentBlockTypeFunctionToolResult ||
+		b.Type != ContentBlockTypeFunctionToolResult ||
+		a.FunctionToolResult == nil ||
+		b.FunctionToolResult == nil {
+		return false
+	}
+
+	if a.FunctionToolResult.CallID != "" && b.FunctionToolResult.CallID != "" &&
+		a.FunctionToolResult.CallID != b.FunctionToolResult.CallID {
+		return false
+	}
+	if a.FunctionToolResult.Name != "" && b.FunctionToolResult.Name != "" &&
+		a.FunctionToolResult.Name != b.FunctionToolResult.Name {
+		return false
+	}
+
+	return a.FunctionToolResult.CallID != "" || b.FunctionToolResult.CallID != "" ||
+		(a.FunctionToolResult.Name != "" && a.FunctionToolResult.Name == b.FunctionToolResult.Name)
+}
+
+func concatFunctionToolResultBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
+	if len(blocks) == 1 {
+		return blocks[0], nil
+	}
+
+	results := make([]*FunctionToolResult, 0, len(blocks))
+	extras := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		results = append(results, block.FunctionToolResult)
+		if len(block.Extra) > 0 {
+			extras = append(extras, block.Extra)
+		}
+	}
+
+	result, err := concatFunctionToolResults(results)
+	if err != nil {
+		return nil, err
+	}
+
+	block := NewContentBlock(result)
+	if len(extras) > 0 {
+		block.Extra, err = concatExtra(extras)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat function tool result block extras: %w", err)
+		}
+	}
+
+	return block, nil
+}
+
+// mergeFunctionToolResultContent merges a flat list of content blocks, collapsing runs
+// of consecutive text blocks (each with non-nil Text) into a single text block. It runs
+// in a single pass and builds each merged run with a pre-sized strings.Builder, keeping
+// the work proportional to the total number of blocks and bytes.
+func mergeFunctionToolResultContent(
+	blocks []*FunctionToolResultContentBlock,
+) ([]*FunctionToolResultContentBlock, error) {
+	ret := make([]*FunctionToolResultContentBlock, 0, len(blocks))
+
+	// run accumulates consecutive mergeable text blocks; it is flushed into a single
+	// block whenever a non-mergeable block is reached or the input ends.
+	var run []*FunctionToolResultContentBlock
+	flush := func() error {
+		switch len(run) {
+		case 0:
+			return nil
+		case 1:
+			// A lone text block is kept as-is to preserve pointer identity and extras.
+			ret = append(ret, run[0])
+		default:
+			merged, err := mergeFunctionToolResultTextRun(run)
+			if err != nil {
+				return err
+			}
+			ret = append(ret, merged)
+		}
+		run = run[:0]
+		return nil
+	}
+
+	for _, block := range blocks {
+		if block == nil {
+			continue
+		}
+		if block.Type == FunctionToolResultContentBlockTypeText && block.Text != nil {
+			run = append(run, block)
+			continue
+		}
+		if err := flush(); err != nil {
+			return nil, err
+		}
+		ret = append(ret, block)
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+
+	if len(ret) == 0 {
+		return nil, nil
+	}
+	return ret, nil
+}
+
+// mergeFunctionToolResultTextRun concatenates a run of two or more text blocks into one,
+// joining their Text with a single pre-sized allocation and merging their Extra maps.
+func mergeFunctionToolResultTextRun(
+	run []*FunctionToolResultContentBlock,
+) (*FunctionToolResultContentBlock, error) {
+	total := 0
+	for _, b := range run {
+		total += len(b.Text.Text)
+	}
+
+	var sb strings.Builder
+	sb.Grow(total)
+	extras := make([]map[string]any, 0, len(run))
+	for _, b := range run {
+		sb.WriteString(b.Text.Text)
+		if len(b.Extra) > 0 {
+			extras = append(extras, b.Extra)
+		}
+	}
+
+	ret := &FunctionToolResultContentBlock{
+		Type: FunctionToolResultContentBlockTypeText,
+		Text: &UserInputText{Text: sb.String()},
+	}
+
+	if len(extras) > 0 {
+		extra, err := concatExtra(extras)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat function tool result content extras: %w", err)
+		}
+		ret.Extra = extra
 	}
 
 	return ret, nil
@@ -1828,12 +2054,13 @@ func concatMCPToolCalls(calls []*MCPToolCall) (*MCPToolCall, error) {
 
 	ret := &MCPToolCall{}
 
+	// Assemble the streamed JSON arguments with a single pre-sized allocation.
+	ret.Arguments = concatStringField(calls, func(c *MCPToolCall) string { return c.Arguments })
+
 	for _, c := range calls {
 		if c == nil {
 			continue
 		}
-
-		ret.Arguments += c.Arguments
 
 		if ret.ServerLabel == "" {
 			ret.ServerLabel = c.ServerLabel
@@ -1943,12 +2170,13 @@ func concatMCPToolApprovalRequests(requests []*MCPToolApprovalRequest) (*MCPTool
 
 	ret := &MCPToolApprovalRequest{}
 
+	// Assemble the streamed JSON arguments with a single pre-sized allocation.
+	ret.Arguments = concatStringField(requests, func(r *MCPToolApprovalRequest) string { return r.Arguments })
+
 	for _, r := range requests {
 		if r == nil {
 			continue
 		}
-
-		ret.Arguments += r.Arguments
 
 		if ret.ID == "" {
 			ret.ID = r.ID

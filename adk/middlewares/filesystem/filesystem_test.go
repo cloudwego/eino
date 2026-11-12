@@ -577,6 +577,38 @@ func TestExecuteTool(t *testing.T) {
 	}
 }
 
+func TestExecuteToolSchema_NoManager(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("schema is command only", func(t *testing.T) {
+		executeTool, err := newExecuteTool(&mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}, "", "")
+		assert.NoError(t, err)
+
+		info, err := executeTool.Info(ctx)
+		assert.NoError(t, err)
+		js, err := info.ParamsOneOf.ToJSONSchema()
+		assert.NoError(t, err)
+		assert.NotNil(t, js)
+		// command only; no run_in_background without a Manager.
+		assert.Equal(t, 1, js.Properties.Len())
+		_, ok := js.Properties.Get("command")
+		assert.True(t, ok)
+		_, ok = js.Properties.Get("run_in_background")
+		assert.False(t, ok)
+	})
+
+	t.Run("forwards only the command to the backend", func(t *testing.T) {
+		shell := &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}}
+		executeTool, err := newExecuteTool(shell, "", "")
+		assert.NoError(t, err)
+
+		result, err := invokeTool(t, executeTool, `{"command": "echo ok"}`)
+		assert.NoError(t, err)
+		assert.Equal(t, "ok", result)
+		assert.Equal(t, "echo ok", shell.req.Command)
+	})
+}
+
 func ptrOf[T any](t T) *T {
 	return &t
 }
@@ -584,9 +616,11 @@ func ptrOf[T any](t T) *T {
 type mockShellBackend struct {
 	filesystem.Backend
 	resp *filesystem.ExecuteResponse
+	req  *filesystem.ExecuteRequest
 }
 
 func (m *mockShellBackend) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	m.req = req
 	return m.resp, nil
 }
 
@@ -656,6 +690,101 @@ func TestGetFilesystemTools(t *testing.T) {
 	})
 }
 
+func TestExecuteToolConfig(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("disable skips execute registration", func(t *testing.T) {
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Backend: backend,
+			Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{Disable: true},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 6)
+		for _, to := range tools {
+			info, err := to.Info(ctx)
+			assert.NoError(t, err)
+			assert.NotEqual(t, ToolNameExecute, info.Name)
+		}
+	})
+
+	t.Run("custom tool overrides built-in execute", func(t *testing.T) {
+		customTool, err := newLsTool(backend, "custom_execute", "custom execute")
+		assert.NoError(t, err)
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{CustomTool: customTool},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customTool, tools[0])
+	})
+
+	t.Run("name and desc apply to built-in execute", func(t *testing.T) {
+		desc := "custom execute desc"
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{
+					Name: "run",
+					Desc: &desc,
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		info, err := tools[0].Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "run", info.Name)
+		assert.Equal(t, desc, info.Desc)
+	})
+
+	t.Run("deprecated config passes execute tool config through", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			ExecuteToolConfig: &ExecuteToolConfig{
+				ToolConfig: ToolConfig{Name: "run"},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 1)
+		info, err := m.AdditionalTools[0].Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "run", info.Name)
+		js, err := info.ParamsOneOf.ToJSONSchema()
+		assert.NoError(t, err)
+		_, ok := js.Properties.Get("command")
+		assert.True(t, ok)
+	})
+}
+
+func TestGetFilesystemTools_NoExecuteLifecycleTools(t *testing.T) {
+	ctx := context.Background()
+	tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+		Backend: setupTestBackend(),
+		Shell:   &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+	})
+	assert.NoError(t, err)
+
+	toolNames := make(map[string]bool)
+	for _, to := range tools {
+		info, err := to.Info(ctx)
+		assert.NoError(t, err)
+		toolNames[info.Name] = true
+	}
+
+	assert.True(t, toolNames[ToolNameExecute])
+	assert.False(t, toolNames["execute_output"])
+	assert.False(t, toolNames["execute_wait"])
+	assert.False(t, toolNames["execute_stop"])
+	assert.False(t, toolNames["execute_list"])
+}
+
 func TestNew(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
@@ -666,10 +795,24 @@ func TestNew(t *testing.T) {
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		_, err := New(ctx, &MiddlewareConfig{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
+	})
+
+	t.Run("shell-only config registers execute tool", func(t *testing.T) {
+		m, err := New(ctx, &MiddlewareConfig{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
+		assert.True(t, ok)
+		assert.Len(t, fm.additionalTools, 1)
+		info, err := fm.additionalTools[0].Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, ToolNameExecute, info.Name)
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
@@ -717,7 +860,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 		m, err := New(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 
-		runCtx := &adk.ChatModelAgentContext{
+		runCtx := &adk.TypedChatModelAgentContext[*schema.Message]{
 			Instruction: "Original instruction",
 			Tools:       nil,
 		}
@@ -1677,7 +1820,7 @@ func TestGetFilesystemTools_NilBackend(t *testing.T) {
 			Backend:        nil,
 			StreamingShell: mockSS,
 		}
-		// Validate should fail, but getFilesystemTools itself handles nil backend gracefully
+		assert.NoError(t, config.Validate())
 		tools, err := getFilesystemTools(ctx, config)
 		assert.NoError(t, err)
 		// Only execute tool should be returned since backend is nil
@@ -1740,9 +1883,12 @@ func TestGetFilesystemTools_PartialDisable(t *testing.T) {
 	assert.Contains(t, toolNames, ToolNameGrep)
 }
 
-type mockStreamingShell struct{}
+type mockStreamingShell struct {
+	req *filesystem.ExecuteRequest
+}
 
 func (m *mockStreamingShell) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	m.req = input
 	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
 	go func() {
 		defer sw.Close()
@@ -1986,6 +2132,25 @@ func TestNewStreamingExecuteTool(t *testing.T) {
 		assert.Equal(t, "custom_execute", info.Name)
 		assert.Equal(t, "custom desc", info.Desc)
 	})
+
+	t.Run("streaming forwards only command", func(t *testing.T) {
+		streamingShell := &mockStreamingShell{}
+		executeTool, err := newStreamingExecuteTool(streamingShell, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "echo hello"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+		for {
+			_, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+		}
+		assert.Equal(t, "echo hello", streamingShell.req.Command)
+	})
 }
 
 func TestNew_StreamingShell(t *testing.T) {
@@ -2024,10 +2189,10 @@ func TestNewMiddleware_Validation(t *testing.T) {
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		_, err := NewMiddleware(ctx, &Config{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
 	})
 
 	t.Run("both Shell and StreamingShell returns error", func(t *testing.T) {
@@ -2050,11 +2215,11 @@ func TestMiddlewareConfig_Validate(t *testing.T) {
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		c := &MiddlewareConfig{}
 		err := c.Validate()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
 	})
 
 	t.Run("both shells returns error", func(t *testing.T) {
@@ -2071,6 +2236,14 @@ func TestMiddlewareConfig_Validate(t *testing.T) {
 	t.Run("valid config passes", func(t *testing.T) {
 		c := &MiddlewareConfig{
 			Backend: setupTestBackend(),
+		}
+		err := c.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("shell-only config passes", func(t *testing.T) {
+		c := &MiddlewareConfig{
+			Shell: &mockShellBackend{},
 		}
 		err := c.Validate()
 		assert.NoError(t, err)
@@ -2167,6 +2340,79 @@ func TestConvExecuteResponse_NilExitCode(t *testing.T) {
 	assert.Equal(t, "some output", result)
 }
 
+func TestConvExecuteResponse_TimedOut(t *testing.T) {
+	t.Run("timeout note replaces the exit code note", func(t *testing.T) {
+		// A stopped command is usually also killed by a signal, so it carries a
+		// non-zero exit code. The timeout is the fact the agent can act on.
+		result := convExecuteResponse(&filesystem.ExecuteResponse{
+			Output:   "partial output",
+			ExitCode: ptrOf(137),
+			TimedOut: true,
+		})
+		assert.Equal(t, "partial output\n"+commandTimedOutNote, result)
+		assert.NotContains(t, result, "exit code")
+	})
+
+	t.Run("timeout with no output still reports the timeout", func(t *testing.T) {
+		result := convExecuteResponse(&filesystem.ExecuteResponse{TimedOut: true})
+		assert.Equal(t, commandTimedOutNote, result)
+	})
+
+	t.Run("timeout and truncation are both reported", func(t *testing.T) {
+		result := convExecuteResponse(&filesystem.ExecuteResponse{
+			Output:    "partial output",
+			TimedOut:  true,
+			Truncated: true,
+		})
+		assert.Equal(t, "partial output\n"+commandTimedOutNote+"\n"+outputTruncatedNote, result)
+	})
+}
+
+func TestExecTerminalNote(t *testing.T) {
+	assert.Equal(t, "", execTerminalNote(ptrOf(0), true, false))
+	assert.Equal(t, noCommandOutputNote, execTerminalNote(ptrOf(0), false, false))
+	assert.Equal(t, "\n[Command failed with exit code 2]", execTerminalNote(ptrOf(2), true, false))
+	// Timeout wins over both the exit code and the no-output message.
+	assert.Equal(t, "\n"+commandTimedOutNote, execTerminalNote(ptrOf(137), true, true))
+	assert.Equal(t, commandTimedOutNote, execTerminalNote(nil, false, true))
+}
+
+type mockStreamingShellTimedOut struct{}
+
+func (m *mockStreamingShellTimedOut) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{Output: "partial output"}, nil)
+		sw.Send(&filesystem.ExecuteResponse{ExitCode: ptrOf(137), TimedOut: true}, nil)
+	}()
+	return sr, nil
+}
+
+func TestStreamingExecuteTool_TimedOut(t *testing.T) {
+	executeTool, err := newStreamingExecuteTool(&mockStreamingShellTimedOut{}, "", "")
+	assert.NoError(t, err)
+
+	st := executeTool.(tool.StreamableTool)
+	sr, err := st.StreamableRun(context.Background(), `{"command": "sleep 100"}`)
+	assert.NoError(t, err)
+	defer sr.Close()
+
+	var chunks []string
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		chunks = append(chunks, chunk)
+	}
+	result := strings.Join(chunks, "")
+	assert.Contains(t, result, "partial output")
+	assert.Contains(t, result, commandTimedOutNote)
+	assert.NotContains(t, result, "exit code")
+}
+
 func TestConfig_Validate(t *testing.T) {
 	t.Run("nil config returns error", func(t *testing.T) {
 		var c *Config
@@ -2174,11 +2420,11 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("nil backend returns error", func(t *testing.T) {
+	t.Run("all execution backends nil returns error", func(t *testing.T) {
 		c := &Config{}
 		err := c.Validate()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of backend, shell, or streaming shell should be set")
 	})
 
 	t.Run("both shells returns error", func(t *testing.T) {
@@ -2194,6 +2440,14 @@ func TestConfig_Validate(t *testing.T) {
 	t.Run("valid config passes", func(t *testing.T) {
 		c := &Config{
 			Backend: setupTestBackend(),
+		}
+		err := c.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("shell-only config passes", func(t *testing.T) {
+		c := &Config{
+			Shell: &mockShellBackend{},
 		}
 		err := c.Validate()
 		assert.NoError(t, err)
@@ -2295,6 +2549,41 @@ func TestNewMiddleware_WithShell(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Len(t, m.AdditionalTools, 7)
+	})
+
+	t.Run("backend enables prompt and large-result offloading", func(t *testing.T) {
+		prompt := "Use the workspace filesystem."
+		m, err := NewMiddleware(ctx, &Config{
+			Backend: backend, CustomSystemPrompt: &prompt,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, prompt, m.AdditionalInstruction)
+		assert.NotNil(t, m.WrapToolCall.Invokable)
+		assert.NotNil(t, m.WrapToolCall.Streamable)
+	})
+
+	t.Run("shell-only config skips large tool result offloading", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			Shell: &mockShellBackend{resp: &filesystem.ExecuteResponse{Output: "ok"}},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 1)
+		assert.Nil(t, m.WrapToolCall.Invokable)
+		assert.Nil(t, m.WrapToolCall.Streamable)
+		assert.Nil(t, m.WrapToolCall.EnhancedInvokable)
+		assert.Nil(t, m.WrapToolCall.EnhancedStreamable)
+	})
+
+	t.Run("streaming shell-only config skips large tool result offloading", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			StreamingShell: &mockStreamingShell{},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 1)
+		assert.Nil(t, m.WrapToolCall.Invokable)
+		assert.Nil(t, m.WrapToolCall.Streamable)
+		assert.Nil(t, m.WrapToolCall.EnhancedInvokable)
+		assert.Nil(t, m.WrapToolCall.EnhancedStreamable)
 	})
 }
 
@@ -2576,7 +2865,7 @@ func TestMultiModalReadFileTool_CustomDescNoSuffix(t *testing.T) {
 	assert.NoError(t, err)
 	defaultInfo, err := defaultTool.Info(context.Background())
 	assert.NoError(t, err)
-	assert.Contains(t, defaultInfo.Desc, "multimodal", "default desc should include multimodal suffix")
+	assert.Contains(t, defaultInfo.Desc, "Reads images", "default desc should include the multimodal read section")
 }
 
 // TestMultiModalReadFileTool_EmptyPartDataError verifies that a FileContentPart

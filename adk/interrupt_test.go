@@ -235,26 +235,46 @@ func TestAttack_RunnerCheckpointRejectsBrokenCompactedReference(t *testing.T) {
 	}
 }
 
-func TestAttack_ResumeBridgeStoreRequiresFreshWrite(t *testing.T) {
-	store := newResumeBridgeStore("checkpoint", []byte("loaded"))
-	t.Log("a resume bridge must distinguish a loaded checkpoint from a replacement")
+func TestAttack_BridgeStoreTransfersCheckpointOwnership(t *testing.T) {
+	initial := []byte("loaded")
+	store := newResumeBridgeStore("checkpoint", initial)
+	t.Log("bridge checkpoints stay internal and transfer immutable buffers without copying")
 
 	loaded, ok, err := store.Get(context.Background(), "checkpoint")
-	assert.NoError(t, err)
-	assert.True(t, ok)
+	require.NoError(t, err)
+	require.True(t, ok)
 	assert.Equal(t, []byte("loaded"), loaded)
+	assert.True(t, &initial[0] == &loaded[0])
 
 	_, _, ok = store.LastCheckpoint()
 	assert.False(t, ok, "loaded checkpoints must not be reported as fresh writes")
 
-	assert.NoError(t, store.Set(context.Background(), "checkpoint", []byte("saved")))
+	replacement := []byte("saved")
+	require.NoError(t, store.Set(context.Background(), "checkpoint", replacement))
 	key, saved, ok := store.LastCheckpoint()
-	assert.True(t, ok)
+	require.True(t, ok)
 	assert.Equal(t, "checkpoint", key)
 	assert.Equal(t, []byte("saved"), saved)
+	assert.True(t, &replacement[0] == &saved[0])
+	loaded, ok, err = store.Get(context.Background(), "checkpoint")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.True(t, &replacement[0] == &loaded[0])
 }
 
-func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func TestAttack_TurnLoopResumeBridgeRunnerDecodeDoesNotMutateCheckpoint(t *testing.T) {
+	checkpoint, err := encodeRunnerCheckPointWithRunCtx(false, nil, nil, nil)
+	require.NoError(t, err)
+	original := append([]byte(nil), checkpoint...)
+	store := newResumeBridgeStore("checkpoint", checkpoint)
+
+	_, _, _, err = runnerLoadCheckPointImpl(store, context.Background(), "checkpoint")
+
+	require.NoError(t, err)
+	assert.Equal(t, original, checkpoint)
+}
+
+func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *TypedChatModelAgentContext[*schema.Message]) (context.Context, *TypedChatModelAgentContext[*schema.Message], error) {
 	runCtx.Tools = append(runCtx.Tools, h.tools...)
 	return ctx, runCtx, nil
 }
@@ -1186,8 +1206,22 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 
-		assert.Contains(t, events, parallelMessageEvents[0])
-		assert.Contains(t, events, parallelMessageEvents[1])
+		assertParallelMessageEvent := func(want *AgentEvent) {
+			t.Helper()
+			for _, event := range events {
+				if event.AgentName == want.AgentName &&
+					assert.ObjectsAreEqual(want.RunPath, event.RunPath) &&
+					event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.Message != nil &&
+					event.Output.MessageOutput.Message.Content == want.Output.MessageOutput.Message.Content {
+					return
+				}
+			}
+			assert.Failf(t, "missing parallel message event", "want=%v", want)
+		}
+
+		assertParallelMessageEvent(parallelMessageEvents[0])
+		assertParallelMessageEvent(parallelMessageEvents[1])
 
 		assert.NotNil(t, interruptEvent)
 		assert.Equal(t, "parallel agent", interruptEvent.AgentName)
@@ -1456,6 +1490,139 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	assert.Equal(t, event.Output.MessageOutput.Message.Content, "completed")
 	_, ok = iter.Next()
 	assert.False(t, ok)
+}
+
+func TestChatModelAgentNamedToolMiddlewareResumeBeforeAgentTool(t *testing.T) {
+	ctx := context.Background()
+	approval := &testAgentToolApprovalMiddleware{
+		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		t:                            t,
+	}
+
+	innerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerCleanAgent",
+		Description: "Inner agent that should run cleanly after outer approval",
+		Model: &myModel{
+			messages: []*schema.Message{
+				schema.AssistantMessage("inner clean result", nil),
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterApprovalAgent",
+		Description: "Outer agent with approval middleware around an agent tool",
+		Model: &myModel{
+			messages: []*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID: "call_agent_tool",
+						Function: schema.FunctionCall{
+							Name:      "InnerCleanAgent",
+							Arguments: `{"request":"run inner"}`,
+						},
+					},
+				}),
+				schema.AssistantMessage("outer completed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, innerAgent)},
+			},
+		},
+		Handlers: []ChatModelAgentMiddleware{approval},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           outerAgent,
+		CheckPointStore: newMyStore(),
+	})
+
+	iter := runner.Query(ctx, "start", WithCheckPointID("approval-agent-tool"))
+	_, interruptEvent := consumeUntilInterrupt(iter)
+	if interruptEvent == nil {
+		t.Fatal("expected approval middleware interrupt")
+	}
+	assert.Equal(t, 1, len(interruptEvent.Action.Interrupted.InterruptContexts))
+
+	interruptCtx := interruptEvent.Action.Interrupted.InterruptContexts[0]
+	assert.True(t, interruptCtx.IsRootCause)
+	assert.Equal(t, "approval required", interruptCtx.Info)
+	assert.Equal(t, Address{
+		{Type: AddressSegmentAgent, ID: "OuterApprovalAgent"},
+		{Type: AddressSegmentTool, ID: "InnerCleanAgent", SubID: "call_agent_tool"},
+		{Type: AddressSegmentMiddleware, ID: "test_approval"},
+	}, interruptCtx.Address)
+
+	iter, err = runner.ResumeWithParams(ctx, "approval-agent-tool", &ResumeParams{
+		Targets: map[string]any{
+			interruptCtx.ID: "allow",
+		},
+	})
+	assert.NoError(t, err)
+
+	finalEvents, reinterrupt := consumeUntilInterrupt(iter)
+	assert.Nil(t, reinterrupt)
+	assert.Equal(t, 1, approval.approvedCalls)
+
+	var foundInnerResult, foundOuterResult bool
+	for _, event := range finalEvents {
+		if event.Err != nil {
+			t.Fatalf("unexpected event error after approval resume: %v", event.Err)
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil || event.Output.MessageOutput.Message == nil {
+			continue
+		}
+		switch event.Output.MessageOutput.Message.Content {
+		case "inner clean result":
+			foundInnerResult = true
+		case "outer completed":
+			foundOuterResult = true
+		}
+	}
+	assert.True(t, foundInnerResult, "inner agent should run after approval")
+	assert.True(t, foundOuterResult, "outer agent should complete after agent tool result")
+}
+
+type testAgentToolApprovalMiddleware struct {
+	*BaseChatModelAgentMiddleware
+	t             *testing.T
+	approvedCalls int
+}
+
+func (m *testAgentToolApprovalMiddleware) ChatModelAgentMiddlewareName() string {
+	return "test_approval"
+}
+
+func (m *testAgentToolApprovalMiddleware) WrapInvokableToolCall(
+	_ context.Context,
+	endpoint InvokableToolCallEndpoint,
+	tCtx *ToolContext,
+) (InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		assert.Equal(m.t, "InnerCleanAgent", tCtx.Name)
+		assert.Equal(m.t, "call_agent_tool", tCtx.CallID)
+
+		wasInterrupted, hasState, state := tool.GetInterruptState[string](ctx)
+		isTarget, hasData, data := tool.GetResumeContext[string](ctx)
+		if wasInterrupted {
+			assert.True(m.t, hasState)
+			assert.Equal(m.t, "approval-state", state)
+		}
+		if isTarget {
+			assert.True(m.t, hasData)
+			assert.Equal(m.t, "allow", data)
+			m.approvedCalls++
+			return endpoint(ctx, argumentsInJSON, opts...)
+		}
+		if wasInterrupted {
+			return "", tool.StatefulInterrupt(ctx, "approval required", state)
+		}
+		return "", tool.StatefulInterrupt(ctx, "approval required", "approval-state")
+	}, nil
 }
 
 func newMyStore() *myStore {

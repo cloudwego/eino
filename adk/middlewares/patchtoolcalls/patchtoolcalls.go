@@ -20,9 +20,11 @@ package patchtoolcalls
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -35,6 +37,8 @@ type PatchedToolResult struct {
 	Content    string
 	ToolResult *schema.ToolResult
 }
+
+const syntheticAgenticToolResultMarker = "_eino_patch_tool_calls_synthetic"
 
 // Config defines the configuration options for the patch tool calls middleware.
 type Config struct {
@@ -77,11 +81,22 @@ type Config struct {
 		toolCallID string,
 		toolArgument *schema.ToolArgument,
 	) (*PatchedToolResult, error)
-}
 
-type patchedGenerators struct {
-	content func(ctx context.Context, toolName, toolCallID string) (string, error)
-	result  func(ctx context.Context, toolName, toolCallID string, toolArgument *schema.ToolArgument) (*PatchedToolResult, error)
+	// RemoveOrphanResults removes tool result messages or result blocks whose call ID
+	// does not match any previous assistant tool call. Disabled by default.
+	RemoveOrphanResults bool
+
+	// RemoveDuplicateResults removes duplicate tool result messages or result blocks
+	// after the first result kept for a call ID. Disabled by default.
+	RemoveDuplicateResults bool
+
+	// Strict validates the history and returns an error without mutating state when
+	// missing, orphan, duplicate, or empty-ID mismatches are found. Disabled by default.
+	Strict bool
+
+	// MarkSynthetic marks generated AgenticMessage tool results in Extra so callers
+	// can identify mechanical repairs. Disabled by default.
+	MarkSynthetic bool
 }
 
 // NewTyped creates a new generic patch tool calls middleware.
@@ -92,11 +107,9 @@ func NewTyped[M adk.MessageType](_ context.Context, cfg *Config) (adk.TypedChatM
 	if cfg == nil {
 		cfg = &Config{}
 	}
+	cfgCopy := *cfg
 	return &typedMiddleware[M]{
-		gens: patchedGenerators{
-			content: cfg.PatchedContentGenerator,
-			result:  cfg.PatchedToolResultGenerator,
-		},
+		cfg: cfgCopy,
 	}, nil
 }
 
@@ -110,7 +123,7 @@ func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error)
 
 type typedMiddleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
-	gens patchedGenerators
+	cfg Config
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
@@ -123,104 +136,484 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		return patchToolCallsForMessage(ctx, m.gens, any(state).(*adk.TypedChatModelAgentState[*schema.Message]), mc)
+		return patchToolCallsForMessage(ctx, m.cfg, any(state).(*adk.TypedChatModelAgentState[*schema.Message]), mc)
 	case *schema.AgenticMessage:
-		return patchToolCallsForAgenticMessage(ctx, m.gens, any(state).(*adk.TypedChatModelAgentState[*schema.AgenticMessage]), mc)
+		return patchToolCallsForAgenticMessage(ctx, m.cfg, any(state).(*adk.TypedChatModelAgentState[*schema.AgenticMessage]), mc)
 	default:
 		panic("unreachable: unknown MessageType")
 	}
 }
 
 func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
-	gens patchedGenerators,
+	cfg Config,
 	state *adk.TypedChatModelAgentState[*schema.Message],
-	_ *adk.TypedModelContext[M],
-) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	patched := make([]*schema.Message, 0, len(state.Messages))
+	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
-	for i, msg := range state.Messages {
-		patched = append(patched, msg)
-
-		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
-			continue
-		}
-
-		for _, tc := range msg.ToolCalls {
-			if hasCorrespondingToolMessage(state.Messages[i+1:], tc.ID) {
-				continue
-			}
-
-			toolMsg, err := createPatchedToolMessage(ctx, gens, tc)
-			if err != nil {
-				return ctx, nil, err
-			}
-			patched = append(patched, toolMsg)
-		}
+	plan, err := buildMessageNormalizationPlan(ctx, cfg, state.Messages)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if err := sendNormalizationEvents(ctx, plan.events); err != nil {
+		return ctx, nil, err
 	}
 
 	nState := *state
-	nState.Messages = patched
+	nState.Messages = plan.messages
 	return ctx, any(&nState).(*adk.TypedChatModelAgentState[M]), nil
 }
 
 func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
-	gens patchedGenerators,
+	cfg Config,
 	state *adk.TypedChatModelAgentState[*schema.AgenticMessage],
-	_ *adk.TypedModelContext[M],
-) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-	patched := make([]*schema.AgenticMessage, 0, len(state.Messages))
+	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
-	for i, msg := range state.Messages {
-		patched = append(patched, msg)
-
-		if msg.Role != schema.AgenticRoleTypeAssistant {
-			continue
-		}
-
-		// Collect tool call IDs from this assistant message.
-		var toolCalls []struct {
-			callID string
-			name   string
-			args   string
-		}
-		for _, block := range msg.ContentBlocks {
-			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
-				toolCalls = append(toolCalls, struct {
-					callID string
-					name   string
-					args   string
-				}{
-					callID: block.FunctionToolCall.CallID,
-					name:   block.FunctionToolCall.Name,
-					args:   block.FunctionToolCall.Arguments,
-				})
-			}
-		}
-		if len(toolCalls) == 0 {
-			continue
-		}
-
-		for _, tc := range toolCalls {
-			if hasCorrespondingAgenticToolResult(state.Messages[i+1:], tc.callID) {
-				continue
-			}
-
-			toolMsg, err := createPatchedAgenticToolMessage(ctx, gens, tc.name, tc.callID, tc.args)
-			if err != nil {
-				return ctx, nil, err
-			}
-			patched = append(patched, toolMsg)
-		}
+	plan, err := buildAgenticNormalizationPlan(ctx, cfg, state.Messages)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if err := sendNormalizationEvents(ctx, plan.events); err != nil {
+		return ctx, nil, err
 	}
 
 	nState := *state
-	nState.Messages = patched
+	nState.Messages = plan.messages
 	return ctx, any(&nState).(*adk.TypedChatModelAgentState[M]), nil
 }
 
-func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) bool {
+type mismatchCounts struct {
+	missing   int
+	orphan    int
+	duplicate int
+	emptyID   int
+}
+
+func (c mismatchCounts) hasMismatch() bool {
+	return c.missing > 0 || c.orphan > 0 || c.duplicate > 0 || c.emptyID > 0
+}
+
+func (c mismatchCounts) strictError() error {
+	return fmt.Errorf("patchtoolcalls strict validation failed: missing=%d orphan=%d duplicate=%d empty_tool_call_id=%d",
+		c.missing, c.orphan, c.duplicate, c.emptyID)
+}
+
+type normalizationPlan[M adk.MessageType] struct {
+	messages []M
+	events   []*adk.SessionEvent[M]
+	counts   mismatchCounts
+}
+
+func buildMessageNormalizationPlan(ctx context.Context, cfg Config, messages []*schema.Message) (*normalizationPlan[*schema.Message], error) {
+	ensureMessageIDs(messages)
+
+	counts := analyzeMessages(messages)
+	if cfg.Strict && counts.hasMismatch() {
+		return nil, counts.strictError()
+	}
+
+	keep := keptMessages(messages, cfg)
+	patched := make([]*schema.Message, 0, len(messages)+counts.missing)
+	inserted := make([]*adk.SessionEvent[*schema.Message], 0, counts.missing)
+
+	for i, msg := range messages {
+		if keep[i] {
+			patched = append(patched, msg)
+		}
+		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for callIndex, tc := range msg.ToolCalls {
+			if tc.ID == "" || hasCorrespondingKeptToolMessage(messages, keep, i+1, tc.ID) {
+				continue
+			}
+			toolMsg, err := createPatchedToolMessage(ctx, cfg, tc)
+			if err != nil {
+				return nil, err
+			}
+			adk.EnsureMessageID(toolMsg)
+			inserted = append(inserted, &adk.SessionEvent[*schema.Message]{
+				Kind: adk.SessionEventMessageInserted,
+				MessageInserted: &adk.MessageInsertedEvent[*schema.Message]{
+					Message:         toolMsg,
+					BeforeMessageID: messageToolResultInsertionAnchor(messages, keep, i+1, msg.ToolCalls[callIndex+1:]),
+				},
+			})
+		}
+	}
+
+	patched, err := applyInsertionEvents(patched, inserted)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]*adk.SessionEvent[*schema.Message], 0, len(inserted)+1)
+	events = append(events, inserted...)
+	if deletedIDs := deletedMessageIDs(messages, keep); len(deletedIDs) > 0 {
+		events = append(events, &adk.SessionEvent[*schema.Message]{
+			Kind: adk.SessionEventMessagesDeleted,
+			MessagesDeleted: &adk.MessagesDeletedEvent{
+				MessageIDs: deletedIDs,
+			},
+		})
+	}
+
+	return &normalizationPlan[*schema.Message]{messages: patched, events: events, counts: counts}, nil
+}
+
+func analyzeMessages(messages []*schema.Message) mismatchCounts {
+	var counts mismatchCounts
+	var scope *toolResultScope
+
+	finishScope := func() {
+		if scope == nil {
+			return
+		}
+		for callID := range scope.callIDs {
+			if _, ok := scope.seen[callID]; !ok {
+				counts.missing++
+			}
+		}
+		scope = nil
+	}
+
 	for _, msg := range messages {
-		// Only consider successive tool messages after the tool call message
+		if msg.Role == schema.Tool {
+			if scope == nil {
+				counts.orphan++
+				continue
+			}
+			if _, ok := scope.callIDs[msg.ToolCallID]; !ok {
+				counts.orphan++
+			} else if _, ok := scope.seen[msg.ToolCallID]; ok {
+				counts.duplicate++
+			} else {
+				scope.seen[msg.ToolCallID] = struct{}{}
+			}
+			continue
+		}
+		finishScope()
+		if msg.Role != schema.Assistant {
+			continue
+		}
+		callIDs := make(map[string]struct{})
+		for _, tc := range msg.ToolCalls {
+			if tc.ID == "" {
+				counts.emptyID++
+				continue
+			}
+			callIDs[tc.ID] = struct{}{}
+		}
+		if len(callIDs) > 0 {
+			scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
+		}
+	}
+	finishScope()
+
+	return counts
+}
+
+func ensureMessageIDs[M adk.MessageType](messages []M) {
+	for _, msg := range messages {
+		adk.EnsureMessageID(msg)
+	}
+}
+
+func keptMessages(messages []*schema.Message, cfg Config) []bool {
+	keep := make([]bool, len(messages))
+	var scope *toolResultScope
+
+	for i, msg := range messages {
+		keep[i] = true
+		if msg.Role == schema.Tool {
+			valid := false
+			duplicate := false
+			if scope != nil {
+				_, valid = scope.callIDs[msg.ToolCallID]
+				_, duplicate = scope.seen[msg.ToolCallID]
+			}
+			if !valid && cfg.RemoveOrphanResults {
+				keep[i] = false
+			} else if valid && duplicate && cfg.RemoveDuplicateResults {
+				keep[i] = false
+			}
+			if valid && !duplicate {
+				scope.seen[msg.ToolCallID] = struct{}{}
+			}
+			continue
+		}
+		scope = nil
+		if msg.Role != schema.Assistant {
+			continue
+		}
+		callIDs := make(map[string]struct{})
+		for _, tc := range msg.ToolCalls {
+			if tc.ID != "" {
+				callIDs[tc.ID] = struct{}{}
+			}
+		}
+		if len(callIDs) > 0 {
+			scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
+		}
+	}
+
+	return keep
+}
+
+func buildAgenticNormalizationPlan(ctx context.Context, cfg Config, messages []*schema.AgenticMessage) (*normalizationPlan[*schema.AgenticMessage], error) {
+	ensureMessageIDs(messages)
+
+	counts := analyzeAgenticMessages(messages)
+	if cfg.Strict && counts.hasMismatch() {
+		return nil, counts.strictError()
+	}
+
+	rewrites := agenticMessageRewrites(messages, cfg)
+	patched := make([]*schema.AgenticMessage, 0, len(messages)+counts.missing)
+	inserted := make([]*adk.SessionEvent[*schema.AgenticMessage], 0, counts.missing)
+	updated := make([]*adk.SessionEvent[*schema.AgenticMessage], 0)
+
+	for i, msg := range messages {
+		rewrite := rewrites[i]
+		if rewrite.keep {
+			patched = append(patched, rewrite.message)
+			if rewrite.updated {
+				updated = append(updated, &adk.SessionEvent[*schema.AgenticMessage]{
+					Kind: adk.SessionEventMessageUpdated,
+					MessageUpdated: &adk.MessageUpdatedEvent[*schema.AgenticMessage]{
+						MessageID: adk.GetMessageID(msg),
+						Message:   rewrite.message,
+					},
+				})
+			}
+		}
+		if msg.Role != schema.AgenticRoleTypeAssistant {
+			continue
+		}
+		toolCalls := collectAgenticToolCalls(msg)
+		for callIndex, tc := range toolCalls {
+			if tc.callID == "" || hasCorrespondingRewrittenAgenticToolResult(rewrites, i+1, tc.callID) {
+				continue
+			}
+			toolMsg, err := createPatchedAgenticToolMessage(ctx, cfg, tc.name, tc.callID, tc.args)
+			if err != nil {
+				return nil, err
+			}
+			if cfg.MarkSynthetic {
+				markSyntheticAgenticToolResult(toolMsg)
+			}
+			adk.EnsureMessageID(toolMsg)
+			inserted = append(inserted, &adk.SessionEvent[*schema.AgenticMessage]{
+				Kind: adk.SessionEventMessageInserted,
+				MessageInserted: &adk.MessageInsertedEvent[*schema.AgenticMessage]{
+					Message:         toolMsg,
+					BeforeMessageID: agenticToolResultInsertionAnchor(messages, rewrites, i+1, toolCalls[callIndex+1:]),
+				},
+			})
+		}
+	}
+
+	patched, err := applyInsertionEvents(patched, inserted)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]*adk.SessionEvent[*schema.AgenticMessage], 0, len(inserted)+len(updated)+1)
+	events = append(events, inserted...)
+	events = append(events, updated...)
+	if deletedIDs := deletedAgenticMessageIDs(messages, rewrites); len(deletedIDs) > 0 {
+		events = append(events, &adk.SessionEvent[*schema.AgenticMessage]{
+			Kind: adk.SessionEventMessagesDeleted,
+			MessagesDeleted: &adk.MessagesDeletedEvent{
+				MessageIDs: deletedIDs,
+			},
+		})
+	}
+
+	return &normalizationPlan[*schema.AgenticMessage]{messages: patched, events: events, counts: counts}, nil
+}
+
+type agenticToolCall struct {
+	callID string
+	name   string
+	args   string
+}
+
+// toolResultScope is limited to one assistant tool-call message plus the
+// immediately following contiguous tool-result window.
+type toolResultScope struct {
+	callIDs map[string]struct{}
+	seen    map[string]struct{}
+}
+
+type agenticRewrite struct {
+	message *schema.AgenticMessage
+	keep    bool
+	updated bool
+}
+
+func analyzeAgenticMessages(messages []*schema.AgenticMessage) mismatchCounts {
+	var counts mismatchCounts
+	var scope *toolResultScope
+
+	finishScope := func() {
+		if scope == nil {
+			return
+		}
+		for callID := range scope.callIDs {
+			if _, ok := scope.seen[callID]; !ok {
+				counts.missing++
+			}
+		}
+		scope = nil
+	}
+
+	for _, msg := range messages {
+		hasToolResult := agenticMessageHasToolResult(msg)
+		if msg.Role == schema.AgenticRoleTypeUser && hasToolResult {
+			for _, block := range msg.ContentBlocks {
+				callID, ok := agenticResultCallID(block)
+				if !ok {
+					continue
+				}
+				if scope == nil {
+					counts.orphan++
+					continue
+				}
+				if _, valid := scope.callIDs[callID]; !valid {
+					counts.orphan++
+				} else if _, duplicate := scope.seen[callID]; duplicate {
+					counts.duplicate++
+				} else {
+					scope.seen[callID] = struct{}{}
+				}
+			}
+			continue
+		}
+
+		finishScope()
+		if hasToolResult {
+			for _, block := range msg.ContentBlocks {
+				if _, ok := agenticResultCallID(block); ok {
+					counts.orphan++
+				}
+			}
+		}
+		if msg.Role != schema.AgenticRoleTypeAssistant {
+			continue
+		}
+		callIDs := make(map[string]struct{})
+		for _, tc := range collectAgenticToolCalls(msg) {
+			if tc.callID == "" {
+				counts.emptyID++
+				continue
+			}
+			callIDs[tc.callID] = struct{}{}
+		}
+		if len(callIDs) > 0 {
+			scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
+		}
+	}
+	finishScope()
+
+	return counts
+}
+
+func agenticMessageRewrites(messages []*schema.AgenticMessage, cfg Config) []agenticRewrite {
+	rewrites := make([]agenticRewrite, len(messages))
+	var scope *toolResultScope
+
+	for i, msg := range messages {
+		rewrite := agenticRewrite{message: msg, keep: true}
+		hasToolResult := agenticMessageHasToolResult(msg)
+
+		switch {
+		case msg.Role == schema.AgenticRoleTypeUser && hasToolResult:
+			rewrite = rewriteAgenticResultBlocks(msg, scope, cfg)
+			if scope != nil && rewrite.keep && !agenticMessageHasToolResult(rewrite.message) {
+				scope = nil
+			}
+		default:
+			if hasToolResult {
+				rewrite = rewriteAgenticResultBlocks(msg, nil, cfg)
+			}
+			if rewrite.keep {
+				scope = nil
+			}
+			if msg.Role == schema.AgenticRoleTypeAssistant && rewrite.keep {
+				callIDs := make(map[string]struct{})
+				for _, tc := range collectAgenticToolCalls(rewrite.message) {
+					if tc.callID != "" {
+						callIDs[tc.callID] = struct{}{}
+					}
+				}
+				if len(callIDs) > 0 {
+					scope = &toolResultScope{callIDs: callIDs, seen: make(map[string]struct{})}
+				}
+			}
+		}
+
+		rewrites[i] = rewrite
+	}
+
+	return rewrites
+}
+
+func rewriteAgenticResultBlocks(msg *schema.AgenticMessage, scope *toolResultScope, cfg Config) agenticRewrite {
+	rewrite := agenticRewrite{message: msg, keep: true}
+	blocks := make([]*schema.ContentBlock, 0, len(msg.ContentBlocks))
+	removedBlock := false
+
+	for _, block := range msg.ContentBlocks {
+		callID, ok := agenticResultCallID(block)
+		if !ok {
+			blocks = append(blocks, block)
+			continue
+		}
+		valid := false
+		duplicate := false
+		if scope != nil {
+			_, valid = scope.callIDs[callID]
+			_, duplicate = scope.seen[callID]
+		}
+		remove := (!valid && cfg.RemoveOrphanResults) || (valid && duplicate && cfg.RemoveDuplicateResults)
+		if remove {
+			removedBlock = true
+		} else {
+			blocks = append(blocks, block)
+		}
+		if valid && !duplicate {
+			scope.seen[callID] = struct{}{}
+		}
+	}
+
+	if removedBlock {
+		if len(blocks) == 0 {
+			rewrite.keep = false
+		} else {
+			adk.EnsureMessageID(msg)
+			cp := *msg
+			cp.ContentBlocks = blocks
+			cp.Extra = gmap.Clone(msg.Extra)
+			rewrite.message = &cp
+			rewrite.updated = true
+		}
+	}
+
+	return rewrite
+}
+
+func agenticMessageHasToolResult(msg *schema.AgenticMessage) bool {
+	for _, block := range msg.ContentBlocks {
+		if _, ok := agenticResultCallID(block); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCorrespondingKeptToolMessage(messages []*schema.Message, keep []bool, start int, toolCallID string) bool {
+	for i := start; i < len(messages); i++ {
+		if !keep[i] {
+			continue
+		}
+		msg := messages[i]
 		if msg.Role != schema.Tool {
 			return false
 		}
@@ -231,26 +624,22 @@ func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) 
 	return false
 }
 
-func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCallID string) bool {
-	for _, msg := range messages {
-		// Only consider successive tool messages after the tool call message
+func hasCorrespondingRewrittenAgenticToolResult(rewrites []agenticRewrite, start int, toolCallID string) bool {
+	for i := start; i < len(rewrites); i++ {
+		rewrite := rewrites[i]
+		if !rewrite.keep {
+			continue
+		}
+		msg := rewrite.message
 		if msg.Role != schema.AgenticRoleTypeUser {
 			return false
 		}
 		hasToolResult := false
 		for _, block := range msg.ContentBlocks {
-			if block == nil {
-				continue
-			}
-			if block.Type == schema.ContentBlockTypeFunctionToolResult {
+			callID, ok := agenticResultCallID(block)
+			if ok {
 				hasToolResult = true
-				if block.FunctionToolResult != nil && block.FunctionToolResult.CallID == toolCallID {
-					return true
-				}
-			}
-			if block.Type == schema.ContentBlockTypeToolSearchResult {
-				hasToolResult = true
-				if block.ToolSearchFunctionToolResult != nil && block.ToolSearchFunctionToolResult.CallID == toolCallID {
+				if callID == toolCallID {
 					return true
 				}
 			}
@@ -262,17 +651,169 @@ func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCa
 	return false
 }
 
-func createPatchedToolMessage(ctx context.Context, gens patchedGenerators, tc schema.ToolCall) (*schema.Message, error) {
-	if gens.result != nil {
+func collectAgenticToolCalls(msg *schema.AgenticMessage) []agenticToolCall {
+	toolCalls := make([]agenticToolCall, 0)
+	for _, block := range msg.ContentBlocks {
+		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+			toolCalls = append(toolCalls, agenticToolCall{
+				callID: block.FunctionToolCall.CallID,
+				name:   block.FunctionToolCall.Name,
+				args:   block.FunctionToolCall.Arguments,
+			})
+		}
+	}
+	return toolCalls
+}
+
+func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
+	if block == nil {
+		return "", false
+	}
+	if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+		return block.FunctionToolResult.CallID, true
+	}
+	if block.Type == schema.ContentBlockTypeToolSearchResult && block.ToolSearchFunctionToolResult != nil {
+		return block.ToolSearchFunctionToolResult.CallID, true
+	}
+	return "", false
+}
+
+// Existing results arrive in tool-call order from the current run state or
+// session reconstruction. Anchor a synthetic result before the first kept
+// result for a later call, or before the next non-result message.
+func messageToolResultInsertionAnchor(messages []*schema.Message, keep []bool, start int, laterCalls []schema.ToolCall) string {
+	laterCallIDs := make(map[string]struct{}, len(laterCalls))
+	for _, toolCall := range laterCalls {
+		laterCallIDs[toolCall.ID] = struct{}{}
+	}
+	for i := start; i < len(messages); i++ {
+		if !keep[i] {
+			continue
+		}
+		if messages[i].Role != schema.Tool {
+			return adk.GetMessageID(messages[i])
+		}
+		if _, later := laterCallIDs[messages[i].ToolCallID]; later {
+			return adk.GetMessageID(messages[i])
+		}
+	}
+	return ""
+}
+
+func agenticToolResultInsertionAnchor(
+	messages []*schema.AgenticMessage,
+	rewrites []agenticRewrite,
+	start int,
+	laterCalls []agenticToolCall,
+) string {
+	laterCallIDs := make(map[string]struct{}, len(laterCalls))
+	for _, toolCall := range laterCalls {
+		laterCallIDs[toolCall.callID] = struct{}{}
+	}
+	for i := start; i < len(messages); i++ {
+		if !rewrites[i].keep {
+			continue
+		}
+		message := rewrites[i].message
+		if message.Role != schema.AgenticRoleTypeUser || !agenticMessageHasToolResult(message) {
+			return adk.GetMessageID(messages[i])
+		}
+		for _, block := range message.ContentBlocks {
+			callID, isResult := agenticResultCallID(block)
+			if _, later := laterCallIDs[callID]; isResult && later {
+				return adk.GetMessageID(messages[i])
+			}
+		}
+	}
+	return ""
+}
+
+func applyInsertionEvents[M adk.MessageType](
+	messages []M,
+	events []*adk.SessionEvent[M],
+) ([]M, error) {
+	for _, event := range events {
+		insertion := event.MessageInserted
+		if insertion.BeforeMessageID == "" {
+			messages = append(messages, insertion.Message)
+			continue
+		}
+		insertAt := -1
+		for i, message := range messages {
+			if adk.GetMessageID(message) == insertion.BeforeMessageID {
+				insertAt = i
+				break
+			}
+		}
+		if insertAt < 0 {
+			return nil, fmt.Errorf("patchtoolcalls: insertion anchor %q not found", insertion.BeforeMessageID)
+		}
+		var zero M
+		messages = append(messages, zero)
+		copy(messages[insertAt+1:], messages[insertAt:])
+		messages[insertAt] = insertion.Message
+	}
+	return messages, nil
+}
+
+func deletedMessageIDs(messages []*schema.Message, keep []bool) []string {
+	ids := make([]string, 0)
+	for i, msg := range messages {
+		if keep[i] {
+			continue
+		}
+		adk.EnsureMessageID(msg)
+		ids = append(ids, adk.GetMessageID(msg))
+	}
+	return ids
+}
+
+func deletedAgenticMessageIDs(messages []*schema.AgenticMessage, rewrites []agenticRewrite) []string {
+	ids := make([]string, 0)
+	for i, msg := range messages {
+		if rewrites[i].keep {
+			continue
+		}
+		adk.EnsureMessageID(msg)
+		ids = append(ids, adk.GetMessageID(msg))
+	}
+	return ids
+}
+
+func sendNormalizationEvents[M adk.MessageType](ctx context.Context, events []*adk.SessionEvent[M]) error {
+	for _, event := range events {
+		err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+			SessionEventVariant: &adk.SessionEventVariant[M]{Event: event},
+		})
+		if isOutOfRunContextError(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isOutOfRunContextError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "must be called within a ChatModelAgent Run() or Resume() execution context")
+}
+
+func markSyntheticAgenticToolResult(msg *schema.AgenticMessage) {
+	internal.SetMessageExtra(msg, syntheticAgenticToolResultMarker, true)
+}
+
+func createPatchedToolMessage(ctx context.Context, cfg Config, tc schema.ToolCall) (*schema.Message, error) {
+	if cfg.PatchedToolResultGenerator != nil {
 		arg := &schema.ToolArgument{Text: tc.Function.Arguments}
-		result, err := gens.result(ctx, tc.Function.Name, tc.ID, arg)
+		result, err := cfg.PatchedToolResultGenerator(ctx, tc.Function.Name, tc.ID, arg)
 		if err != nil {
 			return nil, err
 		}
 		return patchedToolResultToMessage(tc.Function.Name, tc.ID, result)
 	}
-	if gens.content != nil {
-		content, err := gens.content(ctx, tc.Function.Name, tc.ID)
+	if cfg.PatchedContentGenerator != nil {
+		content, err := cfg.PatchedContentGenerator(ctx, tc.Function.Name, tc.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -286,10 +827,10 @@ func createPatchedToolMessage(ctx context.Context, gens patchedGenerators, tc sc
 	return schema.ToolMessage(fmt.Sprintf(tpl, tc.Function.Name, tc.ID), tc.ID, schema.WithToolName(tc.Function.Name)), nil
 }
 
-func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators, toolName, callID, arguments string) (*schema.AgenticMessage, error) {
-	if gens.result != nil {
+func createPatchedAgenticToolMessage(ctx context.Context, cfg Config, toolName, callID, arguments string) (*schema.AgenticMessage, error) {
+	if cfg.PatchedToolResultGenerator != nil {
 		arg := &schema.ToolArgument{Text: arguments}
-		result, err := gens.result(ctx, toolName, callID, arg)
+		result, err := cfg.PatchedToolResultGenerator(ctx, toolName, callID, arg)
 		if err != nil {
 			return nil, err
 		}
@@ -297,9 +838,9 @@ func createPatchedAgenticToolMessage(ctx context.Context, gens patchedGenerators
 	}
 
 	var content string
-	if gens.content != nil {
+	if cfg.PatchedContentGenerator != nil {
 		var err error
-		content, err = gens.content(ctx, toolName, callID)
+		content, err = cfg.PatchedContentGenerator(ctx, toolName, callID)
 		if err != nil {
 			return nil, err
 		}

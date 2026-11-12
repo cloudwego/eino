@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/internal"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -183,20 +184,12 @@ func (e *agentEventWrapper) consumeStream() {
 	}
 
 	s := e.AgentEvent.Output.MessageOutput.MessageStream
-	var msgs []Message
-
 	defer s.Close()
-	for {
-		msg, err := s.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			e.StreamErr = err
-			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return
-		}
-		msgs = append(msgs, msg)
+	msgs, recvErr := internalschema.CollectStreamPrefix(s)
+	if recvErr != io.EOF {
+		e.StreamErr = recvErr
+		e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
 	}
 
 	if len(msgs) == 0 {
@@ -213,7 +206,7 @@ func (e *agentEventWrapper) consumeStream() {
 		e.concatenatedMessage = msgs[0]
 	} else {
 		var err error
-		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
+		e.concatenatedMessage, err = internalschema.ConcatMessages(msgs)
 		if err != nil {
 			e.StreamErr = err
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
@@ -231,8 +224,10 @@ func (e *agentEventWrapper) consumeStream() {
 // - safe to set fields of TypedAgentEvent
 // - safe to extend RunPath
 // - safe to receive from MessageStream
+// - safe to set fields on SessionEventVariant and its Event / MessageStreamRef
 // NOTE: even if the event is copied, it's still not recommended to modify
-// the Message itself or Chunks of the MessageStream, as they are not copied.
+// the Message itself, nested SessionEvent payloads, or Chunks of the
+// MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
 func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
 	rp := make([]RunStep, len(ae.RunPath))
@@ -243,6 +238,18 @@ func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent
 		RunPath:   rp,
 		Action:    ae.Action,
 		Err:       ae.Err,
+	}
+	if variant := ae.SessionEventVariant; variant != nil {
+		copiedVariant := *variant
+		if variant.Event != nil {
+			copiedEvent := *variant.Event
+			copiedVariant.Event = &copiedEvent
+		}
+		if variant.MessageStreamRef != nil {
+			copiedRef := *variant.MessageStreamRef
+			copiedVariant.MessageStreamRef = &copiedRef
+		}
+		copied.SessionEventVariant = &copiedVariant
 	}
 
 	if ae.Output == nil {
@@ -287,7 +294,7 @@ func TypedGetMessage[M MessageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[
 		ss := msgOutput.MessageStream.Copy(2)
 		e.Output.MessageOutput.MessageStream = ss[0]
 
-		msg, err := concatMessageStream(ss[1])
+		msg, err := internalschema.ConcatMessageStream(ss[1])
 
 		return msg, e, err
 	}

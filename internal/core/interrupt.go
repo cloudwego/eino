@@ -28,6 +28,11 @@ import (
 // ErrStreamCanceled marks a stream terminated by framework cancellation.
 var ErrStreamCanceled = errors.New("stream canceled")
 
+// CheckPointStore persists opaque execution checkpoints.
+//
+// Set must not return nil until the checkpoint is durable and immediately
+// visible to subsequent Get calls. Callers may treat a successful Set as the
+// persistence acknowledgement without reading the checkpoint payload back.
 type CheckPointStore interface {
 	Get(ctx context.Context, checkPointID string) ([]byte, bool, error)
 	Set(ctx context.Context, checkPointID string, checkPoint []byte) error

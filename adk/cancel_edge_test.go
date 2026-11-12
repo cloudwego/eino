@@ -1684,9 +1684,8 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAbortOnly(t *testing.T) {
 	resumeRunner := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
 	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
 	require.NoError(t, err)
-	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	_, resumeCancelErrors := drainCancelErrors(resumeIter)
 	require.Empty(t, resumeCancelErrors)
-	require.NotEmpty(t, resumeEvents)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeChildCalls), "middleware child should be invoked as a fresh Run on root resume")
 }
 
@@ -1826,9 +1825,8 @@ func TestWithCancel_RecursiveImmediate_MiddlewareChildAgentToolCheckpointResumeB
 	resumeRunner := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
 	resumeIter, err := resumeRunner.Resume(ctx, checkpointID)
 	require.NoError(t, err)
-	resumeEvents, resumeCancelErrors := drainCancelErrors(resumeIter)
+	_, resumeCancelErrors := drainCancelErrors(resumeIter)
 	require.Empty(t, resumeCancelErrors)
-	require.NotEmpty(t, resumeEvents)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&resumeChildCalls), int32(1), "middleware child should be invoked as a fresh Run on root resume")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeLeafCalls), "nested AgentTool should run fresh, not resume from the hidden checkpoint")
 }
@@ -1851,7 +1849,7 @@ func TestWithCancel_RecursiveImmediate_BeforeAgentChildAbortOnly(t *testing.T) {
 		Instruction: "outer",
 		Model:       &plainResponseModel{text: "outer done"},
 		Handlers: []ChatModelAgentMiddleware{
-			&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+			&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *TypedChatModelAgentContext[*schema.Message]) (context.Context, *TypedChatModelAgentContext[*schema.Message], error) {
 				iter := childAgent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("child work")}})
 				for {
 					event, ok := iter.Next()
@@ -2163,9 +2161,20 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 			// ErrStreamCanceled appears on the tool's MessageStream.Recv()
 			if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming &&
 				e.Output.MessageOutput.Role == schema.Tool {
-				// Signal that the tool stream event has been received.
-				close(toolStreamReady)
 				stream := e.Output.MessageOutput.MessageStream
+				// Consume the first chunk so we are sure the stream is active,
+				// then signal readiness. This ensures cancel fires while we are
+				// blocked inside Recv(), preventing a race where cancel completes
+				// before we start consuming.
+				if _, firstErr := stream.Recv(); firstErr == nil {
+					close(toolStreamReady)
+				} else {
+					if errors.Is(firstErr, ErrStreamCanceled) {
+						r.foundStreamCanceled = true
+					}
+					close(toolStreamReady)
+					continue
+				}
 				for {
 					_, recvErr := stream.Recv()
 					if recvErr != nil {

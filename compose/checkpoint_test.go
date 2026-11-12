@@ -1368,6 +1368,15 @@ func TestWithForceNewRun(t *testing.T) {
 	result, err := r.Invoke(ctx, "input", WithCheckPointID("1"), WithForceNewRun())
 	assert.NoError(t, err)
 	assert.Equal(t, "input1", result)
+
+	// WithForceNewRun should take effect regardless of its position among the options.
+	result, err = r.Invoke(ctx, "input", WithForceNewRun(), WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input1", result)
+
+	result, err = r.Invoke(ctx, "input", WithCheckPointID("1"), WithForceNewRun(), WithRuntimeMaxSteps(10))
+	assert.NoError(t, err)
+	assert.Equal(t, "input1", result)
 }
 
 type failStore struct {
@@ -2204,9 +2213,9 @@ func TestCheckpointToolStreamCancellationRerunsProducerOnce(t *testing.T) {
 		reader, writer := schema.Pipe[string](2)
 		writer.Send("partial", nil)
 		writer.Send("", &toolStreamCheckpointError{
-			nodeKey: "tools",
-			input:   input,
-			signal:  toolSignal,
+			nodeKey:    "tools",
+			rerunInput: input,
+			signal:     toolSignal,
 		})
 		writer.Close()
 		inputs[consumer] = packStreamReader(reader)

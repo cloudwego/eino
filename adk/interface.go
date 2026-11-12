@@ -22,11 +22,17 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
+
+func newEventTimestamp() time.Time {
+	return time.Now().UTC()
+}
 
 // ComponentOfAgent is the component type identifier for ADK agents in callbacks.
 // Use this to filter callback events to only agent-related events.
@@ -99,7 +105,7 @@ type TypedMessageVariant[M MessageType] struct {
 
 func (mv *TypedMessageVariant[M]) GetMessage() (M, error) {
 	if mv.IsStreaming {
-		return concatMessageStream(mv.MessageStream)
+		return internalschema.ConcatMessageStream(mv.MessageStream)
 	}
 	return mv.Message, nil
 }
@@ -151,18 +157,11 @@ func gobEncodeMessageVariant(mv *TypedMessageVariant[*schema.Message]) ([]byte, 
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
-		var messages []Message
-		for {
-			frame, err := mv.MessageStream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("error receiving message stream: %w", err)
-			}
-			messages = append(messages, frame)
+		messages, recvErr := internalschema.CollectStreamPrefix(mv.MessageStream)
+		if recvErr != io.EOF {
+			return nil, fmt.Errorf("error receiving message stream: %w", recvErr)
 		}
-		m, err := schema.ConcatMessages(messages)
+		m, err := internalschema.ConcatMessages(messages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode message: cannot concat message stream: %w", err)
 		}
@@ -201,18 +200,11 @@ func gobEncodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
-		var messages []*schema.AgenticMessage
-		for {
-			frame, err := mv.MessageStream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("error receiving agentic message stream: %w", err)
-			}
-			messages = append(messages, frame)
+		messages, recvErr := internalschema.CollectStreamPrefix(mv.MessageStream)
+		if recvErr != io.EOF {
+			return nil, fmt.Errorf("error receiving agentic message stream: %w", recvErr)
 		}
-		m, err := schema.ConcatAgenticMessages(messages)
+		m, err := internalschema.ConcatMessages(messages)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode agentic message: cannot concat message stream: %w", err)
 		}
@@ -431,7 +423,15 @@ type TypedAgentEvent[M MessageType] struct {
 
 	Action *AgentAction
 
+	// Err reports an execution error. Agents must report errors that terminate
+	// execution here so the Runner can recognize the failure.
 	Err error
+
+	// SessionEventVariant is the first-class live session envelope. Event carries
+	// a materialized durable SessionEvent. MessageStreamRef carries only the
+	// reserved durable metadata for a streaming message whose content remains in
+	// Output.MessageOutput.MessageStream.
+	SessionEventVariant *SessionEventVariant[M]
 }
 
 // AgentEvent is the default event type using *schema.Message.
@@ -485,35 +485,3 @@ type TypedResumableAgent[M MessageType] interface {
 }
 
 type ResumableAgent = TypedResumableAgent[*schema.Message]
-
-func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
-	var zero M
-	switch s := any(stream).(type) {
-	case *schema.StreamReader[*schema.Message]:
-		result, err := schema.ConcatMessageStream(s)
-		if err != nil {
-			return zero, err
-		}
-		return any(result).(M), nil
-	case *schema.StreamReader[*schema.AgenticMessage]:
-		defer s.Close()
-		var msgs []*schema.AgenticMessage
-		for {
-			frame, err := s.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return zero, err
-			}
-			msgs = append(msgs, frame)
-		}
-		result, err := schema.ConcatAgenticMessages(msgs)
-		if err != nil {
-			return zero, err
-		}
-		return any(result).(M), nil
-	default:
-		panic("unreachable: unknown MessageType")
-	}
-}

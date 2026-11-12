@@ -22,6 +22,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/generic"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -119,6 +121,9 @@ func handlersToToolMiddlewares[M MessageType](handlers []TypedChatModelAgentMidd
 	for _, handler := range handlers {
 
 		m := compose.ToolMiddleware{}
+		if namer, ok := handler.(ChatModelAgentMiddlewareNamer); ok {
+			m.Name = namer.ChatModelAgentMiddlewareName()
+		}
 
 		h := handler
 		m.Invokable = func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
@@ -294,33 +299,355 @@ type typedEventSenderModel[M MessageType] struct {
 	modelFailoverConfig *ModelFailoverConfig[M]
 }
 
+func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEvent[M]) {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || execCtx.generator == nil || se == nil {
+		return
+	}
+	if !execCtx.timelineEvents && !execCtx.internalTimelineEvents {
+		return
+	}
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(se, sc.turnID)
+	if err := prepareSessionEventEnvelope(ctx, se, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
+		execCtx.send(ctx, &TypedAgentEvent[M]{Err: err})
+		return
+	}
+	execCtx.send(ctx, &TypedAgentEvent[M]{SessionEventVariant: &SessionEventVariant[M]{Event: se}})
+}
+
+func newModelSpanStartEvent[M MessageType](ctx context.Context, spanID string, started time.Time, opts ...model.Option) *SessionEvent[M] {
+	meta := modelSpanMetaFromContext[M](ctx, opts...)
+	meta.Model.Accepted = false
+	return &SessionEvent[M]{
+		Timestamp: started,
+		Kind:      SessionEventSpanModelRequestStart,
+		Span: &SpanEvent{
+			SpanID:       spanID,
+			Kind:         SpanKindModel,
+			Name:         "model_request",
+			StartedAt:    started,
+			ParentSpanID: meta.ParentSpanID,
+			Model:        meta.Model,
+		},
+	}
+}
+
+type modelSpanEndEventInput[M MessageType] struct {
+	spanID       string
+	startEventID string
+	started      time.Time
+	ended        time.Time
+	msg          M
+	err          error
+	accepted     bool
+	firstChunk   time.Duration
+}
+
+func newModelSpanEndEvent[M MessageType](ctx context.Context, in modelSpanEndEventInput[M], opts ...model.Option) *SessionEvent[M] {
+	status := "ok"
+	errStr := ""
+	if in.err != nil {
+		status = "error"
+		errStr = in.err.Error()
+		if errors.Is(in.err, context.Canceled) || errors.Is(in.err, ErrStreamCanceled) {
+			status = "cancelled"
+		}
+	}
+	return &SessionEvent[M]{
+		Timestamp: in.ended,
+		Kind:      SessionEventSpanModelRequestEnd,
+		Span: &SpanEvent{
+			SpanID:       in.spanID,
+			Kind:         SpanKindModel,
+			Name:         "model_request",
+			StartedAt:    in.started,
+			EndedAt:      in.ended,
+			TTFTMS:       in.firstChunk.Milliseconds(),
+			Status:       status,
+			Err:          errStr,
+			ParentSpanID: modelSpanMetaFromContext[M](ctx, opts...).ParentSpanID,
+			Model:        modelSpanCompletionMeta(ctx, in.startEventID, in.msg, in.accepted && in.err == nil, in.err, opts...),
+		},
+	}
+}
+
+type modelSpanContextMeta struct {
+	ParentSpanID string
+	Model        *ModelSpanMeta
+}
+
+func modelSpanMetaFromContext[M MessageType](ctx context.Context, opts ...model.Option) modelSpanContextMeta {
+	meta := &ModelSpanMeta{Attempt: 1}
+	if common := model.GetCommonOptions(nil, opts...); common != nil && common.Model != nil {
+		meta.Model = *common.Model
+	}
+	if currentModel, ok := typedGetFailoverCurrentModel[M](ctx); ok {
+		if provider, ok := components.GetType(currentModel); ok {
+			meta.Provider = provider
+		}
+	}
+	parentSpanID := ""
+	if failoverMeta, ok := getFailoverTimeline(ctx); ok {
+		parentSpanID = failoverMeta.ParentSpanID
+		if failoverMeta.Attempt > 0 {
+			meta.Attempt = failoverMeta.Attempt
+		}
+	} else {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			meta.Attempt = st.getRetryAttempt() + 1
+			return nil
+		})
+	}
+	return modelSpanContextMeta{ParentSpanID: parentSpanID, Model: meta}
+}
+
+func modelSpanCompletionMeta[M MessageType](ctx context.Context, startEventID string, msg M, accepted bool, err error, opts ...model.Option) *ModelSpanMeta {
+	meta := modelSpanMetaFromContext[M](ctx, opts...).Model
+	meta.ModelRequestStartEventID = startEventID
+	meta.Usage = modelUsageFromAssistant(msg)
+	meta.FinishReason = assistantFinishReason(msg)
+	meta.Accepted = accepted
+	var timeoutErr interface {
+		ModelTimeoutSpanMeta() (phase string, timeout time.Duration, elapsed time.Duration, chunksReceived int)
+	}
+	if errors.As(err, &timeoutErr) {
+		phase, timeout, elapsed, chunksReceived := timeoutErr.ModelTimeoutSpanMeta()
+		meta.Timeout = &ModelTimeoutMeta{
+			Phase:          phase,
+			TimeoutMS:      timeout.Milliseconds(),
+			ElapsedMS:      elapsed.Milliseconds(),
+			ChunksReceived: chunksReceived,
+		}
+	}
+	return meta
+}
+
+// lookupOrInitToolSpanInFlight returns the existing in-flight entry for the
+// given tCtx.CallID (signalling a resumed call), or initializes a fresh entry
+// (snapshotting CurrentModelSpanID / CurrentAssistantMessageEventID from
+// typedState). It does NOT yet write the entry into typedState — the caller
+// is responsible for invoking persistToolSpanInFlight after emitting the
+// tool_call_start span and capturing its EventID.
+//
+// Reads (and the conditional snapshot) happen inside compose.ProcessState so
+// that concurrent parallel tool calls are serialized safely — the framework
+// guarantees the closure runs with exclusive access to typedState.
+func lookupOrInitToolSpanInFlight[M MessageType](ctx context.Context, tCtx *ToolContext) (*toolSpanInFlight, bool) {
+	var (
+		entry    *toolSpanInFlight
+		isResume bool
+	)
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		if existing, ok := st.ToolSpansInFlight[tCtx.CallID]; ok && existing != nil {
+			entry = existing
+			isResume = true
+			return nil
+		}
+		entry = &toolSpanInFlight{
+			SpanID:                  uuid.NewString(),
+			StartedAt:               newEventTimestamp(),
+			ParentSpanID:            st.CurrentModelSpanID,
+			AssistantMessageEventID: st.CurrentAssistantMessageEventID,
+		}
+		return nil
+	})
+	return entry, isResume
+}
+
+// persistToolSpanInFlight writes the in-flight entry into typedState.ToolSpansInFlight
+// keyed by callID. Called from the start-emission path after the start
+// SessionEvent's EventID has been captured into the entry.
+func persistToolSpanInFlight[M MessageType](ctx context.Context, callID string, entry *toolSpanInFlight) {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		if st.ToolSpansInFlight == nil {
+			st.ToolSpansInFlight = make(map[string]*toolSpanInFlight)
+		}
+		st.ToolSpansInFlight[callID] = entry
+		return nil
+	})
+}
+
+// clearToolSpanInFlight removes the in-flight entry for callID. Called after
+// the matching tool_call_end span has been emitted.
+func clearToolSpanInFlight[M MessageType](ctx context.Context, callID string) {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		if st.ToolSpansInFlight == nil {
+			return nil
+		}
+		delete(st.ToolSpansInFlight, callID)
+		return nil
+	})
+}
+
+func newToolSpanStartEvent[M MessageType](ctx context.Context, inFlight *toolSpanInFlight, tCtx *ToolContext) *SessionEvent[M] {
+	return &SessionEvent[M]{
+		Timestamp: inFlight.StartedAt,
+		Kind:      SessionEventSpanToolCallStart,
+		Span: &SpanEvent{
+			SpanID:       inFlight.SpanID,
+			ParentSpanID: inFlight.ParentSpanID,
+			Kind:         SpanKindTool,
+			Name:         "tool_call",
+			StartedAt:    inFlight.StartedAt,
+			Tool: &ToolSpanMeta{
+				ToolUseID:               tCtx.CallID,
+				Name:                    tCtx.Name,
+				AssistantMessageEventID: inFlight.AssistantMessageEventID,
+			},
+		},
+	}
+}
+
+type toolSpanEndEventInput struct {
+	ended         time.Time
+	err           error
+	resultEventID string
+}
+
+func newToolSpanEndEvent[M MessageType](ctx context.Context, inFlight *toolSpanInFlight, tCtx *ToolContext, in toolSpanEndEventInput) *SessionEvent[M] {
+	status := "ok"
+	errStr := ""
+	if in.err != nil {
+		status = "error"
+		errStr = in.err.Error()
+		if errors.Is(in.err, context.Canceled) || errors.Is(in.err, ErrStreamCanceled) {
+			status = "cancelled"
+		}
+	}
+	ended := in.ended
+	if ended.IsZero() {
+		ended = newEventTimestamp()
+	}
+	return &SessionEvent[M]{
+		Timestamp: ended,
+		Kind:      SessionEventSpanToolCallEnd,
+		Span: &SpanEvent{
+			SpanID:       inFlight.SpanID,
+			ParentSpanID: inFlight.ParentSpanID,
+			Kind:         SpanKindTool,
+			Name:         "tool_call",
+			StartedAt:    inFlight.StartedAt,
+			EndedAt:      ended,
+			Status:       status,
+			Err:          errStr,
+			Tool: &ToolSpanMeta{
+				ToolUseID:                tCtx.CallID,
+				Name:                     tCtx.Name,
+				ToolCallStartEventID:     inFlight.StartEventID,
+				AssistantMessageEventID:  inFlight.AssistantMessageEventID,
+				ToolResultMessageEventID: in.resultEventID,
+			},
+		},
+	}
+}
+
 func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+	started := newEventTimestamp()
+	spanID := uuid.NewString()
+	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
+	sendSessionTimelineEvent(ctx, startEvent)
 	result, err := m.inner.Generate(ctx, input, opts...)
+	if err == nil {
+		// Symmetric with Stream below: a WrapModel handler may short-circuit the
+		// inner model and return a message that never passed through the innermost
+		// ID assignment layer. Stamp it here, before the span, draft, and live
+		// event each take an independent copy -- otherwise every consumer lazily
+		// assigns its own ID and one logical message ends up with several.
+		result = ensureMessageIDCOW(result)
+	}
+	ended := newEventTimestamp()
+	completion := modelSpanEndEventInput[M]{
+		spanID:       spanID,
+		startEventID: startEvent.EventID,
+		started:      started,
+		ended:        ended,
+		msg:          result,
+		err:          err,
+	}
 	if err != nil {
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, completion, opts...))
 		var zero M
 		return zero, err
 	}
-
+	complete := func(accepted bool, verdictErr error) error {
+		completion.accepted = accepted
+		completion.err = verdictErr
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, completion, opts...))
+		if !accepted {
+			return nil
+		}
+		return sendGenerateOutput(ctx, spanID, result)
+	}
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx != nil && execCtx.suppressEventSend {
+		execCtx.completeGenerate = complete
 		return result, nil
 	}
-	if execCtx == nil || execCtx.generator == nil {
+	if completionErr := complete(true, nil); completionErr != nil {
 		var zero M
-		return zero, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
+		return zero, completionErr
 	}
-
-	event := typedModelOutputEvent(copyMessage(result), nil)
-	execCtx.send(event)
-
 	return result, nil
 }
 
+func sendGenerateOutput[M MessageType](ctx context.Context, spanID string, result M) error {
+	timestamp := newEventTimestamp()
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || execCtx.generator == nil {
+		return errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
+	}
+
+	// Build a SessionEventMessage draft for the assistant message and route
+	// its ID allocation through the runner's SessionEventIDGenerator[M] so
+	// producer-owned identity applies. The same ID is used for the live
+	// TypedAgentEvent below; the materialized SessionEvent later inherits it.
+	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: copyMessage(result)}
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(assistantDraft, sc.turnID)
+	envelopeOptions := sessionEventEnvelopeOptions{}
+	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, envelopeOptions); err != nil {
+		return err
+	}
+	assistantMsgEventID := assistantDraft.EventID
+
+	// Persist the model span ID and assistant message event ID into typedState
+	// so the tool wrapper can snapshot them into per-call ToolSpansInFlight
+	// entries when emitting tool_call_start spans. The snapshot survives
+	// interrupt/resume; the matching tool_call_end span (which may fire on
+	// a later run) reads ParentSpanID and AssistantMessageEventID from the
+	// snapshot, preserving the link to the original turn's model output.
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		st.CurrentModelSpanID = spanID
+		st.CurrentAssistantMessageEventID = assistantMsgEventID
+		return nil
+	})
+
+	event := typedModelOutputEvent(copyMessage(result), nil)
+	event.SessionEventVariant = &SessionEventVariant[M]{Event: assistantDraft}
+	execCtx.send(ctx, event)
+
+	return nil
+}
+
 func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+	started := newEventTimestamp()
+	spanID := uuid.NewString()
+	startEvent := newModelSpanStartEvent[M](ctx, spanID, started, opts...)
+	sendSessionTimelineEvent(ctx, startEvent)
 	result, err := m.inner.Stream(ctx, input, opts...)
 	if err != nil {
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
+			spanID:       spanID,
+			startEventID: startEvent.EventID,
+			started:      started,
+			ended:        newEventTimestamp(),
+			msg:          *new(M),
+			err:          err,
+		}, opts...))
 		return nil, err
 	}
+	timestamp := newEventTimestamp()
 
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx == nil || execCtx.generator == nil {
@@ -328,7 +655,13 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 		return nil, errors.New("generator is nil when sending event in Stream: ensure agent state is properly initialized")
 	}
 
-	streams := result.Copy(2)
+	// A WrapModel handler may short-circuit the inner model and synthesize a
+	// stream that bypasses the framework's innermost ID assignment layer. Assign
+	// the ID before Copy fans the message out to event persistence, state, and
+	// tracing consumers, so they only ever share an already-identified message.
+	result = stampFirstChunkMessageID(result)
+
+	streams := result.Copy(3)
 
 	eventStream := streams[0]
 	if convertOpts := m.buildStreamConvertOptions(ctx); len(convertOpts) > 0 {
@@ -337,9 +670,89 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 			convertOpts...)
 	}
 
+	// Build a streaming-mode draft for the assistant message; the message
+	// itself is materialized later by the consumer, but we route ID
+	// allocation through the runner's SessionEventIDGenerator[M] now so the
+	// live TypedAgentEvent and the eventual SessionEvent share a producer-
+	// owned ID. Generators that need to recognize the assistant draft can
+	// match on Kind==SessionEventMessage with a zero Message.
+	var draftZero M
+	assistantDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: draftZero}
+	sc := sessionEventContextFromContext[M](ctx)
+	stampSessionEventTurnID(assistantDraft, sc.turnID)
+	if err := prepareSessionEventEnvelope(ctx, assistantDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); err != nil {
+		// result has already been fanned out, so it is the children that own the
+		// underlying stream now: parentStreamReader releases it once all of them
+		// close. Closing result directly would tear the stream down from under
+		// the children and leave the copies unclosed.
+		for _, s := range streams {
+			s.Close()
+		}
+		return nil, err
+	}
+	assistantMsgEventID := assistantDraft.EventID
+
+	// Persist the model span ID and assistant message event ID into typedState
+	// so the tool wrapper can snapshot them into per-call ToolSpansInFlight
+	// entries when emitting tool_call_start spans. The snapshot survives
+	// interrupt/resume; the matching tool_call_end span (which may fire on
+	// a later run) reads ParentSpanID and AssistantMessageEventID from the
+	// snapshot, preserving the link to the original turn's model output.
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		st.CurrentModelSpanID = spanID
+		st.CurrentAssistantMessageEventID = assistantMsgEventID
+		return nil
+	})
+
 	var zero M
 	event := typedModelOutputEvent[M](zero, eventStream)
-	execCtx.send(event)
+	event.SessionEventVariant = &SessionEventVariant[M]{
+		MessageStreamRef: &MessageStreamRef{
+			EventID:   assistantMsgEventID,
+			TurnID:    assistantDraft.TurnID,
+			Timestamp: timestamp,
+			Kind:      SessionEventMessage,
+		},
+	}
+	execCtx.send(ctx, event)
+
+	spanStream := streams[2]
+	go func() {
+		firstChunk := time.Duration(0)
+		firstAt := time.Time{}
+		var chunks []M
+		var streamErr error
+		for {
+			msg, recvErr := spanStream.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				streamErr = recvErr
+				break
+			}
+			if firstAt.IsZero() {
+				firstAt = newEventTimestamp()
+				firstChunk = firstAt.Sub(started)
+			}
+			chunks = append(chunks, msg)
+		}
+		spanStream.Close()
+		var final M
+		if len(chunks) > 0 && streamErr == nil {
+			final, streamErr = internalschema.ConcatMessages(chunks)
+		}
+		sendSessionTimelineEvent(ctx, newModelSpanEndEvent(ctx, modelSpanEndEventInput[M]{
+			spanID:       spanID,
+			startEventID: startEvent.EventID,
+			started:      started,
+			ended:        newEventTimestamp(),
+			msg:          final,
+			err:          streamErr,
+			accepted:     streamErr == nil,
+			firstChunk:   firstChunk,
+		}, opts...))
+	}()
 
 	return streams[1], nil
 }
@@ -355,9 +768,11 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 //
 // Two hooks cooperate to cover all stream termination paths:
 //   - WithErrWrapper intercepts mid-stream errors. It blocks on the verdict to decide
-//     whether to wrap the error as WillRetryError (rejected attempt) or pass it through (accepted).
+//     whether to wrap the error as WillRetryError (retryable rejection), replace it with
+//     RewriteError (terminal rejection), or pass it through (accepted).
 //   - WithOnEOF intercepts clean EOF (successful stream). It blocks on the verdict to
-//     either inject a WillRetryError (rejected) or pass through io.EOF (accepted).
+//     inject a WillRetryError (retryable rejection), RewriteError (terminal rejection), or
+//     pass through io.EOF (accepted).
 //
 // Both hooks share a sync.Once-guarded reader so the verdict channel is read at most once.
 // This prevents a goroutine leak when a mid-stream error is followed by EOF: errWrapper fires
@@ -381,7 +796,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 
 	var opts []schema.ConvertOption
 
-	var retryWrapper func(error) error
+	var retryWrapper func(error) (error, bool)
 	if m.modelRetryConfig != nil {
 		if m.modelRetryConfig.ShouldRetry != nil {
 			execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -401,7 +816,10 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 					return cachedVerdict
 				}
 
-				retryWrapper = wrapWithCancelGuard(func(err error) error {
+				retryWrapper = func(err error) (error, bool) {
+					if errors.Is(err, ErrStreamCanceled) {
+						return err, false
+					}
 					verdict := readVerdict()
 					if verdict.WillRetry {
 						return &WillRetryError{
@@ -409,10 +827,13 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 							RetryAttempt: verdict.RetryAttempt,
 							rejectReason: verdict.RejectReason,
 							err:          err,
-						}
+						}, false
 					}
-					return err
-				})
+					if verdict.Err != nil {
+						return verdict.Err, true
+					}
+					return err, false
+				}
 
 				opts = append(opts, schema.WithOnEOF(func() (any, error) {
 					verdict := readVerdict()
@@ -424,13 +845,19 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 							err:          verdict.Err,
 						}
 					}
+					if verdict.Err != nil {
+						return nil, verdict.Err
+					}
 					return nil, io.EOF
 				}))
 			}
 		} else {
-			retryWrapper = wrapWithCancelGuard(
+			legacyRetryWrapper := wrapWithCancelGuard(
 				genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble),
 			)
+			retryWrapper = func(err error) (error, bool) {
+				return legacyRetryWrapper(err), false
+			}
 		}
 	}
 
@@ -448,8 +875,8 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	combinedErrWrapper := func(err error) error {
 		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
-			wrapped := retryWrapper(err)
-			if errors.As(wrapped, new(*WillRetryError)) {
+			wrapped, terminalRewrite := retryWrapper(err)
+			if terminalRewrite || errors.As(wrapped, new(*WillRetryError)) {
 				return wrapped
 			}
 		}
@@ -506,13 +933,105 @@ func GetMessageID[M MessageType](msg M) string {
 
 // EnsureMessageID assigns a UUID v4 message ID if the message doesn't have one.
 // Idempotent: if ID already set, no-op.
-// Middleware authors should call this before SendEvent if they create messages.
+// TypedSendEvent/SendEvent call this automatically for message-bearing events.
+// Middleware authors only need to call it directly when they need the ID before
+// emitting the event.
 func EnsureMessageID[M MessageType](msg M) {
 	switch v := any(msg).(type) {
 	case *schema.Message:
-		v.Extra = internal.EnsureMessageID(v.Extra)
+		if internal.GetMessageID(v.Extra) == "" {
+			v.Extra = internal.EnsureMessageID(v.Extra)
+		}
 	case *schema.AgenticMessage:
-		v.Extra = internal.EnsureMessageID(v.Extra)
+		if internal.GetMessageID(v.Extra) == "" {
+			v.Extra = internal.EnsureMessageID(v.Extra)
+		}
+	}
+}
+
+// ensureMessageIDCOW returns a message guaranteed to carry a framework message
+// ID, taking ownership of the struct before the ID is written. Callers must use
+// the returned value; msg itself is never modified.
+//
+// ID assignment is three layers, each adding exactly one thing:
+//
+//   - internal.SetMessageID builds a new Extra map, never touching the input map.
+//     That removes the map-level "concurrent map read and map write" panic.
+//   - EnsureMessageID assigns that map back into msg.Extra. This is an in-place
+//     field write, and it is safe only when the caller owns msg.
+//   - this function establishes that ownership by copying first, then delegates.
+//
+// In-place mutation is not the problem; mutating a struct someone else may read
+// is. The framework does not own model output -- it may be a pointer the user's
+// model implementation retains, or a message a WrapModel handler synthesized and
+// still inspects -- so it copies the struct and lets the field write land on
+// memory only this call can see. That closes the residual field-level race
+// documented on internal.SetMessageID, which cannot be fixed at the map layer.
+func ensureMessageIDCOW[M MessageType](msg M) M {
+	if isNilMessage(msg) || GetMessageID(msg) != "" {
+		return msg
+	}
+	cp := copyMessage(msg)
+	EnsureMessageID(cp)
+	return cp
+}
+
+// stampFirstChunkMessageID guarantees the first chunk of sr carries a framework
+// message ID, assigned before any downstream fan-out can hand that chunk to
+// concurrent consumers.
+//
+// Only the first chunk is stamped: ConcatMessages string-concatenates duplicate
+// Extra keys, so stamping every chunk would corrupt the ID on concat.
+//
+// The first flag needs no synchronization even when the returned reader is later
+// Copy'd: parentStreamReader.peek guards the parent Recv (and therefore this
+// convert) with a sync.Once, so it runs exactly once per element and the
+// happens-before edge covers every child reader.
+func stampFirstChunkMessageID[M MessageType](sr *schema.StreamReader[M]) *schema.StreamReader[M] {
+	first := true
+	return schema.StreamReaderWithConvert(sr, func(msg M) (M, error) {
+		if first {
+			first = false
+			return ensureMessageIDCOW(msg), nil
+		}
+		return msg, nil
+	})
+}
+
+func ensureTypedAgentEventMessageIDs[M MessageType](event *TypedAgentEvent[M]) {
+	if event == nil {
+		return
+	}
+	if event.Output != nil && event.Output.MessageOutput != nil && !isNilMessage(event.Output.MessageOutput.Message) {
+		EnsureMessageID(event.Output.MessageOutput.Message)
+	}
+	if event.SessionEventVariant != nil {
+		ensureSessionEventMessageIDs(event.SessionEventVariant.Event)
+	}
+}
+
+func ensureSessionEventMessageIDs[M MessageType](event *SessionEvent[M]) {
+	if event == nil {
+		return
+	}
+	if !isNilMessage(event.Message) {
+		EnsureMessageID(event.Message)
+	}
+	if event.MessagesReplaced != nil {
+		for _, msg := range *event.MessagesReplaced {
+			if !isNilMessage(msg) {
+				EnsureMessageID(msg)
+			}
+		}
+	}
+	if event.MessageUpdated != nil && !isNilMessage(event.MessageUpdated.Message) {
+		msgID := GetMessageID(event.MessageUpdated.Message)
+		if msgID == "" && event.MessageUpdated.MessageID != "" {
+			typedSetMessageID(event.MessageUpdated.Message, event.MessageUpdated.MessageID)
+		}
+	}
+	if event.MessageInserted != nil && !isNilMessage(event.MessageInserted.Message) {
+		EnsureMessageID(event.MessageInserted.Message)
 	}
 }
 
@@ -847,10 +1366,32 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 
 func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		inFlight, isResume := lookupOrInitToolSpanInFlight[M](ctx, tCtx)
+		if !isResume {
+			startEvent := newToolSpanStartEvent[M](ctx, inFlight, tCtx)
+			sendSessionTimelineEvent(ctx, startEvent)
+			inFlight.StartEventID = startEvent.EventID
+			persistToolSpanInFlight[M](ctx, tCtx.CallID, inFlight)
+		}
+
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
+			if _, isInterrupt := compose.IsInterruptRerunError(err); isInterrupt {
+				// An interrupt-shape error means the tool did not complete; the call is
+				// paused awaiting resume. Defer the end span: leave the in-flight entry
+				// in typedState so the next invocation of this wrapper for the same
+				// CallID reuses the SpanID and emits the matching end span. See §3.1
+				// and §3.6 of the design plan for the full lifecycle.
+				return "", err
+			}
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+				ended: newEventTimestamp(),
+				err:   err,
+			}))
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return "", err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -858,6 +1399,24 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		toolMsgID := uuid.NewString()
 		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
+		// Route the tool result message ID through the runner's
+		// SessionEventIDGenerator[M] via a SessionEventMessage draft so
+		// custom-tool-result generators see the populated message. Fail-closed:
+		// on allocation failure, skip both the tool result event and the
+		// matching tool span end so no orphaned ToolResultMessageEventID
+		// reference is left in the timeline.
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); idErr != nil {
+			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
+			}
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
+			return "", idErr
+		}
+		resultEventID := toolResultDraft.EventID
+		event.SessionEventVariant = &SessionEventVariant[M]{Event: toolResultDraft}
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
@@ -868,10 +1427,16 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
+
+		sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+			ended:         newEventTimestamp(),
+			resultEventID: resultEventID,
+		}))
+		clearToolSpanInFlight[M](ctx, tCtx.CallID)
 
 		return result, nil
 	}, nil
@@ -879,10 +1444,28 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 
 func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		inFlight, isResume := lookupOrInitToolSpanInFlight[M](ctx, tCtx)
+		if !isResume {
+			startEvent := newToolSpanStartEvent[M](ctx, inFlight, tCtx)
+			sendSessionTimelineEvent(ctx, startEvent)
+			inFlight.StartEventID = startEvent.EventID
+			persistToolSpanInFlight[M](ctx, tCtx.CallID, inFlight)
+		}
+
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
+			if _, isInterrupt := compose.IsInterruptRerunError(err); isInterrupt {
+				// Defer end span; in-flight entry remains for resume. See §3.1.
+				return nil, err
+			}
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+				ended: newEventTimestamp(),
+				err:   err,
+			}))
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return nil, err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -891,7 +1474,81 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 		streams := result.Copy(2)
 
 		toolMsgID := uuid.NewString()
+		// Streaming tool result: the materialized message is not yet
+		// available, so the draft carries a zero M and SessionEventMessage
+		// kind. ID allocation flows through the runner's
+		// SessionEventIDGenerator[M]. Fail-closed: on allocation failure,
+		// skip the tool result event AND the tool span end so no orphaned
+		// ToolResultMessageEventID reference is left behind.
+		var toolResultDraftMsg M
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); idErr != nil {
+			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
+			}
+			streams[0].Close()
+			streams[1].Close()
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
+			return nil, idErr
+		}
+		resultEventID := toolResultDraft.EventID
+
+		// End-span emission for streamable tools attaches to the caller's
+		// stream copy via schema.WithOnEOF (success path) and
+		// schema.WithErrWrapper (error / cancellation path). Both hooks fire
+		// synchronously inside the consumer's recv() call, so the end span
+		// is enqueued before the agent's event generator closes — this is
+		// what avoids the race the previous goroutine drainer hit.
+		//
+		// Residual risk: the hooks fire only when the consumer drives the
+		// stream to a terminal state (io.EOF or non-EOF error). If a
+		// consumer abandons the stream mid-flight (e.g. calls Close() early,
+		// or a tool implementation ignores ctx and produces unbounded
+		// chunks while the consumer stops calling Recv), neither hook fires
+		// and only the start span is persisted. Correctness is unaffected;
+		// observability shows an unmatched start span. If this ever becomes
+		// load-bearing, the fix is to reintroduce a goroutine drainer as a
+		// fallback gated by spanEndOnce, with a per-run WaitGroup on the
+		// exec ctx so the agent waits for it before closing the generator.
+		//
+		// emitEnd is attached to the caller's stream copy via WithOnEOF and
+		// WithErrWrapper. v3 makes it interrupt-aware: an interrupt-shape
+		// streamErr means the tool did not complete on this run, so neither
+		// emit the end span nor delete the in-flight entry. The next resume
+		// re-invokes this wrapper, sees the in-flight entry, and continues
+		// until a terminal state (success EOF, hard error, or cancellation)
+		// fires. See §3.5 of the design plan for the full lifecycle.
+		var spanEndOnce sync.Once
+		emitEnd := func(streamErr error) {
+			spanEndOnce.Do(func() {
+				if streamErr != nil {
+					if _, isInterrupt := compose.IsInterruptRerunError(streamErr); isInterrupt {
+						return
+					}
+				}
+				in := toolSpanEndEventInput{
+					ended: newEventTimestamp(),
+					err:   streamErr,
+				}
+				if streamErr == nil {
+					in.resultEventID = resultEventID
+				}
+				sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, in))
+				clearToolSpanInFlight[M](ctx, tCtx.CallID)
+			})
+		}
+
 		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.SessionEventVariant = &SessionEventVariant[M]{
+			MessageStreamRef: &MessageStreamRef{
+				EventID:   resultEventID,
+				TurnID:    toolResultDraft.TurnID,
+				Timestamp: timestamp,
+				Kind:      SessionEventMessage,
+			},
+		}
 		event.Action = prePopAction
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -900,21 +1557,50 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
 
-		return streams[1], nil
+		callerStream := schema.StreamReaderWithConvert(streams[1],
+			func(s string) (string, error) { return s, nil },
+			schema.WithOnEOF(func() (any, error) {
+				emitEnd(nil)
+				return nil, io.EOF
+			}),
+			schema.WithErrWrapper(func(streamErr error) error {
+				emitEnd(streamErr)
+				return streamErr
+			}),
+		)
+		return callerStream, nil
 	}, nil
 }
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		inFlight, isResume := lookupOrInitToolSpanInFlight[M](ctx, tCtx)
+		if !isResume {
+			startEvent := newToolSpanStartEvent[M](ctx, inFlight, tCtx)
+			sendSessionTimelineEvent(ctx, startEvent)
+			inFlight.StartEventID = startEvent.EventID
+			persistToolSpanInFlight[M](ctx, tCtx.CallID, inFlight)
+		}
+
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
+			if _, isInterrupt := compose.IsInterruptRerunError(err); isInterrupt {
+				// Defer end span; in-flight entry remains for resume. See §3.1.
+				return nil, err
+			}
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+				ended: newEventTimestamp(),
+				err:   err,
+			}))
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return nil, err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -923,8 +1609,30 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 		toolMsgID := uuid.NewString()
 		event, eventErr := typedToolEnhancedInvokeEvent[M](callID, toolName, toolMsgID, result)
 		if eventErr != nil {
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+				ended: newEventTimestamp(),
+				err:   eventErr,
+			}))
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return nil, eventErr
 		}
+		// Route the enhanced-invoke tool result message ID through the
+		// runner's SessionEventIDGenerator[M] via a SessionEventMessage
+		// draft. Fail-closed: on allocation failure, skip both the tool
+		// result event and the matching tool span end so no orphaned
+		// ToolResultMessageEventID reference is left behind.
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: event.Output.MessageOutput.Message}
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); idErr != nil {
+			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
+			}
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
+			return nil, idErr
+		}
+		resultEventID := toolResultDraft.EventID
+		event.SessionEventVariant = &SessionEventVariant[M]{Event: toolResultDraft}
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
@@ -935,10 +1643,16 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
+
+		sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+			ended:         newEventTimestamp(),
+			resultEventID: resultEventID,
+		}))
+		clearToolSpanInFlight[M](ctx, tCtx.CallID)
 
 		return result, nil
 	}, nil
@@ -946,10 +1660,28 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 
 func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		inFlight, isResume := lookupOrInitToolSpanInFlight[M](ctx, tCtx)
+		if !isResume {
+			startEvent := newToolSpanStartEvent[M](ctx, inFlight, tCtx)
+			sendSessionTimelineEvent(ctx, startEvent)
+			inFlight.StartEventID = startEvent.EventID
+			persistToolSpanInFlight[M](ctx, tCtx.CallID, inFlight)
+		}
+
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
+			if _, isInterrupt := compose.IsInterruptRerunError(err); isInterrupt {
+				// Defer end span; in-flight entry remains for resume. See §3.1.
+				return nil, err
+			}
+			sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, toolSpanEndEventInput{
+				ended: newEventTimestamp(),
+				err:   err,
+			}))
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
 			return nil, err
 		}
+		timestamp := newEventTimestamp()
 
 		toolName := tCtx.Name
 		callID := tCtx.CallID
@@ -958,7 +1690,81 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 		streams := result.Copy(2)
 
 		toolMsgID := uuid.NewString()
+		// Streaming tool result: the materialized message is not yet
+		// available, so the draft carries a zero M and SessionEventMessage
+		// kind. ID allocation flows through the runner's
+		// SessionEventIDGenerator[M]. Fail-closed: on allocation failure,
+		// skip the tool result event AND the tool span end so no orphaned
+		// ToolResultMessageEventID reference is left behind.
+		var toolResultDraftMsg M
+		toolResultDraft := &SessionEvent[M]{Timestamp: timestamp, Kind: SessionEventMessage, Message: toolResultDraftMsg}
+		sc := sessionEventContextFromContext[M](ctx)
+		stampSessionEventTurnID(toolResultDraft, sc.turnID)
+		if idErr := prepareSessionEventEnvelope(ctx, toolResultDraft, sc.generator, sc.provider, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true}); idErr != nil {
+			if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil && execCtx.generator != nil {
+				execCtx.send(ctx, &TypedAgentEvent[M]{Err: idErr})
+			}
+			streams[0].Close()
+			streams[1].Close()
+			clearToolSpanInFlight[M](ctx, tCtx.CallID)
+			return nil, idErr
+		}
+		resultEventID := toolResultDraft.EventID
+
+		// End-span emission for streamable tools attaches to the caller's
+		// stream copy via schema.WithOnEOF (success path) and
+		// schema.WithErrWrapper (error / cancellation path). Both hooks fire
+		// synchronously inside the consumer's recv() call, so the end span
+		// is enqueued before the agent's event generator closes — this is
+		// what avoids the race the previous goroutine drainer hit.
+		//
+		// Residual risk: the hooks fire only when the consumer drives the
+		// stream to a terminal state (io.EOF or non-EOF error). If a
+		// consumer abandons the stream mid-flight (e.g. calls Close() early,
+		// or a tool implementation ignores ctx and produces unbounded
+		// chunks while the consumer stops calling Recv), neither hook fires
+		// and only the start span is persisted. Correctness is unaffected;
+		// observability shows an unmatched start span. If this ever becomes
+		// load-bearing, the fix is to reintroduce a goroutine drainer as a
+		// fallback gated by spanEndOnce, with a per-run WaitGroup on the
+		// exec ctx so the agent waits for it before closing the generator.
+		//
+		// emitEnd is attached to the caller's stream copy via WithOnEOF and
+		// WithErrWrapper. v3 makes it interrupt-aware: an interrupt-shape
+		// streamErr means the tool did not complete on this run, so neither
+		// emit the end span nor delete the in-flight entry. The next resume
+		// re-invokes this wrapper, sees the in-flight entry, and continues
+		// until a terminal state (success EOF, hard error, or cancellation)
+		// fires. See §3.5 of the design plan for the full lifecycle.
+		var spanEndOnce sync.Once
+		emitEnd := func(streamErr error) {
+			spanEndOnce.Do(func() {
+				if streamErr != nil {
+					if _, isInterrupt := compose.IsInterruptRerunError(streamErr); isInterrupt {
+						return
+					}
+				}
+				in := toolSpanEndEventInput{
+					ended: newEventTimestamp(),
+					err:   streamErr,
+				}
+				if streamErr == nil {
+					in.resultEventID = resultEventID
+				}
+				sendSessionTimelineEvent(ctx, newToolSpanEndEvent[M](ctx, inFlight, tCtx, in))
+				clearToolSpanInFlight[M](ctx, tCtx.CallID)
+			})
+		}
+
 		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.SessionEventVariant = &SessionEventVariant[M]{
+			MessageStreamRef: &MessageStreamRef{
+				EventID:   resultEventID,
+				TurnID:    toolResultDraft.TurnID,
+				Timestamp: timestamp,
+				Kind:      SessionEventMessage,
+			},
+		}
 		event.Action = prePopAction
 
 		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -967,14 +1773,32 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
-				execCtx.send(event)
+				execCtx.send(ctx, event)
 			}
 			return nil
 		})
 
-		return streams[1], nil
+		callerStream := schema.StreamReaderWithConvert(streams[1],
+			func(tr *schema.ToolResult) (*schema.ToolResult, error) { return tr, nil },
+			schema.WithOnEOF(func() (any, error) {
+				emitEnd(nil)
+				return nil, io.EOF
+			}),
+			schema.WithErrWrapper(func(streamErr error) error {
+				emitEnd(streamErr)
+				return streamErr
+			}),
+		)
+		return callerStream, nil
 	}, nil
 }
+
+// drainStringToolResultForSpan and drainEnhancedToolResultForSpan are no
+// longer needed; the streamable wrappers attach end-span emission via
+// schema.WithOnEOF / schema.WithErrWrapper hooks on the caller's stream copy
+// instead. The hook approach fires synchronously during the consumer's read
+// loop, eliminating the goroutine race where the agent's event generator
+// could close before the drainer's emission landed.
 
 func hasUserEventSenderToolWrapper[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
 	for _, handler := range handlers {
@@ -1029,11 +1853,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 			if err != nil {
 				return result, err
 			}
-			if GetMessageID(result) == "" {
-				result = copyMessage(result)
-				EnsureMessageID(result)
-			}
-			return result, nil
+			return ensureMessageIDCOW(result), nil
 		}
 	}
 
@@ -1101,9 +1921,9 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 
 func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpoint[M]) typedStreamEndpoint[M] {
 	// === ID Assignment layer (innermost, framework-controlled) ===
-	// Pre-allocates a UUID and injects it into the first chunk only.
-	// Only the first chunk carries the ID in Extra to avoid concatStrings corruption
-	// during ConcatMessages (which string-concatenates duplicate Extra keys).
+	// Ensures model output has a message ID before any WrapModel handler or event
+	// sender sees it. Copies the first chunk rather than writing the model's own
+	// chunk in place, matching the Generate layer above.
 	{
 		realInner := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
@@ -1111,17 +1931,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 			if err != nil {
 				return nil, err
 			}
-			msgID := uuid.NewString()
-			first := true
-			return schema.StreamReaderWithConvert(reader, func(msg M) (M, error) {
-				if first {
-					first = false
-					if GetMessageID(msg) == "" {
-						typedSetMessageID(msg, msgID)
-					}
-				}
-				return msg, nil
-			}), nil
+			return stampFirstChunkMessageID(reader), nil
 		}
 	}
 
@@ -1208,6 +2018,9 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		} else {
 			stateToolInfos = w.toolInfos
 		}
+		if stateDeferredToolInfos == nil && composeLevelOpts.DeferredTools != nil {
+			stateDeferredToolInfos = composeLevelOpts.DeferredTools
+		}
 	}
 
 	state := &TypedChatModelAgentState[M]{
@@ -1274,6 +2087,13 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ..
 		})
 	}
 
+	// Normally a no-op: the innermost ID layer already stamped result. It is
+	// load-bearing when a WrapModel handler short-circuits the inner model from
+	// outside a user-supplied event sender (NewEventSenderModelWrapper is exported,
+	// so Handlers[0] can sit outside it) -- then result is a handler-owned message
+	// with no ID, and an in-place write here would mutate memory the handler still
+	// holds. Copy-on-write keeps that write on framework-owned memory.
+	result = ensureMessageIDCOW(result)
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
@@ -1333,6 +2153,9 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 		} else {
 			stateToolInfos = w.toolInfos
 		}
+		if stateDeferredToolInfos == nil && composeLevelOpts.DeferredTools != nil {
+			stateDeferredToolInfos = composeLevelOpts.DeferredTools
+		}
 	}
 
 	state := &TypedChatModelAgentState[M]{
@@ -1385,7 +2208,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 	if err != nil {
 		return nil, err
 	}
-	result, err := concatMessageStream(stream)
+	result, err := internalschema.ConcatMessageStream(stream)
 	if err != nil {
 		return nil, err
 	}
@@ -1398,6 +2221,12 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...m
 		})
 	}
 
+	// Here the copy is provably redundant today -- result is a ConcatMessages
+	// product, which always allocates a fresh struct -- so this is the same
+	// no-op as an in-place write would be. Kept in the copy-on-write form so
+	// "the framework never writes a message it does not own" holds by reading,
+	// without depending on a concat implementation detail from another package.
+	result = ensureMessageIDCOW(result)
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {

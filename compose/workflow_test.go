@@ -733,6 +733,19 @@ func TestWorkflowCompile(t *testing.T) {
 		assert.ErrorContains(t, err, "edge start node '2' needs to be added to graph first")
 	})
 
+	t.Run("branch end node not added", func(t *testing.T) {
+		w := NewWorkflow[string, string]()
+		w.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+			return input, nil
+		})).AddInput(START)
+		w.AddBranch("1", NewGraphBranch(func(ctx context.Context, in string) (string, error) {
+			return "2", nil
+		}, map[string]bool{"2": true}))
+		w.End().AddInput("1")
+		_, err := w.Compile(ctx)
+		assert.ErrorContains(t, err, "branch end node '2' needs to be added to workflow first")
+	})
+
 	t.Run("to map with non-string key type", func(t *testing.T) {
 		w := NewWorkflow[string, map[int]any]()
 		w.End().AddInput(START, ToField("1"))

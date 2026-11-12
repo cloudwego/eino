@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
@@ -46,6 +45,10 @@ func (m *fakeChatModel) Stream(ctx context.Context, input []*schema.Message, opt
 
 func (m *fakeChatModel) IsCallbacksEnabled() bool {
 	return m.callbacksEnabled
+}
+
+func (m *fakeChatModel) GetType() string {
+	return "fake_chat_model"
 }
 
 func drainMessageStream(sr *schema.StreamReader[*schema.Message]) ([]*schema.Message, error) {
@@ -697,46 +700,4 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		require.Equal(t, int32(0), atomic.LoadInt32(&m2Calls))
 		require.Equal(t, int32(0), atomic.LoadInt32(&shouldCalls))
 	})
-}
-
-func TestTypedConsumeStream_EmptyAgenticStream(t *testing.T) {
-	sr, sw := schema.Pipe[*schema.AgenticMessage](1)
-	sw.Close()
-
-	msg, err := typedConsumeStream(sr)
-	assert.Nil(t, err, "empty stream should not return error")
-	assert.NotNil(t, msg, "empty stream should return non-nil message from ConcatAgenticMessages")
-}
-
-func TestTypedConsumeStream_AgenticMidStreamError(t *testing.T) {
-	midErr := errors.New("mid-stream failure")
-	sr := streamWithMidErrorAgentic(
-		[]*schema.AgenticMessage{agenticChunk("chunk1"), agenticChunk("chunk2")},
-		midErr,
-	)
-
-	msg, err := typedConsumeStream(sr)
-	assert.ErrorIs(t, err, midErr, "should return the mid-stream error")
-	assert.NotNil(t, msg, "should return concatenated partial message from received chunks")
-}
-
-func streamWithMidErrorAgentic(chunks []*schema.AgenticMessage, err error) *schema.StreamReader[*schema.AgenticMessage] {
-	sr, sw := schema.Pipe[*schema.AgenticMessage](len(chunks) + 1)
-	go func() {
-		defer sw.Close()
-		for _, c := range chunks {
-			sw.Send(c, nil)
-		}
-		sw.Send(nil, err)
-	}()
-	return sr
-}
-
-func agenticChunk(text string) *schema.AgenticMessage {
-	return &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.AssistantGenText{Text: text}),
-		},
-	}
 }

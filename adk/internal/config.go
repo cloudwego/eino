@@ -74,3 +74,37 @@ func SelectPrompt(prompts I18nPrompts) string {
 		panic(fmt.Sprintf("invalid language: %v", lang))
 	}
 }
+
+// ReminderMessageRole represents the message role used for mid-conversation reminder
+// (system-reminder) messages injected by ADK middlewares.
+type ReminderMessageRole uint8
+
+const (
+	// ReminderMessageRoleSystem injects reminders as system-role messages (default).
+	ReminderMessageRoleSystem ReminderMessageRole = iota
+	// ReminderMessageRoleUser injects reminders as user-role messages, for models that
+	// reject non-leading system messages.
+	ReminderMessageRoleUser
+)
+
+var reminderMessageRole atomic.Value
+
+// SetReminderMessageRole sets the role for mid-conversation reminder messages injected by
+// ADK middlewares. The default is ReminderMessageRoleSystem if not explicitly set.
+func SetReminderMessageRole(r ReminderMessageRole) error {
+	if r != ReminderMessageRoleSystem &&
+		r != ReminderMessageRoleUser {
+		return fmt.Errorf("invalid reminder message role: %v", r)
+	}
+	reminderMessageRole.Store(r)
+	return nil
+}
+
+// GetReminderMessageRole returns the current role for mid-conversation reminder messages.
+// Returns ReminderMessageRoleSystem if not explicitly set.
+func GetReminderMessageRole() ReminderMessageRole {
+	if r, ok := reminderMessageRole.Load().(ReminderMessageRole); ok {
+		return r
+	}
+	return ReminderMessageRoleSystem
+}

@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -116,12 +117,6 @@ func (e *typedAgentEventWrapper[M]) GobDecode(b []byte) error {
 // consumeStream drains the typed message stream, setting concatenatedMessage on success
 // or StreamErr on failure. The stream is replaced with a materialized version safe for
 // gob encoding.
-//
-// NOTE: This method parallels agentEventWrapper.consumeStream in utils.go. The two
-// implementations exist because agentEventWrapper is non-generic (uses *schema.Message
-// directly) while typedAgentEventWrapper[M] is generic. They cannot be unified without
-// making the non-generic wrapper generic, which would cascade through the entire
-// non-generic event storage layer.
 func (e *typedAgentEventWrapper[M]) consumeStream() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -131,20 +126,12 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 	}
 
 	s := e.event.Output.MessageOutput.MessageStream
-	var msgs []M
-
 	defer s.Close()
-	for {
-		msg, err := s.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			e.StreamErr = err
-			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return
-		}
-		msgs = append(msgs, msg)
+	msgs, recvErr := internalschema.CollectStreamPrefix(s)
+	if recvErr != io.EOF {
+		e.StreamErr = recvErr
+		e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
 	}
 
 	if len(msgs) == 0 {
@@ -157,7 +144,7 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 		e.concatenatedMessage = msgs[0]
 	} else {
 		var err error
-		e.concatenatedMessage, err = concatMessageStream(schema.StreamReaderFromArray(msgs))
+		e.concatenatedMessage, err = internalschema.ConcatMessages(msgs)
 		if err != nil {
 			e.StreamErr = err
 			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
@@ -241,7 +228,8 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 }
 
 func (rs *runSession) addEvent(event *AgentEvent) {
-	wrapper := &agentEventWrapper{AgentEvent: event, TS: time.Now().UnixNano()}
+	now := time.Now()
+	wrapper := &agentEventWrapper{AgentEvent: event, TS: now.UnixNano()}
 	// If LaneEvents is not nil, we are in a parallel lane.
 	// Append to the lane's local event slice (lock-free).
 	if rs.LaneEvents != nil {
@@ -298,9 +286,10 @@ func addTypedEvent[M MessageType](session *runSession, event *TypedAgentEvent[M]
 		session.addEvent(any(event).(*AgentEvent))
 		return
 	}
+	now := time.Now()
 	session.mtx.Lock()
 	defer session.mtx.Unlock()
-	wrapper := &typedAgentEventWrapper[M]{event: event, TS: time.Now().UnixNano()}
+	wrapper := &typedAgentEventWrapper[M]{event: event, TS: now.UnixNano()}
 	store, _ := session.TypedEvents.(*[]*typedAgentEventWrapper[M])
 	if store == nil {
 		s := make([]*typedAgentEventWrapper[M], 0)
@@ -367,6 +356,136 @@ func (rc *runContext) deepCopy() *runContext {
 	copy(copied.RunPath, rc.RunPath)
 
 	return copied
+}
+
+func sanitizeRunContextForSessionCheckpoint[M MessageType](rc *runContext) *runContext {
+	if rc == nil {
+		return nil
+	}
+	copied := &runContext{
+		RootInput:        rc.RootInput,
+		AgenticRootInput: rc.AgenticRootInput,
+		RunPath:          append([]RunStep(nil), rc.RunPath...),
+		Session:          sanitizeRunSessionForSessionCheckpoint[M](rc.Session),
+	}
+	return copied
+}
+
+func sanitizeRunSessionForSessionCheckpoint[M MessageType](rs *runSession) *runSession {
+	if rs == nil {
+		return nil
+	}
+
+	copied := &runSession{
+		Values:    make(map[string]any),
+		valuesMtx: &sync.Mutex{},
+	}
+
+	if rs.valuesMtx != nil {
+		rs.valuesMtx.Lock()
+		for k, v := range rs.Values {
+			copied.Values[k] = v
+		}
+		rs.valuesMtx.Unlock()
+	} else {
+		for k, v := range rs.Values {
+			copied.Values[k] = v
+		}
+	}
+
+	var events []*agentEventWrapper
+	var typedEvents any
+	rs.mtx.Lock()
+	events = append(events, rs.Events...)
+	typedEvents = rs.TypedEvents
+	store, hasTypedEvents := typedEvents.(*[]*typedAgentEventWrapper[M])
+	if store != nil {
+		snapshot := append([]*typedAgentEventWrapper[M](nil), (*store)...)
+		store = &snapshot
+	}
+	rs.mtx.Unlock()
+
+	for _, event := range events {
+		if sanitized := sanitizeAgentEventWrapperForSessionCheckpoint(event); sanitized != nil {
+			copied.Events = append(copied.Events, sanitized)
+		}
+	}
+	copied.LaneEvents = sanitizeLaneEventsForSessionCheckpoint(rs.LaneEvents)
+
+	if hasTypedEvents {
+		if store == nil {
+			copied.TypedEvents = store
+			return copied
+		}
+		sanitized := make([]*typedAgentEventWrapper[M], 0, len(*store))
+		for _, event := range *store {
+			if copiedEvent := sanitizeTypedAgentEventWrapperForSessionCheckpoint(event); copiedEvent != nil {
+				sanitized = append(sanitized, copiedEvent)
+			}
+		}
+		copied.TypedEvents = &sanitized
+	} else {
+		copied.TypedEvents = typedEvents
+	}
+
+	return copied
+}
+
+func sanitizeLaneEventsForSessionCheckpoint(le *laneEvents) *laneEvents {
+	if le == nil {
+		return nil
+	}
+	copied := &laneEvents{
+		Parent: sanitizeLaneEventsForSessionCheckpoint(le.Parent),
+	}
+	for _, event := range le.Events {
+		if sanitized := sanitizeAgentEventWrapperForSessionCheckpoint(event); sanitized != nil {
+			copied.Events = append(copied.Events, sanitized)
+		}
+	}
+	return copied
+}
+
+func sanitizeAgentEventWrapperForSessionCheckpoint(w *agentEventWrapper) *agentEventWrapper {
+	if w == nil || w.AgentEvent == nil {
+		return nil
+	}
+
+	event := *w.AgentEvent
+	event.RunPath = append([]RunStep(nil), w.AgentEvent.RunPath...)
+	event.SessionEventVariant = nil
+	if event.Output == nil && event.Action == nil && event.Err == nil {
+		return nil
+	}
+
+	return &agentEventWrapper{
+		AgentEvent:          &event,
+		concatenatedMessage: w.concatenatedMessage,
+		TS:                  w.TS,
+		StreamErr:           w.StreamErr,
+	}
+}
+
+func sanitizeTypedAgentEventWrapperForSessionCheckpoint[M MessageType](
+	w *typedAgentEventWrapper[M],
+) *typedAgentEventWrapper[M] {
+	if w == nil || w.event == nil {
+		return nil
+	}
+
+	event := *w.event
+	event.RunPath = append([]RunStep(nil), w.event.RunPath...)
+	event.SessionEventVariant = nil
+	if event.Output == nil && event.Action == nil && event.Err == nil {
+		return nil
+	}
+
+	return &typedAgentEventWrapper[M]{
+		event:               &event,
+		concatenatedMessage: w.concatenatedMessage,
+		TS:                  w.TS,
+		StreamErr:           w.StreamErr,
+	}
 }
 
 type runCtxKey struct{}

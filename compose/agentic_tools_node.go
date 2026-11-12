@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -55,7 +56,18 @@ func (a *AgenticToolsNode) Stream(ctx context.Context, input *schema.AgenticMess
 	if err != nil {
 		return nil, err
 	}
-	return streamToolMessageToAgenticMessage(result), nil
+	return streamToolMessageToAgenticMessage(
+		result,
+		schema.WithErrWrapper(func(streamErr error) error {
+			checkpointErr := &toolStreamCheckpointError{}
+			if !errors.As(streamErr, &checkpointErr) {
+				return streamErr
+			}
+			agenticCheckpointErr := *checkpointErr
+			agenticCheckpointErr.rerunInput = input
+			return &agenticCheckpointErr
+		}),
+	), nil
 }
 
 func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Message {
@@ -111,7 +123,10 @@ func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessa
 	return results
 }
 
-func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Message]) *schema.StreamReader[[]*schema.AgenticMessage] {
+func streamToolMessageToAgenticMessage(
+	input *schema.StreamReader[[]*schema.Message],
+	opts ...schema.ConvertOption,
+) *schema.StreamReader[[]*schema.AgenticMessage] {
 	return schema.StreamReaderWithConvert(input, func(t []*schema.Message) ([]*schema.AgenticMessage, error) {
 		results := make([]*schema.AgenticMessage, len(t))
 		for i, m := range t {
@@ -146,7 +161,7 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 			}
 		}
 		return results, nil
-	})
+	}, opts...)
 }
 
 func toolSearchResultMessageToAgenticMessage(m *schema.Message, meta *schema.StreamingMeta) (*schema.AgenticMessage, bool) {
