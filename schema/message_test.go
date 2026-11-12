@@ -148,6 +148,14 @@ func TestConcatMessage(t *testing.T) {
 		assert.ErrorContains(t, err, "unexpected nil chunk in message stream")
 	})
 
+	t.Run("different_tool_names", func(t *testing.T) {
+		_, err := ConcatMessages([]*Message{
+			{Role: Tool, ToolCallID: "call_1", ToolName: "lookup"},
+			{Role: Tool, ToolCallID: "call_1", ToolName: "summarize"},
+		})
+		assert.ErrorContains(t, err, "different toolNames: 'lookup' 'summarize'")
+	})
+
 	t.Run("response_meta", func(t *testing.T) {
 		expectedMsg := &Message{
 			Role: "assistant",
