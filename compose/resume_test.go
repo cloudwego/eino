@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/callbacks"
@@ -31,6 +32,198 @@ import (
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestLocalInterruptPartialResume(t *testing.T) {
+	for _, eager := range []bool{true, false} {
+		t.Run(map[bool]string{true: "eager", false: "superstep"}[eager], func(t *testing.T) {
+			r, counts := localCrossDAG(t, true, eager, false, newInMemoryStore())
+			_, err := r.Invoke(context.Background(), map[string]any{"input": "original"}, WithCheckPointID("partial"))
+			ids := localIDs(localInfo(t, err))
+			require.Len(t, ids, 3)
+			_, err = r.Invoke(Resume(context.Background(), ids["A"]), nil, WithCheckPointID("partial"))
+			latest := localIDs(localInfo(t, err))
+			require.Len(t, latest, 2)
+			require.Contains(t, latest, "B")
+			require.Contains(t, latest, "C")
+			localCount(t, counts, "A", 2, 1)
+			localCount(t, counts, "B", 2, 0)
+			localCount(t, counts, "C", 2, 0)
+			localCount(t, counts, "join", 0, 0)
+			out, err := r.Invoke(Resume(context.Background(), latest["B"], latest["C"]), nil, WithCheckPointID("partial"))
+			require.NoError(t, err)
+			require.Equal(t, map[string]any{"A": "saved-A", "B": "saved-B", "C": "saved-C"}, out)
+			localCount(t, counts, "B", 3, 1)
+			localCount(t, counts, "C", 3, 1)
+			localCount(t, counts, "prepare", 1, 1)
+			localCount(t, counts, "join", 1, 1)
+		})
+	}
+}
+
+func TestLocalInterruptResumeProtocols(t *testing.T) {
+	for _, strategy := range []string{"implicit", "no-target", "unknown-target"} {
+		t.Run(strategy, func(t *testing.T) {
+			r, counts := localCrossDAG(t, true, true, strategy == "implicit", newInMemoryStore())
+			_, err := r.Invoke(context.Background(), map[string]any{}, WithCheckPointID("protocol"))
+			previous := localIDs(localInfo(t, err))
+			ctx := context.Background()
+			if strategy == "unknown-target" {
+				ctx = Resume(ctx, "unknown")
+			}
+			out, err := r.Invoke(ctx, nil, WithCheckPointID("protocol"))
+			if strategy == "implicit" {
+				require.NoError(t, err)
+				require.Len(t, out, 3)
+				for _, key := range []string{"A", "B", "C"} {
+					localCount(t, counts, key, 2, 1)
+				}
+			} else {
+				latest := localIDs(localInfo(t, err))
+				require.Len(t, latest, 3)
+				for _, key := range []string{"A", "B", "C"} {
+					require.NotEqual(t, previous[key], latest[key])
+					localCount(t, counts, key, 2, 0)
+				}
+				localCount(t, counts, "join", 0, 0)
+			}
+			localCount(t, counts, "prepare", 1, 1)
+		})
+	}
+}
+
+func TestLocalInterruptRerunInputContract(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		t.Run(map[bool]string{false: "business", true: "external-enabled"}[external], func(t *testing.T) {
+			g := NewGraph[string, string]()
+			require.NoError(t, g.AddLambdaNode("wait", InvokableLambda(func(ctx context.Context, in string) (string, error) {
+				was, has, saved := GetInterruptState[string](ctx)
+				if !was {
+					return "", StatefulInterrupt(ctx, "info", in)
+				}
+				require.True(t, has)
+				require.Equal(t, "original", saved)
+				if external {
+					require.Equal(t, "original", in)
+				} else {
+					require.Empty(t, in)
+				}
+				return saved, nil
+			})))
+			require.NoError(t, g.AddEdge(START, "wait"))
+			require.NoError(t, g.AddEdge("wait", END))
+			r, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor), WithLocalInterrupts(), WithCheckPointStore(newInMemoryStore()))
+			require.NoError(t, err)
+			ctx := context.Background()
+			if external {
+				ctx, _ = WithGraphInterrupt(ctx)
+			}
+			_, err = r.Invoke(ctx, "original", WithCheckPointID("input"))
+			info := localInfo(t, err)
+			out, err := r.Invoke(ResumeWithData(context.Background(), info.InterruptContexts[0].ID, "approved"), "replacement", WithCheckPointID("input"))
+			require.NoError(t, err)
+			require.Equal(t, "original", out)
+		})
+	}
+}
+
+func TestLocalInterruptNestedPoliciesAndLatestCheckpoint(t *testing.T) {
+	for _, policies := range [][2]bool{{true, false}, {false, true}, {true, true}} {
+		name := map[bool]string{false: "default", true: "local"}[policies[0]] + "/" + map[bool]string{false: "default", true: "local"}[policies[1]]
+		t.Run(name, func(t *testing.T) {
+			counts := newLocalCounts()
+			child := NewGraph[string, string](WithGenLocalState(func(context.Context) *testStruct { return &testStruct{A: "child"} }))
+			require.NoError(t, child.AddLambdaNode("prepare", InvokableLambda(func(ctx context.Context, in string) (string, error) {
+				counts.enter("prepare")
+				return in, nil
+			})))
+			for _, name := range []string{"A", "B"} {
+				key := name
+				require.NoError(t, child.AddLambdaNode(key, InvokableLambda(func(ctx context.Context, in string) (string, error) {
+					counts.enter(key)
+					if target, _, _ := GetResumeContext[any](ctx); !target {
+						return "", StatefulInterrupt(ctx, key, key)
+					}
+					require.NoError(t, ProcessState[*testStruct](ctx, func(ctx context.Context, state *testStruct) error { require.Equal(t, "child", state.A); return nil }))
+					counts.complete(key)
+					return key, nil
+				})))
+			}
+			for _, edge := range [][2]string{{START, "prepare"}, {"prepare", "A"}, {"A", "B"}, {"B", END}} {
+				require.NoError(t, child.AddEdge(edge[0], edge[1]))
+			}
+			parent := NewGraph[string, string](WithGenLocalState(func(context.Context) *testStruct { return &testStruct{A: "parent"} }))
+			childOpts := []GraphCompileOption{WithNodeTriggerMode(AllPredecessor)}
+			if policies[1] {
+				childOpts = append(childOpts, WithLocalInterrupts())
+			}
+			require.NoError(t, parent.AddGraphNode("child", child, WithGraphCompileOptions(childOpts...), WithStatePreHandler(func(ctx context.Context, in string, state *testStruct) (string, error) {
+				counts.enter("pre")
+				require.Equal(t, "parent", state.A)
+				return in, nil
+			})))
+			require.NoError(t, parent.AddEdge(START, "child"))
+			require.NoError(t, parent.AddEdge("child", END))
+			store := newInMemoryStore()
+			opts := []GraphCompileOption{WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(store), WithGraphName("nested")}
+			if policies[0] {
+				opts = append(opts, WithLocalInterrupts())
+			}
+			r, err := parent.Compile(context.Background(), opts...)
+			require.NoError(t, err)
+			_, err = r.Invoke(context.Background(), "input", WithCheckPointID("nested"))
+			first := localInfo(t, err)
+			require.Equal(t, "runnable:nested;node:child;node:A", first.InterruptContexts[0].Address.String())
+			_, err = r.Invoke(Resume(context.Background(), first.InterruptContexts[0].ID), "", WithCheckPointID("nested"))
+			second := localInfo(t, err)
+			require.Equal(t, "runnable:nested;node:child;node:B", second.InterruptContexts[0].Address.String())
+			require.NotNil(t, second.InterruptContexts[0].Parent)
+			require.Equal(t, "runnable:nested;node:child", second.InterruptContexts[0].Parent.Address.String())
+			// Reenter without targeting B. Its latest checkpoint and pre-handler
+			// policy must survive another parent checkpoint.
+			_, err = r.Invoke(context.Background(), "", WithCheckPointID("nested"))
+			third := localInfo(t, err)
+			require.NotEqual(t, second.InterruptContexts[0].ID, third.InterruptContexts[0].ID)
+			out, err := r.Invoke(Resume(context.Background(), third.InterruptContexts[0].ID), "", WithCheckPointID("nested"))
+			require.NoError(t, err)
+			require.Equal(t, "B", out)
+			localCount(t, counts, "prepare", 1, 0)
+			localCount(t, counts, "pre", 1, 0)
+			localCount(t, counts, "A", 2, 1)
+			localCount(t, counts, "B", 3, 1)
+		})
+	}
+}
+
+func TestLocalInterruptCompositeResume(t *testing.T) {
+	g := NewGraph[string, string]()
+	require.NoError(t, g.AddLambdaNode("composite", InvokableLambda(func(ctx context.Context, in string) (string, error) {
+		var pending []error
+		for _, key := range []string{"left", "right"} {
+			subCtx := AppendAddressSegment(ctx, AddressSegmentTool, key)
+			if target, _, _ := GetResumeContext[any](subCtx); !target {
+				pending = append(pending, StatefulInterrupt(subCtx, key, "saved"))
+			}
+		}
+		if len(pending) > 0 {
+			return "", CompositeInterrupt(ctx, "composite", nil, pending...)
+		}
+		return "done", nil
+	})))
+	require.NoError(t, g.AddEdge(START, "composite"))
+	require.NoError(t, g.AddEdge("composite", END))
+	r, err := g.Compile(context.Background(), WithLocalInterrupts(), WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(newInMemoryStore()))
+	require.NoError(t, err)
+	_, err = r.Invoke(context.Background(), "input", WithCheckPointID("composite"))
+	info := localInfo(t, err)
+	require.Len(t, info.InterruptContexts, 2)
+	for _, point := range info.InterruptContexts {
+		require.Equal(t, "composite", point.Parent.Info)
+		require.Equal(t, "runnable:;node:composite", point.Parent.Address.String())
+	}
+	out, err := r.Invoke(Resume(context.Background(), info.InterruptContexts[0].ID, info.InterruptContexts[1].ID), "", WithCheckPointID("composite"))
+	require.NoError(t, err)
+	require.Equal(t, "done", out)
+}
 
 type myInterruptState struct {
 	OriginalInput string

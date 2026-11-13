@@ -689,6 +689,10 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		cb = dagChannelBuilder
 	}
 
+	if opt != nil && opt.localInterrupts && runType != runTypeDAG {
+		return nil, errors.New("WithLocalInterrupts requires Workflow or AllPredecessor Graph")
+	}
+
 	// get eager type
 	eager := false
 	if isWorkflow(g.cmp) || runType == runTypeDAG {

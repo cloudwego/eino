@@ -60,6 +60,377 @@ func newInMemoryStore() *inMemoryStore {
 	}
 }
 
+type localFaultStore struct {
+	*inMemoryStore
+	getErr, setErr error
+	gets, sets     int
+}
+
+func (s *localFaultStore) Get(ctx context.Context, id string) ([]byte, bool, error) {
+	s.gets++
+	if s.getErr != nil {
+		return nil, false, s.getErr
+	}
+	return s.inMemoryStore.Get(ctx, id)
+}
+func (s *localFaultStore) Set(ctx context.Context, id string, data []byte) error {
+	s.sets++
+	if s.setErr != nil {
+		return s.setErr
+	}
+	return s.inMemoryStore.Set(ctx, id, data)
+}
+
+type localFaultSerializer struct {
+	Serializer
+	marshalErr error
+}
+
+func (s *localFaultSerializer) Marshal(v any) ([]byte, error) {
+	if s.marshalErr != nil {
+		return nil, s.marshalErr
+	}
+	return s.Serializer.Marshal(v)
+}
+
+func localReadCheckpoint(t *testing.T, store CheckPointStore, id string) *checkpoint {
+	t.Helper()
+	cp, found, err := newCheckPointer(nil, nil, store, nil).get(context.Background(), id)
+	require.NoError(t, err)
+	require.True(t, found)
+	return cp
+}
+
+func TestLocalInterruptBreakpointsPreserveWaitsAndInputs(t *testing.T) {
+	for _, before := range []bool{true, false} {
+		t.Run(fmt.Sprint(before), func(t *testing.T) {
+			store := &localFaultStore{inMemoryStore: newInMemoryStore()}
+			breakpoint := WithInterruptAfterNodes([]string{"prepare"})
+			if before {
+				breakpoint = WithInterruptBeforeNodes([]string{"B"})
+			}
+			r, counts := localCrossDAG(t, true, true, false, store, breakpoint)
+			_, err := r.Invoke(context.Background(), map[string]any{"payload": "original"}, WithCheckPointID("breakpoint"))
+			info := localInfo(t, err)
+			require.Equal(t, 1, store.sets)
+			require.Contains(t, localIDs(info), "A")
+			localCount(t, counts, "A", 1, 0)
+			localCount(t, counts, "B", 0, 0)
+			localCount(t, counts, "C", 0, 0)
+			cp := localReadCheckpoint(t, store, "breakpoint")
+			if before {
+				require.Equal(t, []string{"B"}, info.BeforeNodes)
+				require.Equal(t, map[string]any{"payload": "original"}, cp.Inputs["B"])
+				require.Equal(t, map[string]any{"payload": "original"}, cp.Inputs["C"])
+			} else {
+				require.Equal(t, []string{"prepare"}, info.AfterNodes)
+				require.NotContains(t, cp.Inputs, "B")
+				require.Equal(t, map[string]any{"prepare": map[string]any{"payload": "original"}}, cp.Channels["B"].(*dagChannel).Values)
+			}
+			_, err = r.Invoke(Resume(context.Background(), localIDs(info)["A"]), nil, WithCheckPointID("breakpoint"))
+			require.Len(t, localIDs(localInfo(t, err)), 2)
+			localCount(t, counts, "A", 2, 1)
+			localCount(t, counts, "B", 1, 0)
+			localCount(t, counts, "C", 1, 0)
+			localCount(t, counts, "prepare", 1, 1)
+		})
+	}
+}
+
+// The old runner leaves C ready when A interrupts. The new runner must first
+// reenter A, then discover C even if A interrupts again, and only then hit before C.
+func TestLocalInterruptOldCheckpointReadyWork(t *testing.T) {
+	store := newInMemoryStore()
+	counts := newLocalCounts()
+	observed, observe := localGate(t)
+	build := func(local bool) Runnable[map[string]any, map[string]any] {
+		g := NewGraph[map[string]any, map[string]any]()
+		require.NoError(t, g.AddLambdaNode("A", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+			counts.enter("A")
+			if target, _, _ := GetResumeContext[any](ctx); !target {
+				return nil, &localObservedInterrupt{err: StatefulInterrupt(ctx, "A", "state"), observe: observe}
+			}
+			return map[string]any{"A": "done"}, nil
+		})))
+		require.NoError(t, g.AddLambdaNode("prepare", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+			localAwait(t, observed)
+			counts.enter("prepare")
+			return in, nil
+		})))
+		require.NoError(t, g.AddLambdaNode("C", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+			require.Equal(t, "preserved", in["payload"])
+			counts.enter("C")
+			return map[string]any{"C": "done"}, nil
+		})))
+		for _, edge := range [][2]string{{START, "A"}, {START, "prepare"}, {"prepare", "C"}, {"A", END}, {"C", END}} {
+			require.NoError(t, g.AddEdge(edge[0], edge[1]))
+		}
+		opts := []GraphCompileOption{WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(store), WithInterruptBeforeNodes([]string{"C"})}
+		if local {
+			opts = append(opts, WithLocalInterrupts())
+		}
+		r, err := g.Compile(context.Background(), opts...)
+		require.NoError(t, err)
+		return r
+	}
+	_, err := build(false).Invoke(context.Background(), map[string]any{"payload": "preserved"}, WithCheckPointID("old"))
+	first := localInfo(t, err)
+	localCount(t, counts, "C", 0, 0)
+	r := build(true)
+	_, err = r.Invoke(context.Background(), nil, WithCheckPointID("old"))
+	second := localInfo(t, err)
+	require.Equal(t, []string{"C"}, second.BeforeNodes)
+	require.NotEqual(t, localIDs(first)["A"], localIDs(second)["A"])
+	localCount(t, counts, "A", 2, 0)
+	cp := localReadCheckpoint(t, store, "old")
+	require.Equal(t, map[string]any{"payload": "preserved"}, cp.Inputs["C"])
+	out, err := r.Invoke(Resume(context.Background(), localIDs(second)["A"]), nil, WithCheckPointID("old"))
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"A": "done", "C": "done"}, out)
+	localCount(t, counts, "prepare", 1, 0)
+	localCount(t, counts, "C", 1, 0)
+}
+
+func TestLocalInterruptRestoreReadyEndWithoutTasks(t *testing.T) {
+	store := &localFaultStore{inMemoryStore: newInMemoryStore()}
+	counts := newLocalCounts()
+	build := func() Runnable[string, string] {
+		g := NewGraph[string, string]()
+		require.NoError(t, g.AddLambdaNode("last", InvokableLambda(func(ctx context.Context, in string) (string, error) { counts.enter("last"); return in, nil })))
+		require.NoError(t, g.AddEdge(START, "last"))
+		require.NoError(t, g.AddEdge("last", END))
+		r, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor), WithLocalInterrupts(), WithCheckPointStore(store), WithInterruptAfterNodes([]string{"last"}))
+		require.NoError(t, err)
+		return r
+	}
+	_, err := build().Invoke(context.Background(), "terminal", WithCheckPointID("end"))
+	localInfo(t, err)
+	cp := localReadCheckpoint(t, store, "end")
+	require.Empty(t, cp.Inputs)
+	require.Empty(t, cp.RerunNodes)
+	out, err := build().Invoke(context.Background(), "ignored", WithCheckPointID("end"))
+	require.NoError(t, err)
+	require.Equal(t, "terminal", out)
+	localCount(t, counts, "last", 1, 0)
+	require.Equal(t, 1, store.sets)
+}
+
+func TestLocalInterruptRestoreChildBeforeReadyBreakpoint(t *testing.T) {
+	store := newInMemoryStore()
+	counts := newLocalCounts()
+	build := func(local bool) Runnable[map[string]any, map[string]any] {
+		child := NewGraph[map[string]any, map[string]any](WithGenLocalState(func(context.Context) *testStruct { return &testStruct{A: "child"} }))
+		require.NoError(t, child.AddLambdaNode("wait", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+			counts.enter("wait")
+			if target, _, _ := GetResumeContext[any](ctx); !target {
+				return nil, StatefulInterrupt(ctx, "wait", "original")
+			}
+			_, has, saved := GetInterruptState[string](ctx)
+			require.True(t, has)
+			require.Equal(t, "original", saved)
+			return map[string]any{"child": "done"}, nil
+		})))
+		require.NoError(t, child.AddEdge(START, "wait"))
+		require.NoError(t, child.AddEdge("wait", END))
+		parent := NewGraph[map[string]any, map[string]any](WithGenLocalState(func(context.Context) *testStruct { return &testStruct{A: "parent"} }))
+		require.NoError(t, parent.AddGraphNode("child", child, WithGraphCompileOptions(WithNodeTriggerMode(AllPredecessor)), WithStatePreHandler(func(ctx context.Context, in map[string]any, state *testStruct) (map[string]any, error) {
+			counts.enter("pre")
+			require.Equal(t, "parent", state.A)
+			return in, nil
+		})))
+		require.NoError(t, parent.AddLambdaNode("prepare", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+			counts.enter("prepare")
+			return in, nil
+		})))
+		require.NoError(t, parent.AddLambdaNode("C", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+			counts.enter("C")
+			require.Equal(t, "original", in["payload"])
+			return map[string]any{"C": in["payload"]}, nil
+		})))
+		for _, edge := range [][2]string{{START, "child"}, {START, "prepare"}, {"prepare", "C"}, {"child", END}, {"C", END}} {
+			require.NoError(t, parent.AddEdge(edge[0], edge[1]))
+		}
+		opts := []GraphCompileOption{WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(store), WithInterruptBeforeNodes([]string{"C"})}
+		if local {
+			opts = append(opts, WithLocalInterrupts())
+		} else {
+			opts = append(opts, WithEagerExecutionDisabled())
+		}
+		r, err := parent.Compile(context.Background(), opts...)
+		require.NoError(t, err)
+		return r
+	}
+	_, err := build(false).Invoke(context.Background(), map[string]any{"payload": "original"}, WithCheckPointID("child-before"))
+	first := localInfo(t, err)
+	require.Len(t, first.InterruptContexts, 1)
+	localCount(t, counts, "C", 0, 0)
+	r := build(true)
+	_, err = r.Invoke(context.Background(), nil, WithCheckPointID("child-before"))
+	second := localInfo(t, err)
+	require.Equal(t, []string{"C"}, second.BeforeNodes)
+	require.NotEqual(t, first.InterruptContexts[0].ID, second.InterruptContexts[0].ID)
+	localCount(t, counts, "wait", 2, 0)
+	cp := localReadCheckpoint(t, store, "child-before")
+	require.Equal(t, "child", cp.SubGraphs["child"].State.(*testStruct).A)
+	require.True(t, cp.SkipPreHandler["child"])
+	require.Equal(t, map[string]any{"payload": "original"}, cp.Inputs["C"])
+	_, found := cp.SubGraphs["child"].InterruptID2Addr[second.InterruptContexts[0].ID]
+	require.True(t, found, "the latest child checkpoint must be saved")
+	out, err := r.Invoke(Resume(context.Background(), second.InterruptContexts[0].ID), nil, WithCheckPointID("child-before"))
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"child": "done", "C": "original"}, out)
+	localCount(t, counts, "pre", 1, 0)
+	localCount(t, counts, "prepare", 1, 0)
+	localCount(t, counts, "C", 1, 0)
+}
+
+func TestLocalInterruptCheckpointFailures(t *testing.T) {
+	sentinel := errors.New("checkpoint failure")
+	for _, stage := range []string{"Get", "Marshal", "Set"} {
+		t.Run(stage, func(t *testing.T) {
+			store := &localFaultStore{inMemoryStore: newInMemoryStore()}
+			serializer := &localFaultSerializer{Serializer: &serialization.InternalSerializer{}}
+			switch stage {
+			case "Get":
+				store.getErr = sentinel
+			case "Marshal":
+				serializer.marshalErr = sentinel
+			case "Set":
+				store.setErr = sentinel
+			}
+			r, counts := localCrossDAG(t, true, true, false, store, WithSerializer(serializer))
+			_, err := r.Invoke(context.Background(), map[string]any{}, WithCheckPointID("failure"))
+			require.ErrorIs(t, err, sentinel)
+			_, ok := ExtractInterruptInfo(err)
+			require.False(t, ok)
+			require.Empty(t, store.m)
+			if stage == "Get" {
+				localCount(t, counts, "A", 0, 0)
+			}
+			if stage == "Set" {
+				require.Equal(t, 1, store.sets)
+			} else {
+				require.Zero(t, store.sets)
+			}
+		})
+	}
+}
+
+func TestLocalInterruptCheckpointForkAndStateModifier(t *testing.T) {
+	store := &localFaultStore{inMemoryStore: newInMemoryStore()}
+	build := func() Runnable[string, string] {
+		g := NewGraph[string, string](WithGenLocalState(func(context.Context) *testStruct { return &testStruct{A: "initial"} }))
+		require.NoError(t, g.AddLambdaNode("wait", InvokableLambda(func(ctx context.Context, in string) (string, error) {
+			if target, _, _ := GetResumeContext[any](ctx); !target {
+				return "", StatefulInterrupt(ctx, "info", "saved")
+			}
+			return "done", nil
+		})))
+		require.NoError(t, g.AddEdge(START, "wait"))
+		require.NoError(t, g.AddEdge("wait", END))
+		r, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor), WithLocalInterrupts(), WithCheckPointStore(store))
+		require.NoError(t, err)
+		return r
+	}
+	_, err := build().Invoke(context.Background(), "original", WithCheckPointID("X"))
+	localInfo(t, err)
+	original := append([]byte(nil), store.m["X"]...)
+	modifierCalls := 0
+	_, err = build().Invoke(context.Background(), "", WithCheckPointID("X"), WithWriteToCheckPointID("Y"), WithStateModifier(func(ctx context.Context, path NodePath, state any) error {
+		modifierCalls++
+		require.Empty(t, path.GetPath())
+		state.(*testStruct).A = "modified"
+		return nil
+	}))
+	info := localInfo(t, err)
+	require.Equal(t, 1, modifierCalls)
+	require.Equal(t, 2, store.sets)
+	require.Equal(t, original, store.m["X"])
+	require.Equal(t, "modified", info.State.(*testStruct).A)
+	require.Equal(t, "modified", localReadCheckpoint(t, store, "Y").State.(*testStruct).A)
+}
+
+func TestLocalInterruptExternalStopAfterRestoredWait(t *testing.T) {
+	// First produce an old checkpoint with A waiting and C ready. On resume,
+	// A interrupts again before C can be dispatched, so C's external stop must
+	// preserve that already collected wait. This needs no timing gate in the
+	// external-interrupt invocation.
+	for _, timeout := range []time.Duration{-1, time.Hour, 0} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			store := &localFaultStore{inMemoryStore: newInMemoryStore()}
+			counts := newLocalCounts()
+			observed, observe := localGate(t)
+			release, unblock := localGate(t)
+			finished := make(chan struct{})
+			var stop func(...GraphInterruptOption)
+			build := func(local bool) Runnable[map[string]any, map[string]any] {
+				g := NewGraph[map[string]any, map[string]any]()
+				require.NoError(t, g.AddLambdaNode("A", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+					counts.enter("A")
+					if target, _, _ := GetResumeContext[any](ctx); target {
+						return map[string]any{"A": "done"}, nil
+					}
+					err := StatefulInterrupt(ctx, "A", "saved")
+					if !local {
+						err = &localObservedInterrupt{err: err, observe: observe}
+					}
+					return nil, err
+				})))
+				require.NoError(t, g.AddLambdaNode("prepare", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+					localAwait(t, observed)
+					return in, nil
+				})))
+				require.NoError(t, g.AddLambdaNode("C", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+					counts.enter("C")
+					if stop != nil {
+						if timeout < 0 {
+							stop()
+						} else {
+							stop(WithGraphInterruptTimeout(timeout))
+						}
+						if timeout == 0 {
+							<-release
+						}
+						close(finished)
+					}
+					return map[string]any{"C": in["payload"]}, nil
+				})))
+				for _, edge := range [][2]string{{START, "A"}, {START, "prepare"}, {"prepare", "C"}, {"A", END}, {"C", END}} {
+					require.NoError(t, g.AddEdge(edge[0], edge[1]))
+				}
+				opts := []GraphCompileOption{WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(store)}
+				if local {
+					opts = append(opts, WithLocalInterrupts())
+				}
+				r, err := g.Compile(context.Background(), opts...)
+				require.NoError(t, err)
+				return r
+			}
+			_, err := build(false).Invoke(context.Background(), map[string]any{"payload": "original"}, WithCheckPointID("external"))
+			localInfo(t, err)
+			ctx, interrupt := WithGraphInterrupt(context.Background())
+			stop = interrupt
+			r := build(true)
+			_, err = r.Invoke(ctx, nil, WithCheckPointID("external"))
+			info := localInfo(t, err)
+			require.Contains(t, localIDs(info), "A")
+			localCount(t, counts, "A", 2, 0)
+			cp := localReadCheckpoint(t, store, "external")
+			if timeout == 0 {
+				require.Contains(t, cp.RerunNodes, "C")
+				require.Equal(t, map[string]any{"payload": "original"}, cp.Inputs["C"])
+			}
+			unblock()
+			localAwait(t, finished)
+			stop = nil
+			out, err := r.Invoke(Resume(context.Background(), localIDs(info)["A"]), nil, WithCheckPointID("external"))
+			require.NoError(t, err)
+			require.Equal(t, map[string]any{"A": "done", "C": "original"}, out)
+			require.Equal(t, 2, store.sets)
+		})
+	}
+}
+
 type checkpointTypedNilInput struct {
 	Value string
 }
@@ -358,7 +729,7 @@ func TestSubGraph(t *testing.T) {
 		"2": {
 			State:           &testStruct{A: ""},
 			AfterNodes:      []string{"1"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -580,7 +951,7 @@ func TestNestedSubGraph(t *testing.T) {
 		"2": {
 			State:           &testStruct{A: ""},
 			AfterNodes:      []string{"1"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -618,12 +989,12 @@ func TestNestedSubGraph(t *testing.T) {
 		"2": {
 			State:           &testStruct{A: "state"},
 			AfterNodes:      []string{"3"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs: map[string]*InterruptInfo{
 				"2": {
 					State:           &testStruct{A: ""},
 					AfterNodes:      []string{"1"},
-					RerunNodesExtra: make(map[string]interface{}),
+					RerunNodesExtra: make(map[string]any),
 					SubGraphs:       make(map[string]*InterruptInfo),
 				},
 			},
@@ -682,7 +1053,7 @@ func TestNestedSubGraph(t *testing.T) {
 		"2": {
 			State:           &testStruct{A: "state"},
 			BeforeNodes:     []string{"4"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -726,7 +1097,7 @@ state24
 		"2": {
 			State:           &testStruct{A: ""},
 			AfterNodes:      []string{"1"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -763,12 +1134,12 @@ state24
 		"2": {
 			State:           &testStruct{A: "state"},
 			AfterNodes:      []string{"3"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs: map[string]*InterruptInfo{
 				"2": {
 					State:           &testStruct{A: ""},
 					AfterNodes:      []string{"1"},
-					RerunNodesExtra: make(map[string]interface{}),
+					RerunNodesExtra: make(map[string]any),
 					SubGraphs:       make(map[string]*InterruptInfo),
 				},
 			},
@@ -826,7 +1197,7 @@ state24
 		"2": {
 			State:           &testStruct{A: "state"},
 			BeforeNodes:     []string{"4"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -890,7 +1261,7 @@ state24
 		"2": {
 			State:           &testStruct{A: ""},
 			AfterNodes:      []string{"1"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -927,12 +1298,12 @@ state24
 		"2": {
 			State:           &testStruct{A: "state"},
 			AfterNodes:      []string{"3"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs: map[string]*InterruptInfo{
 				"2": {
 					State:           &testStruct{A: ""},
 					AfterNodes:      []string{"1"},
-					RerunNodesExtra: make(map[string]interface{}),
+					RerunNodesExtra: make(map[string]any),
 					SubGraphs:       make(map[string]*InterruptInfo),
 				},
 			},
@@ -991,7 +1362,7 @@ state24
 		"2": {
 			State:           &testStruct{A: "state"},
 			BeforeNodes:     []string{"4"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -1035,7 +1406,7 @@ state24
 		"2": {
 			State:           &testStruct{A: ""},
 			AfterNodes:      []string{"1"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)
@@ -1072,12 +1443,12 @@ state24
 		"2": {
 			State:           &testStruct{A: "state"},
 			AfterNodes:      []string{"3"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs: map[string]*InterruptInfo{
 				"2": {
 					State:           &testStruct{A: ""},
 					AfterNodes:      []string{"1"},
-					RerunNodesExtra: make(map[string]interface{}),
+					RerunNodesExtra: make(map[string]any),
 					SubGraphs:       make(map[string]*InterruptInfo),
 				},
 			},
@@ -1135,7 +1506,7 @@ state24
 		"2": {
 			State:           &testStruct{A: "state"},
 			BeforeNodes:     []string{"4"},
-			RerunNodesExtra: make(map[string]interface{}),
+			RerunNodesExtra: make(map[string]any),
 			SubGraphs:       make(map[string]*InterruptInfo),
 		},
 	}, info.SubGraphs)

@@ -101,6 +101,8 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err
 
 // Interrupt creates a special error that signals the execution engine to interrupt
 // the current run at the component's specific address and save a checkpoint.
+// WithLocalInterrupts confines this wait to the node: other ready work in this
+// graph continues, and the graph returns the reached waits together at quiescence.
 //
 // This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
@@ -118,6 +120,9 @@ func Interrupt(ctx context.Context, info any) error {
 
 // StatefulInterrupt creates a special error that signals the execution engine to interrupt
 // the current run at the component's specific address and save a checkpoint.
+// WithLocalInterrupts aggregates reached waits after the graph's runnable work ends.
+// Partial resumption still follows the explicit/implicit resume protocol; other
+// waiting nodes may reenter and interrupt again with new IDs. Info is not persisted.
 //
 // This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
