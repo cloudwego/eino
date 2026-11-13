@@ -40,11 +40,21 @@ var rrf = func(ctx context.Context, result map[string][]*schema.Document) ([]*sc
 		}
 	}
 
+	// Fix source order for both score accumulation and duplicate document selection.
+	retrieverNames := make([]string, 0, len(result))
+	for name := range result {
+		retrieverNames = append(retrieverNames, name)
+	}
+	sort.Strings(retrieverNames)
+
 	docRankMap := make(map[string]float64)
 	docMap := make(map[string]*schema.Document)
-	for _, v := range result {
+	for _, name := range retrieverNames {
+		v := result[name]
 		for i := range v {
-			docMap[v[i].ID] = v[i]
+			if _, exists := docMap[v[i].ID]; !exists {
+				docMap[v[i].ID] = v[i]
+			}
 			if _, ok := docRankMap[v[i].ID]; !ok {
 				docRankMap[v[i].ID] = 1.0 / float64(i+60)
 			} else {
@@ -58,7 +68,11 @@ var rrf = func(ctx context.Context, result map[string][]*schema.Document) ([]*sc
 	}
 
 	sort.Slice(docList, func(i, j int) bool {
-		return docRankMap[docList[i].ID] > docRankMap[docList[j].ID]
+		left, right := docList[i].ID, docList[j].ID
+		if docRankMap[left] == docRankMap[right] {
+			return left < right
+		}
+		return docRankMap[left] > docRankMap[right]
 	})
 
 	return docList, nil
@@ -109,6 +123,9 @@ type Config struct {
 	// Router is the function to route the query to the retrievers.
 	Router func(ctx context.Context, query string) ([]string, error)
 	// FusionFunc is the function to fuse the documents from the retrievers.
+	// When nil, reciprocal rank fusion is used. With multiple retrievers, equal
+	// scores are ordered by document ID, and duplicate IDs retain the first
+	// document encountered in retriever-name order.
 	FusionFunc func(ctx context.Context, result map[string][]*schema.Document) ([]*schema.Document, error)
 }
 
