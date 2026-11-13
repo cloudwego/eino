@@ -491,6 +491,9 @@ func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	}
 
 	rawSummary, err := m.generateWithRetry(ctx, m.cfg.Model, modelInput, m.cfg.ModelOptions, m.cfg.Retry)
+	if ctx.Err() != nil {
+		return zero, nil, ctx.Err()
+	}
 	if typedShouldFailover(ctx, m.cfg.Failover, rawSummary, err) {
 		rawSummary, modelInput, err = m.runFailover(ctx, originalMsgs, modelInput, rawSummary, err)
 		if err != nil {
@@ -500,6 +503,9 @@ func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 		return zero, nil, fmt.Errorf("failed to generate summary: %w", err)
 	}
 
+	if ctx.Err() != nil {
+		return zero, nil, ctx.Err()
+	}
 	return rawSummary, modelInput, nil
 }
 
@@ -541,6 +547,9 @@ func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 	}
 
 	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			return zero, nil, ctx.Err()
+		}
 		fctx := &TypedFailoverContext[M]{
 			Attempt:           attempt,
 			SystemInstruction: sysInstruction,
@@ -551,6 +560,9 @@ func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 		}
 
 		failoverModel, nextInput, failoverErr := m.getFailoverModel(ctx, fctx, defaultInput)
+		if ctx.Err() != nil {
+			return zero, nil, ctx.Err()
+		}
 		if failoverErr != nil {
 			lastResp = zero
 			lastErr = failoverErr
@@ -562,6 +574,9 @@ func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 			lastResp, lastErr = m.generateAndEmit(ctx, failoverModel, modelInput, m.cfg.ModelOptions, attempt, GenerateSummaryPhaseFailover)
 		}
 
+		if ctx.Err() != nil {
+			return zero, nil, ctx.Err()
+		}
 		if !typedShouldFailover(ctx, m.cfg.Failover, lastResp, lastErr) {
 			return lastResp, modelInput, lastErr
 		}
@@ -820,9 +835,12 @@ func appendSection(base, section string) string {
 func (m *TypedMiddleware[M]) generateAndEmit(ctx context.Context, chatModel model.BaseModel[M], input []M,
 	opts []model.Option, attempt int, phase GenerateSummaryPhase) (M, error) {
 
+	var zero M
+	if ctx.Err() != nil {
+		return zero, ctx.Err()
+	}
 	resp, err := chatModel.Generate(ctx, input, opts...)
 	if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, phase, resp, err); emitErr != nil {
-		var zero M
 		return zero, emitErr
 	}
 	return resp, err
@@ -858,6 +876,10 @@ func (m *TypedMiddleware[M]) generateWithRetry(ctx context.Context, chatModel mo
 	)
 	for attempt := 1; attempt <= totalAttempts; attempt++ {
 		resp, err := m.generateAndEmit(ctx, chatModel, input, opts, attempt, GenerateSummaryPhasePrimary)
+		if ctx.Err() != nil {
+			var zero M
+			return zero, ctx.Err()
+		}
 		if !shouldRetry(ctx, resp, err) {
 			return resp, err
 		}
