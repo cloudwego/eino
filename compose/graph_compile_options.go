@@ -30,7 +30,8 @@ type graphCompileOptions struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 
-	eagerDisabled bool
+	eagerDisabled   bool
+	localInterrupts bool
 
 	mergeConfigs map[string]FanInMergeConfig
 }
@@ -49,6 +50,21 @@ func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
 
 // GraphCompileOption options for compiling AnyGraph.
 type GraphCompileOption func(*graphCompileOptions)
+
+// WithLocalInterrupts lets runnable work in this DAG continue when a node interrupts.
+// Interrupts are aggregated and returned once all submitted results have been collected
+// and no more nodes are ready. An interrupted node is not retried within the same call.
+// This option supports Workflow and AllPredecessor Graph, and applies only to this
+// graph, independently of its children. Graph-level Stream, Collect and Transform
+// are not supported; streaming components can still be adapted within Invoke.
+// Before/after breakpoints and WithGraphInterrupt still stop the entire graph.
+// Resumption supports existing non-streaming DAG checkpoints and checkpoints made
+// with this option. Resuming these checkpoints with the option disabled is not guaranteed.
+func WithLocalInterrupts() GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.localInterrupts = true
+	}
+}
 
 // WithMaxRunSteps sets the maximum number of steps that a graph can run.
 // This is useful to prevent infinite loops in graphs with cycles.

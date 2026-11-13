@@ -24,8 +24,6 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
-	"github.com/cloudwego/eino/internal/core"
-	"github.com/cloudwego/eino/internal/serialization"
 )
 
 type chanCall struct {
@@ -87,6 +85,9 @@ func (r *runner) invoke(ctx context.Context, input any, opts ...Option) (any, er
 }
 
 func (r *runner) transform(ctx context.Context, input streamReader, opts ...Option) (streamReader, error) {
+	if r.options.localInterrupts {
+		return nil, newGraphRunError(errors.New("WithLocalInterrupts does not support graph-level streaming; use Invoke"))
+	}
 	s, err := r.run(ctx, true, input, opts...)
 	if err != nil {
 		return nil, err
@@ -225,7 +226,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if isEnd {
 			return result, nil
 		}
-		if len(nextTasks) == 0 {
+		if len(nextTasks) == 0 && !r.options.localInterrupts {
 			return nil, newGraphRunError(fmt.Errorf("no tasks to execute after graph start"))
 		}
 
@@ -246,6 +247,25 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 	// used to reporting NoTask error
 	var lastCompletedTask []*task
+	localInfo := newInterruptTempInfo()
+	localTasks := &interruptTasks{}
+	saveConfig := &interruptSaveConfig{
+		channels: cm.channels, isStream: isStream, isSubGraph: isSubGraph,
+		checkPointID: writeToCheckPointID, publish: subGraphCheckpointPublisher,
+	}
+	restoredPending := initialized && len(nextTasks) > 0
+	// Global stops settle in-flight work without consuming additional ready inputs.
+	stopLocal := func() error {
+		completed, canceled := tm.waitAll()
+		if e := r.collectLocalResults(ctx, localInfo, localTasks, completed, canceled, cm); e != nil {
+			return e
+		}
+		if ctx.Err() != nil {
+			return newGraphRunError(fmt.Errorf("context has been canceled: %w", ctx.Err()))
+		}
+		localTasks.pending = nextTasks
+		return r.saveInterrupt(ctx, localInfo, localTasks, saveConfig)
+	}
 
 	// Main execution loop.
 	for step := 0; ; step++ {
@@ -260,11 +280,48 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(ErrExceedMaxSteps)
 		}
 
+		if r.options.localInterrupts {
+			if !restoredPending && (tm.canceled || graphInterruptRequested(tm.cancel) || len(localInfo.interruptAfterNodes) > 0) {
+				return nil, stopLocal()
+			}
+			// Restored tasks run first. Only then scan historical ready channels,
+			// even if every restored task has interrupted again.
+			if len(nextTasks) == 0 {
+				ready, e := cm.getFromReadyChannels(ctx, false)
+				if e != nil {
+					return nil, newGraphRunError(e)
+				}
+				nextTasks, e = r.createTasks(ctx, ready, optMap)
+				if e != nil {
+					return nil, newGraphRunError(e)
+				}
+				localInfo.interruptBeforeNodes = getHitKey(nextTasks, r.interruptBeforeNodes)
+				if len(localInfo.interruptBeforeNodes) > 0 {
+					return nil, stopLocal()
+				}
+			}
+			if len(nextTasks) == 0 && tm.num == 0 {
+				if localInfo.hasWaits() {
+					return nil, r.saveInterrupt(ctx, localInfo, localTasks, saveConfig)
+				}
+				value, ready, e := cm.getFromChannel(ctx, END)
+				if e != nil {
+					return nil, newGraphRunError(e)
+				}
+				if ready {
+					return value, nil
+				}
+				return nil, newGraphRunError(fmt.Errorf("no tasks to execute, last completed nodes: %v", printTask(lastCompletedTask)))
+			}
+		}
+
 		// 1. submit next tasks
 		// 2. get completed tasks
 		// 3. calculate next tasks
 
 		err = tm.submit(nextTasks)
+		nextTasks = nil // submitted inputs must never be dispatched again
+		restoredPending = false
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("failed to submit tasks: %w", err))
 		}
@@ -272,6 +329,14 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		var totalCanceledTasks []*task
 
 		completedTasks, canceled, canceledTasks := tm.wait()
+		if r.options.localInterrupts {
+			localInfo.collectCanceledInfo(canceled, canceledTasks, completedTasks)
+			if err = r.collectLocalResults(ctx, localInfo, localTasks, completedTasks, canceledTasks, cm); err != nil {
+				return nil, err
+			}
+			lastCompletedTask = completedTasks
+			continue
+		}
 		totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 		tempInfo := newInterruptTempInfo()
 		tempInfo.collectCanceledInfo(canceled, canceledTasks, completedTasks)
@@ -303,6 +368,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				ctx,
 				tempInfo,
 				append(append(completedTasks, newCompletedTasks...), totalCanceledTasks...), // canceled tasks are handled as rerun
+				nil,
 				writeToCheckPointID,
 				isSubGraph,
 				cm,
@@ -344,7 +410,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				return nil, r.handleInterruptWithSubGraphAndRerunNodes(
 					ctx,
 					tempInfo,
-					append(append(completedTasks, newCompletedTasks...), totalCanceledTasks...),
+					append(newCompletedTasks, totalCanceledTasks...),
+					nextTasks,
 					writeToCheckPointID,
 					isSubGraph,
 					cm,
@@ -442,360 +509,52 @@ func (r *runner) restoreCheckPointState(
 	return ctx, nil
 }
 
-func newInterruptTempInfo() *interruptTempInfo {
-	return &interruptTempInfo{
-		subGraphInterrupts:  map[string]*subGraphInterruptError{},
-		interruptTaskNodes:  map[string]struct{}{},
-		interruptRerunExtra: map[string]any{},
-	}
-}
-
-type interruptTempInfo struct {
-	subGraphInterrupts   map[string]*subGraphInterruptError
-	interruptTaskNodes   map[string]struct{}
-	interruptRerunNodes  []string
-	interruptBeforeNodes []string
-	interruptAfterNodes  []string
-	interruptRerunExtra  map[string]any
-
-	signals []*core.InterruptSignal
-}
-
-func (ti *interruptTempInfo) appendSignal(signal *core.InterruptSignal) {
-	if signal == nil {
-		return
-	}
-	for _, existing := range ti.signals {
-		if existing == signal || signal.ID != "" && existing.ID == signal.ID {
-			return
-		}
-	}
-	ti.signals = append(ti.signals, signal)
-}
-
-func (ti *interruptTempInfo) collectCanceledInfo(canceled bool, canceledTasks, completedTasks []*task) {
-	if !canceled {
-		return
-	}
-
-	if len(canceledTasks) > 0 {
-		for _, t := range canceledTasks {
-			ti.interruptRerunNodes = append(ti.interruptRerunNodes, t.nodeKey)
-		}
-	} else {
-		for _, t := range completedTasks {
-			ti.interruptAfterNodes = append(ti.interruptAfterNodes, t.nodeKey)
-		}
-	}
-}
-
-func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
-	for _, completedTask := range completedTasks {
-		if completedTask.err != nil {
-			if info := isSubGraphInterrupt(completedTask.err); info != nil {
-				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
-				tempInfo.appendSignal(info.signal)
-				continue
-			}
-
-			ire := &core.InterruptSignal{}
-			if errors.As(completedTask.err, &ire) {
-				tempInfo.interruptTaskNodes[completedTask.nodeKey] = struct{}{}
-				// A downstream node can observe an interrupt while consuming a
-				// stream produced by an earlier node. Rerun the addressed node.
-				rerunNodeKey := r.interruptOriginNodeKey(completedTask, ire.Address)
-				tempInfo.interruptRerunNodes = appendIfNotExist(tempInfo.interruptRerunNodes, rerunNodeKey)
-				if ire.Info != nil {
-					tempInfo.interruptRerunExtra[rerunNodeKey] = ire.InterruptInfo.Info
-				}
-
-				tempInfo.appendSignal(ire)
-				continue
-			}
-
-			return wrapGraphNodeError(completedTask.nodeKey, completedTask.err)
-		}
-
-		for _, key := range r.interruptAfterNodes {
-			if key == completedTask.nodeKey {
-				tempInfo.interruptAfterNodes = append(tempInfo.interruptAfterNodes, key)
-				break
-			}
-		}
-	}
-	return nil
-}
-
-func (r *runner) interruptOriginNodeKey(completedTask *task, address Address) string {
-	taskAddress := GetCurrentAddress(completedTask.ctx)
-	if len(taskAddress) == 0 || taskAddress[len(taskAddress)-1].Type != AddressSegmentNode {
-		return completedTask.nodeKey
-	}
-
-	graphAddress := taskAddress[:len(taskAddress)-1]
-	if len(address) <= len(graphAddress) || !address[:len(graphAddress)].Equals(graphAddress) {
-		return completedTask.nodeKey
-	}
-
-	segment := address[len(graphAddress)]
-	if segment.Type == AddressSegmentNode {
-		if _, ok := r.chanSubscribeTo[segment.ID]; ok {
-			return segment.ID
-		}
-	}
-	return completedTask.nodeKey
-}
-
-func getHitKey(tasks []*task, keys []string) []string {
-	var ret []string
-	for _, t := range tasks {
-		for _, key := range keys {
-			if key == t.nodeKey {
-				ret = append(ret, t.nodeKey)
-			}
-		}
-	}
-	return ret
-}
-
 func (r *runner) handleInterrupt(
-	ctx context.Context,
-	tempInfo *interruptTempInfo,
-	nextTasks []*task,
-	channels map[string]channel,
-	isStream bool,
-	isSubGraph bool,
-	checkPointID *string,
-	publishSubGraphCheckpoint func(*subGraphInterruptError),
+	ctx context.Context, info *interruptTempInfo, nextTasks []*task,
+	channels map[string]channel, isStream, isSubGraph bool, checkPointID *string,
+	publish func(*subGraphInterruptError),
 ) error {
-	cp := &checkpoint{
-		Channels:       channels,
-		Inputs:         make(map[string]any),
-		SkipPreHandler: map[string]bool{},
-	}
-	if r.runCtx != nil {
-		// current graph has enable state
-		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
-			state.mu.Lock()
-			copiedState, err := deepCopyState(state.state)
-			state.mu.Unlock()
-			if err != nil {
-				return fmt.Errorf("failed to copy state: %w", err)
-			}
-			cp.State = copiedState
-		}
-	}
-
-	intInfo := &InterruptInfo{
-		State:           cp.State,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
-	}
-
-	info := cp.State
-
-	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
-	if err != nil {
-		return fmt.Errorf("failed to interrupt: %w", err)
-	}
-
-	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
-
-	for _, t := range nextTasks {
-		cp.Inputs[t.nodeKey] = t.input
-	}
-	err = r.checkPointer.convertCheckPoint(cp, isStream, is)
-	if err != nil {
-		return fmt.Errorf("failed to convert checkpoint: %w", err)
-	}
-	if isSubGraph {
-		subGraphInterrupt := &subGraphInterruptError{
-			Info:       intInfo,
-			CheckPoint: cp,
-			signal:     is,
-		}
-		if publishSubGraphCheckpoint != nil {
-			publishSubGraphCheckpoint(subGraphInterrupt)
-		}
-		return subGraphInterrupt
-	} else if checkPointID != nil {
-		err := r.checkPointer.set(ctx, *checkPointID, cp)
-		if err != nil {
-			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
-		}
-	}
-
-	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
-	return &interruptError{Info: intInfo}
-}
-
-// deepCopyState creates a deep copy of the state using serialization
-func deepCopyState(state any) (any, error) {
-	if state == nil {
-		return nil, nil
-	}
-	serializer := &serialization.InternalSerializer{}
-	data, err := serializer.Marshal(state)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal state: %w", err)
-	}
-
-	// Create new instance of the same type
-	stateType := reflect.TypeOf(state)
-	isPtr := stateType.Kind() == reflect.Ptr
-	if isPtr {
-		stateType = stateType.Elem()
-	}
-	newStatePtr := reflect.New(stateType).Interface()
-	if err := serializer.Unmarshal(data, newStatePtr); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
-	}
-	if isPtr {
-		return newStatePtr, nil
-	}
-	return reflect.ValueOf(newStatePtr).Elem().Interface(), nil
+	return r.saveInterrupt(ctx, info, &interruptTasks{pending: nextTasks}, &interruptSaveConfig{
+		channels: channels, isStream: isStream, isSubGraph: isSubGraph,
+		checkPointID: checkPointID, publish: publish,
+	})
 }
 
 func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
-	ctx context.Context,
-	tempInfo *interruptTempInfo,
-	completeTasks []*task,
-	checkPointID *string,
-	isSubGraph bool,
-	cm *channelManager,
-	isStream bool,
-	publishSubGraphCheckpoint func(*subGraphInterruptError),
+	ctx context.Context, info *interruptTempInfo, completeTasks, pendingTasks []*task,
+	checkPointID *string, isSubGraph bool, cm *channelManager, isStream bool,
+	publish func(*subGraphInterruptError),
 ) error {
-	var rerunTasks, subgraphTasks, otherTasks []*task
-	skipPreHandler := map[string]bool{}
-	for _, t := range completeTasks {
-		if _, ok := tempInfo.subGraphInterrupts[t.nodeKey]; ok {
-			subgraphTasks = append(subgraphTasks, t)
-			skipPreHandler[t.nodeKey] = true // subgraph won't run pre-handler again, but rerun nodes will
-			continue
-		}
-		if _, ok := tempInfo.interruptTaskNodes[t.nodeKey]; ok {
-			for _, key := range tempInfo.interruptRerunNodes {
-				if key == t.nodeKey {
-					rerunTasks = append(rerunTasks, t)
-					break
-				}
-			}
-			continue
-		}
-		rerun := false
-		for _, key := range tempInfo.interruptRerunNodes {
-			if key == t.nodeKey {
-				rerunTasks = append(rerunTasks, t)
-				rerun = true
-				break
-			}
-		}
-		if !rerun {
-			otherTasks = append(otherTasks, t)
-		}
+	tasks := &interruptTasks{pending: pendingTasks}
+	if err := r.forwardCompletedTasks(ctx, tasks.collect(info, completeTasks), isStream, cm); err != nil {
+		return fmt.Errorf("failed to forward completed tasks in interrupt: %w", err)
 	}
+	return r.saveInterrupt(ctx, info, tasks, &interruptSaveConfig{
+		channels: cm.channels, isStream: isStream, isSubGraph: isSubGraph,
+		checkPointID: checkPointID, publish: publish,
+	})
+}
 
-	// forward completed tasks
-	toValue, controls, err := r.resolveCompletedTasks(ctx, otherTasks, isStream, cm)
+// forwardCompletedTasks propagates successful results after node post-processing.
+// Scheduling and checkpointing remain separate so local waits can defer END.
+func (r *runner) forwardCompletedTasks(ctx context.Context, tasks []*task, isStream bool, cm *channelManager) error {
+	values, controls, err := r.resolveCompletedTasks(ctx, tasks, isStream, cm)
 	if err != nil {
-		return fmt.Errorf("failed to resolve completed tasks in interrupt: %w", err)
+		return err
 	}
-	err = cm.updateValues(ctx, toValue)
-	if err != nil {
-		return fmt.Errorf("failed to update values in interrupt: %w", err)
+	if err = cm.updateValues(ctx, values); err != nil {
+		return err
 	}
-	err = cm.updateDependencies(ctx, controls)
-	if err != nil {
-		return fmt.Errorf("failed to update dependencies in interrupt: %w", err)
-	}
-
-	cp := &checkpoint{
-		Channels:       cm.channels,
-		Inputs:         make(map[string]any),
-		SkipPreHandler: skipPreHandler,
-		SubGraphs:      make(map[string]*checkpoint),
-	}
-	if r.runCtx != nil {
-		// current graph has enable state
-		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
-			state.mu.Lock()
-			copiedState, err_ := deepCopyState(state.state)
-			state.mu.Unlock()
-			if err_ != nil {
-				return fmt.Errorf("failed to copy state: %w", err_)
-			}
-			cp.State = copiedState
-		}
-	}
-
-	intInfo := &InterruptInfo{
-		State:           cp.State,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
-	}
-
-	info := cp.State
-
-	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
-	if err != nil {
-		return fmt.Errorf("failed to interrupt: %w", err)
-	}
-
-	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
-
-	for _, t := range subgraphTasks {
-		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
-		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
-		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
-	}
-	cp.RerunNodes = append(cp.RerunNodes, tempInfo.interruptRerunNodes...)
-	for _, t := range rerunTasks {
-		if t.originalInput != nil {
-			cp.Inputs[t.nodeKey] = t.originalInput
-		}
-	}
-	if err = r.validateCheckpointIntegrity(cp); err != nil {
-		return fmt.Errorf("invalid checkpoint: %w", err)
-	}
-	err = r.checkPointer.convertCheckPoint(cp, isStream, is)
-	if err != nil {
-		return fmt.Errorf("failed to convert checkpoint: %w", err)
-	}
-	if isSubGraph {
-		subGraphInterrupt := &subGraphInterruptError{
-			Info:       intInfo,
-			CheckPoint: cp,
-			signal:     is,
-		}
-		if publishSubGraphCheckpoint != nil {
-			publishSubGraphCheckpoint(subGraphInterrupt)
-		}
-		return subGraphInterrupt
-	} else if checkPointID != nil {
-		err = r.checkPointer.set(ctx, *checkPointID, cp)
-		if err != nil {
-			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
-		}
-	}
-	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
-	return &interruptError{Info: intInfo}
+	return cm.updateDependencies(ctx, controls)
 }
 
 func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager, optMap map[string][]any) ([]*task, any, bool, error) {
-	writeChannelValues, controls, err := r.resolveCompletedTasks(ctx, completedTasks, isStream, cm)
-	if err != nil {
+	if err := r.forwardCompletedTasks(ctx, completedTasks, isStream, cm); err != nil {
 		return nil, nil, false, err
 	}
-	nodeMap, err := cm.updateAndGet(ctx, writeChannelValues, controls)
+	nodeMap, err := cm.getFromReadyChannels(ctx, !r.options.localInterrupts)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to update and get channels: %w", err)
+		return nil, nil, false, fmt.Errorf("failed to get ready channels: %w", err)
 	}
 	var nextTasks []*task
 	if len(nodeMap) > 0 {

@@ -186,34 +186,32 @@ func (c *channelManager) updateDependencies(_ context.Context, dependenciesMap m
 	return nil
 }
 
-func (c *channelManager) getFromReadyChannels(_ context.Context) (map[string]any, error) {
+func (c *channelManager) getFromReadyChannels(ctx context.Context, includeEnd bool) (map[string]any, error) {
 	result := make(map[string]any)
-	for target, ch := range c.channels {
-		v, ready, err := ch.get(c.isStream, target, c.edgeHandlerManager)
+	for target := range c.channels {
+		if target == END && !includeEnd {
+			continue
+		}
+		v, ready, err := c.getFromChannel(ctx, target)
 		if err != nil {
-			return nil, fmt.Errorf("get value from ready channel[%s] fail: %w", target, err)
+			return nil, err
 		}
 		if ready {
-			v, err = c.preNodeHandlerManager.handle(target, v, c.isStream)
-			if err != nil {
-				return nil, err
-			}
 			result[target] = v
 		}
 	}
 	return result, nil
 }
 
-func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map[string]any, dependencies map[string][]string) (map[string]any, error) {
-	err := c.updateValues(ctx, values)
+func (c *channelManager) getFromChannel(_ context.Context, target string) (any, bool, error) {
+	v, ready, err := c.channels[target].get(c.isStream, target, c.edgeHandlerManager)
 	if err != nil {
-		return nil, fmt.Errorf("update channel fail: %w", err)
+		return nil, false, fmt.Errorf("get value from ready channel[%s] fail: %w", target, err)
 	}
-	err = c.updateDependencies(ctx, dependencies)
-	if err != nil {
-		return nil, fmt.Errorf("update channel fail: %w", err)
+	if ready {
+		v, err = c.preNodeHandlerManager.handle(target, v, c.isStream)
 	}
-	return c.getFromReadyChannels(ctx)
+	return v, ready, err
 }
 
 func (c *channelManager) reportBranch(from string, skippedNodes []string) error {
