@@ -20,9 +20,11 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -33,6 +35,37 @@ type ParserForTest struct {
 
 func (p *ParserForTest) Parse(ctx context.Context, reader io.Reader, opts ...Option) ([]*schema.Document, error) {
 	return p.mock()
+}
+
+func TestExtParserRoutesHTTPURLUsingPath(t *testing.T) {
+	ctx := context.Background()
+	p, err := NewExtParser(ctx, &ExtParserConfig{
+		Parsers: map[string]Parser{
+			".md": &ParserForTest{mock: func() ([]*schema.Document, error) {
+				return []*schema.Document{{Content: "parsed Markdown"}}, nil
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		uri  string
+		want string
+	}{
+		{"https://example.com/notes.md?download=true", "parsed Markdown"},
+		{"http://example.com/notes%2Emd#heading", "parsed Markdown"},
+		{"https://example.com?name=notes.md", "raw"},
+		{"https://example.md", "raw"},
+		{"notes#draft.md", "parsed Markdown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.uri, func(t *testing.T) {
+			docs, err := p.Parse(ctx, strings.NewReader("raw"), WithURI(tt.uri))
+			require.NoError(t, err)
+			require.Len(t, docs, 1)
+			assert.Equal(t, tt.want, docs[0].Content)
+		})
+	}
 }
 
 func TestParser(t *testing.T) {
