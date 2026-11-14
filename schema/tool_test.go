@@ -197,6 +197,32 @@ func TestToolInfoSerialization(t *testing.T) {
 	assert.Equal(t, tiEmpty, result)
 }
 
+func TestToolInfoDecodeWithoutParamsClearsPreviousSchema(t *testing.T) {
+	previous := ToolInfo{
+		Name: "lookup",
+		ParamsOneOf: NewParamsOneOfByParams(map[string]*ParameterInfo{
+			"query": {Type: String, Required: true},
+		}),
+	}
+	next := &ToolInfo{Name: "ping", Desc: "Takes no arguments"}
+
+	t.Run("JSON", func(t *testing.T) {
+		data, err := json.Marshal(next)
+		require.NoError(t, err)
+		decoded := previous
+		require.NoError(t, json.Unmarshal(data, &decoded))
+		assert.Equal(t, next, &decoded)
+	})
+
+	t.Run("Gob", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, gob.NewEncoder(&buf).Encode(next))
+		decoded := previous
+		require.NoError(t, gob.NewDecoder(&buf).Decode(&decoded))
+		assert.Equal(t, next, &decoded)
+	})
+}
+
 func TestMCPToolResult_NilErrorCode(t *testing.T) {
 	result := &MCPToolResult{
 		CallID:  "test-call",

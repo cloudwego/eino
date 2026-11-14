@@ -194,6 +194,8 @@ func (t *ToolInfo) UnmarshalJSON(data []byte) error {
 		if t.ParamsOneOf.params == nil && t.ParamsOneOf.jsonschema == nil {
 			t.ParamsOneOf.params = map[string]*ParameterInfo{}
 		}
+	} else {
+		t.ParamsOneOf = nil
 	}
 	return nil
 }
@@ -232,6 +234,7 @@ func (t *ToolInfo) GobDecode(b []byte) error {
 	t.Desc = tmp.Desc
 	t.Extra = tmp.Extra
 	if !tmp.HasParamsOneOf {
+		t.ParamsOneOf = nil
 		return nil
 	}
 	t.ParamsOneOf = &ParamsOneOf{
