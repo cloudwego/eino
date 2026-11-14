@@ -255,7 +255,7 @@ func TestCoverage_WrapAgenticIterWithOnEnd(t *testing.T) {
 		})
 	}()
 
-	wrappedIter := wrapAgenticIterWithOnEnd(ctx, origIter)
+	wrappedIter := wrapExecutionRelay(ctx, origIter, executionCallbacks[*schema.AgenticMessage]{})
 
 	for {
 		_, ok := wrappedIter.Next()

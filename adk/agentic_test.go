@@ -924,10 +924,10 @@ func TestCoverage_FlowAgent_ResumeNotResumable(t *testing.T) {
 		},
 	}
 
-	fa := toTypedFlowAgent[*schema.AgenticMessage](agent)
+	binding := bindExecution[*schema.AgenticMessage](ctx, agent, nil)
 
 	info := &ResumeInfo{WasInterrupted: true}
-	iter := fa.Resume(ctx, info)
+	iter := resumeExecution(ctx, binding, info)
 
 	var capturedErr error
 	for {
@@ -944,7 +944,7 @@ func TestCoverage_FlowAgent_ResumeNotResumable(t *testing.T) {
 
 func TestCoverage_GenAgenticErrorIter(t *testing.T) {
 	testErr := errors.New("test agentic error")
-	iter := genAgenticErrorIter(testErr)
+	iter := typedErrorIter[*schema.AgenticMessage](testErr)
 
 	event, ok := iter.Next()
 	require.True(t, ok)
