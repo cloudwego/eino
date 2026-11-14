@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	icb "github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/schema"
 )
 
 // AgentCallbackInput represents the input passed to agent callbacks during OnStart.
@@ -199,4 +200,46 @@ func initAgenticCallbacks(ctx context.Context, agentName, agentType string, opts
 		return icb.ReuseHandlers(ctx, ri)
 	}
 	return icb.AppendHandlers(ctx, ri, o.handlers...)
+}
+
+// executionCallbacks preserves the distinct public callback payloads while sharing
+// their dispatch and iterator-copying mechanisms across execution paths.
+type executionCallbacks[M MessageType] struct{}
+
+func (executionCallbacks[M]) init(ctx context.Context, name, agentType string, opts ...AgentRunOption) context.Context {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		return initAgentCallbacks(ctx, name, agentType, opts...)
+	}
+	return initAgenticCallbacks(ctx, name, agentType, opts...)
+}
+
+func (executionCallbacks[M]) onStart(ctx context.Context, input *TypedAgentInput[M], info *ResumeInfo) context.Context {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		var messageInput *AgentInput
+		if input != nil {
+			messageInput = any(input).(*AgentInput)
+		}
+		return callbacks.OnStart(ctx, &AgentCallbackInput{Input: messageInput, ResumeInfo: info})
+	}
+	return callbacks.OnStart(ctx, &TypedAgentCallbackInput[M]{Input: input, ResumeInfo: info})
+}
+
+func (executionCallbacks[M]) onEnd(ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[M]]) {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		out := &AgentCallbackOutput{Events: any(iter).(*AsyncIterator[*AgentEvent])}
+		icb.On(ctx, out, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
+		return
+	}
+	out := &TypedAgentCallbackOutput[M]{Events: iter}
+	icb.On(ctx, out, icb.BuildOnEndHandleWithCopy(copyTypedCallbackOutput[M]), callbacks.TimingOnEnd, false)
+}
+
+func getTypedAgentType[M MessageType](agent TypedAgent[M]) string {
+	if typer, ok := any(agent).(components.Typer); ok {
+		return typer.GetType()
+	}
+	return ""
 }

@@ -50,8 +50,8 @@ func newUserMessage[M MessageType](query string) (M, error) {
 // TypedRunner is the primary entry point for executing an Agent.
 // It manages the agent's lifecycle, including starting, resuming, and checkpointing.
 //
-// Execution always goes through the flowAgent pipeline, which handles
-// multi-agent orchestration, callbacks, agent naming, run paths, and cancellation.
+// Execution uses the shared agent lifecycle for callbacks, event ownership,
+// run paths, and cancellation, with Message orchestration supplied by its binding.
 type TypedRunner[M MessageType] struct {
 	a               TypedAgent[M]
 	enableStreaming bool
@@ -161,38 +161,11 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		EnableStreaming: enableStreaming,
 	}
 
-	var zero M
-	if _, ok := any(zero).(*schema.Message); ok {
-		concreteAgent, _ := any(a).(Agent)
-		fa := toFlowAgent(ctx, concreteAgent)
-		if store != nil {
-			fa.checkPointStore = store
-		}
-		concreteInput := any(input).(*AgentInput)
-		ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
-		AddSessionValues(ctx, o.sessionValues)
-
-		iter := fa.Run(ctx, concreteInput, opts...)
-
-		if store == nil && o.cancelCtx == nil {
-			return any(iter).(*AsyncIterator[*TypedAgentEvent[M]])
-		}
-
-		niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-		go typedRunnerHandleIterImpl(enableStreaming, store, ctx, any(iter).(*AsyncIterator[*TypedAgentEvent[M]]), gen, o.checkPointID, o.cancelCtx)
-		return niter
-	}
-
-	fa := toTypedFlowAgent(a)
-	if store != nil {
-		fa.checkPointStore = store
-	}
-
+	binding := bindExecution(ctx, a, store)
 	ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
 	AddSessionValues(ctx, o.sessionValues)
 
-	iter := fa.Run(ctx, input, opts...)
-
+	iter := runExecution(ctx, binding, input, opts...)
 	if store == nil && o.cancelCtx == nil {
 		return iter
 	}
@@ -241,27 +214,8 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 		ctx = core.BatchResumeWithData(ctx, resumeData)
 	}
 
-	var zero M
-	if _, ok := any(zero).(*schema.Message); ok {
-		concreteAgent, _ := any(a).(Agent)
-		fa := toFlowAgent(ctx, concreteAgent)
-		ra, ok := Agent(fa).(ResumableAgent)
-		if !ok {
-			return nil, fmt.Errorf("agent %T does not support resume", a)
-		}
-		aIter := ra.Resume(ctx, resumeInfo, opts...)
-
-		niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
-		go typedRunnerHandleIterImpl(enableStreaming, store, ctx, any(aIter).(*AsyncIterator[*TypedAgentEvent[M]]), gen, &checkPointID, o.cancelCtx)
-		return niter, nil
-	}
-
-	fa := toTypedFlowAgent(a)
-	ra, ok := TypedAgent[M](fa).(TypedResumableAgent[M])
-	if !ok {
-		return nil, fmt.Errorf("agent %T does not support resume", a)
-	}
-	aIter := ra.Resume(ctx, resumeInfo, opts...)
+	binding := bindExecution(ctx, a, nil)
+	aIter := resumeExecution(ctx, binding, resumeInfo, opts...)
 
 	niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, aIter, gen, &checkPointID, o.cancelCtx)
