@@ -16,6 +16,8 @@
 
 package schema
 
+import "strconv"
+
 const (
 	docMetaDataKeySubIndexes   = "_sub_indexes"
 	docMetaDataKeyScore        = "_score"
@@ -68,16 +70,7 @@ func (d *Document) WithSubIndexes(indexes []string) *Document {
 // SubIndexes returns the sub indexes of the document.
 // can use doc.WithSubIndexes() to set the sub indexes.
 func (d *Document) SubIndexes() []string {
-	if d.MetaData == nil {
-		return nil
-	}
-
-	indexes, ok := d.MetaData[docMetaDataKeySubIndexes].([]string)
-	if ok {
-		return indexes
-	}
-
-	return nil
+	return documentMetadataSlice[string](d.MetaData[docMetaDataKeySubIndexes])
 }
 
 // WithScore sets the relevance score on the document, typically written by a
@@ -180,16 +173,28 @@ func (d *Document) WithDenseVector(vector []float64) *Document {
 // DenseVector returns the dense vector of the document.
 // can use doc.WithDenseVector() to set the dense vector.
 func (d *Document) DenseVector() []float64 {
-	if d.MetaData == nil {
+	return documentMetadataSlice[float64](d.MetaData[docMetaDataKeyDenseVector])
+}
+
+// JSON decodes arrays in MetaData into []any. Restore the element type without
+// changing the document's metadata or accepting partially valid arrays.
+func documentMetadataSlice[T any](value any) []T {
+	switch values := value.(type) {
+	case []T:
+		return values
+	case []any:
+		result := make([]T, len(values))
+		for i, item := range values {
+			typed, ok := item.(T)
+			if !ok {
+				return nil
+			}
+			result[i] = typed
+		}
+		return result
+	default:
 		return nil
 	}
-
-	vector, ok := d.MetaData[docMetaDataKeyDenseVector].([]float64)
-	if ok {
-		return vector
-	}
-
-	return nil
 }
 
 // WithSparseVector sets the sparse vector of the document, key indices -> value vector.
@@ -207,14 +212,22 @@ func (d *Document) WithSparseVector(sparse map[int]float64) *Document {
 // SparseVector returns the sparse vector of the document, key indices -> value vector.
 // can use doc.WithSparseVector() to set the sparse vector.
 func (d *Document) SparseVector() map[int]float64 {
-	if d.MetaData == nil {
+	switch values := d.MetaData[docMetaDataKeySparseVector].(type) {
+	case map[int]float64:
+		return values
+	case map[string]any:
+		// JSON object keys are strings, including integer vector indexes.
+		result := make(map[int]float64, len(values))
+		for key, item := range values {
+			index, err := strconv.Atoi(key)
+			number, ok := item.(float64)
+			if err != nil || !ok || strconv.Itoa(index) != key {
+				return nil
+			}
+			result[index] = number
+		}
+		return result
+	default:
 		return nil
 	}
-
-	sparse, ok := d.MetaData[docMetaDataKeySparseVector].(map[int]float64)
-	if ok {
-		return sparse
-	}
-
-	return nil
 }
