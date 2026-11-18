@@ -125,7 +125,13 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events 
 		return err
 	}
 
-	// Validate incoming events and dedup within batch.
+	idx, err := s.ensureIndexLocked(path)
+	if err != nil {
+		return err
+	}
+
+	// Validate the whole batch, including against stored events, before
+	// writing anything, so a rejected batch leaves the log unchanged.
 	seen := make(map[string]struct{}, len(events))
 	pending := make([]fileEvent, 0, len(events))
 	for _, e := range events {
@@ -136,6 +142,9 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events 
 			return adk.ErrDuplicateEventID
 		}
 		seen[e.EventID] = struct{}{}
+		if _, dup := idx.eventIDToLine[e.EventID]; dup {
+			return adk.ErrDuplicateEventID
+		}
 		if normalizeErr := adk.NormalizeSessionEventKind(e); normalizeErr != nil {
 			return normalizeErr
 		}
@@ -152,16 +161,8 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events 
 		return nil
 	}
 
-	idx, err := s.ensureIndexLocked(path)
-	if err != nil {
-		return err
-	}
-
 	var out *os.File
 	for _, event := range pending {
-		if _, dup := idx.eventIDToLine[event.eventID]; dup {
-			return adk.ErrDuplicateEventID
-		}
 		if out == nil {
 			out, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 			if err != nil {
