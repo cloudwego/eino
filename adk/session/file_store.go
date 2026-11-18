@@ -62,7 +62,8 @@ type FileStoreConfig struct {
 // (compact JSON) satisfies this constraint. Serializers that may emit \n or \r
 // in their output (e.g. GobSerializer, raw protobuf) are NOT compatible with
 // FileStore — use InMemoryStore or a custom store implementation instead.
-// AppendEvents will return an error if Data contains \n or \r.
+// AppendEvents will return an error if Data contains \n or \r, or if an
+// EventID or Kind contains a tab, \n or \r.
 //
 // FileStore does not implement CheckPointStore; runner checkpoints should use a
 // dedicated checkpoint store.
@@ -132,12 +133,19 @@ func (s *FileStore[M]) AppendEvents(_ context.Context, sessionID string, events 
 		if e == nil || e.EventID == "" {
 			return adk.ErrInvalidEventID
 		}
+		// EventID and Kind are written as raw tab-separated columns.
+		if strings.ContainsAny(e.EventID, "\t\r\n") {
+			return fmt.Errorf("%w: FileStore event_id must not contain tab, CR or LF", adk.ErrInvalidEventID)
+		}
 		if _, dup := seen[e.EventID]; dup {
 			return adk.ErrDuplicateEventID
 		}
 		seen[e.EventID] = struct{}{}
 		if normalizeErr := adk.NormalizeSessionEventKind(e); normalizeErr != nil {
 			return normalizeErr
+		}
+		if strings.ContainsAny(string(e.Kind), "\t\r\n") {
+			return fmt.Errorf("adk/session: FileStore event kind must not contain tab, CR or LF")
 		}
 		data, marshalErr := s.serializer.Marshal(e)
 		if marshalErr != nil {
