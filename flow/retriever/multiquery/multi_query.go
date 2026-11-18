@@ -47,9 +47,19 @@ var deduplicateFusion = func(ctx context.Context, docs [][]*schema.Document) ([]
 	var ret []*schema.Document
 	for i := range docs {
 		for j := range docs[i] {
-			if _, ok := m[docs[i][j].ID]; !ok {
-				m[docs[i][j].ID] = true
-				ret = append(ret, docs[i][j])
+			doc := docs[i][j]
+			// Documents without an ID (e.g. produced by TextParser) used to
+			// share the empty-string key and collapse into a single result,
+			// dropping every other query's recall. Fall back to the document
+			// content in that case. Prefix the keys so a real ID can never
+			// collide with a content-derived key.
+			key := "id:" + doc.ID
+			if doc.ID == "" {
+				key = "content:" + doc.Content
+			}
+			if _, ok := m[key]; !ok {
+				m[key] = true
+				ret = append(ret, doc)
 			}
 		}
 	}
