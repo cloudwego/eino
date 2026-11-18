@@ -320,3 +320,35 @@ func (newlineSerializer) Marshal(any) ([]byte, error) {
 func (newlineSerializer) Unmarshal([]byte, any) error {
 	return nil
 }
+
+func TestFileStoreRejectsLineDelimitersInEventIDAndKind(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		event *adk.SessionEvent[*schema.Message]
+	}{
+		{name: "newline in event id", event: testMessageEvent("bad\nid", "x")},
+		{name: "carriage return in event id", event: testMessageEvent("bad\rid", "x")},
+		{name: "tab in event id", event: testMessageEvent("bad\tid", "x")},
+		{name: "newline in extension kind", event: extensionEvent[*schema.Message]("custom", "x.bad\nkind")},
+		{name: "tab in extension kind", event: extensionEvent[*schema.Message]("custom", "x.bad\tkind")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewFileStore[*schema.Message](dir, nil)
+			require.NoError(t, err)
+			require.NoError(t, store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{testMessageEvent("ok", "ok")}))
+
+			err = store.AppendEvents(ctx, "s", []*adk.SessionEvent[*schema.Message]{tc.event})
+			require.Error(t, err)
+
+			// The session stays readable, including from a new FileStore.
+			reopened, err := NewFileStore[*schema.Message](dir, nil)
+			require.NoError(t, err)
+			res, err := reopened.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
+			require.NoError(t, err)
+			require.Len(t, res.Events, 1)
+			assert.Equal(t, "ok", res.Events[0].EventID)
+		})
+	}
+}
