@@ -116,3 +116,53 @@ func TestMultiQueryRetriever(t *testing.T) {
 		t.Fatal("default llm retrieve result is unexpected")
 	}
 }
+
+func TestDeduplicateFusionEmptyID(t *testing.T) {
+	ctx := context.Background()
+
+	// Different documents produced by parsers such as TextParser have no ID.
+	// They must not all collapse into a single result just because their IDs
+	// are the empty string.
+	docs := [][]*schema.Document{
+		{
+			{Content: "alpha from first query"},
+			{Content: "beta from first query"},
+		},
+		{
+			{Content: "gamma from second query"},
+		},
+	}
+
+	got, err := deduplicateFusion(ctx, docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 distinct empty-ID documents, got %d", len(got))
+	}
+}
+
+func TestDeduplicateFusionByID(t *testing.T) {
+	ctx := context.Background()
+
+	// Documents carrying an ID are still deduplicated by that ID across
+	// different query results.
+	docs := [][]*schema.Document{
+		{
+			{ID: "1", Content: "first"},
+			{ID: "2", Content: "second"},
+		},
+		{
+			{ID: "1", Content: "first again"},
+			{ID: "3", Content: "third"},
+		},
+	}
+
+	got, err := deduplicateFusion(ctx, docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unique-ID documents, got %d", len(got))
+	}
+}
