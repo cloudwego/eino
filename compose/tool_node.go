@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/bytedance/sonic"
+	"github.com/eino-contrib/jsonschema"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -427,8 +428,9 @@ type toolsTuple struct {
 	enhancedInvokableEndpoints  []EnhancedInvokableToolEndpoint
 	enhancedStreamableEndpoints []EnhancedStreamableToolEndpoint
 	// argsAliasMap stores reverse argument alias mappings for each tool.
-	// key: canonical tool name, value: map[aliasKey]canonicalKey (alias → canonical direction)
-	argsAliasMap map[string]map[string]string
+	// Outer key: canonical tool name. Middle key: dotted parent path ("" for
+	// top-level arguments). Inner map: alias → canonical leaf key, at that path.
+	argsAliasMap map[string]map[string]map[string]string
 	// canonicalNames stores the canonical name for each tool index
 	canonicalNames []string
 	// toolInfos stores the ToolInfo for each tool index, used for alias validation
@@ -436,8 +438,9 @@ type toolsTuple struct {
 }
 
 // remapArgs replaces alias keys in the JSON arguments string with canonical keys.
-// aliasMap: alias → canonical mapping
-func remapArgs(args string, aliasMap map[string]string) (string, error) {
+// aliasMap: dotted parent path → (alias → canonical leaf key) mapping. The empty
+// string parent path addresses top-level argument keys.
+func remapArgs(args string, aliasMap map[string]map[string]string) (string, error) {
 	if len(aliasMap) == 0 {
 		return args, nil
 	}
@@ -453,18 +456,7 @@ func remapArgs(args string, aliasMap map[string]string) (string, error) {
 	}
 
 	changed := false
-	for alias, canonical := range aliasMap {
-		if v, ok := m[alias]; ok {
-			// Only replace if canonical key doesn't exist.
-			// If both alias and canonical are present (e.g. {"q":"a","query":"b"}),
-			// the alias key is kept as-is and passed through as an unknown field.
-			if _, exists := m[canonical]; !exists {
-				m[canonical] = v
-				delete(m, alias)
-				changed = true
-			}
-		}
-	}
+	remapObjectKeys(m, aliasMap, "", &changed)
 
 	if !changed {
 		return args, nil
@@ -472,6 +464,55 @@ func remapArgs(args string, aliasMap map[string]string) (string, error) {
 
 	b, err := sonic.Marshal(m)
 	return string(b), err
+}
+
+// remapObjectKeys remaps alias keys for a single JSON object and recurses into
+// nested objects. path is the dotted path to the current object ("" for root).
+// A nested object is re-marshaled only when a key inside it changed, so argument
+// JSON that carries no aliases is returned unchanged.
+func remapObjectKeys(m map[string]json.RawMessage, aliasMap map[string]map[string]string, path string, changed *bool) {
+	if aliases, ok := aliasMap[path]; ok {
+		for alias, canonical := range aliases {
+			if v, present := m[alias]; present {
+				// Only replace if canonical key doesn't exist.
+				// If both alias and canonical are present (e.g. {"q":"a","query":"b"}),
+				// the alias key is kept as-is and passed through as an unknown field.
+				if _, exists := m[canonical]; !exists {
+					m[canonical] = v
+					delete(m, alias)
+					*changed = true
+				}
+			}
+		}
+	}
+
+	for key, raw := range m {
+		var nested map[string]json.RawMessage
+		if err := sonic.Unmarshal(raw, &nested); err != nil {
+			continue // not a JSON object; nothing to recurse into
+		}
+		childPath := key
+		if path != "" {
+			childPath = path + "." + key
+		}
+		subChanged := false
+		remapObjectKeys(nested, aliasMap, childPath, &subChanged)
+		if subChanged {
+			if nb, err := sonic.Marshal(nested); err == nil {
+				m[key] = nb
+				*changed = true
+			}
+		}
+	}
+}
+
+// splitDottedPath splits a dotted canonical path into its parent path and leaf
+// key. A path without a dot yields an empty parent (top-level argument).
+func splitDottedPath(path string) (parent, leaf string) {
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		return path[:i], path[i+1:]
+	}
+	return "", path
 }
 
 type convToolsParams struct {
@@ -486,7 +527,7 @@ type convToolsParams struct {
 }
 
 func (t *toolsTuple) applyAliasConfigs(aliasConfigs map[string]ToolAliasConfig) error {
-	t.argsAliasMap = make(map[string]map[string]string)
+	t.argsAliasMap = make(map[string]map[string]map[string]string)
 
 	sortedToolNames := make([]string, 0, len(aliasConfigs))
 	for toolName := range aliasConfigs {
@@ -537,26 +578,25 @@ func (t *toolsTuple) applyNameAliases(toolName string, toolIdx int, nameAliases 
 	return nil
 }
 
-// applyArgsAliases validates argument aliases against the tool schema and builds a reverse alias map for a single tool.
+// applyArgsAliases validates argument aliases against the tool schema and builds
+// a per-path reverse alias map (parent path → alias → canonical leaf) for a
+// single tool. Canonical keys may be dotted (e.g. "user.name") to address nested
+// object fields.
 func (t *toolsTuple) applyArgsAliases(toolName string, toolIdx int, argumentsAliases map[string][]string) error {
 	if len(argumentsAliases) == 0 {
 		return nil
 	}
 
-	schemaKeys := make(map[string]bool)
+	var rootSchema *jsonschema.Schema
 	if info := t.toolInfos[toolIdx]; info != nil && info.ParamsOneOf != nil {
 		js, err := info.ParamsOneOf.ToJSONSchema()
 		if err != nil {
 			return fmt.Errorf("tool '%s': failed to parse JSON schema for alias validation: %w", toolName, err)
 		}
-		if js != nil && js.Properties != nil {
-			for pair := js.Properties.Oldest(); pair != nil; pair = pair.Next() {
-				schemaKeys[pair.Key] = true
-			}
-		}
+		rootSchema = js
 	}
 
-	reverseMap := make(map[string]string)
+	pathAliases := make(map[string]map[string]string)
 	sortedCanonicals := make([]string, 0, len(argumentsAliases))
 	for canonical := range argumentsAliases {
 		sortedCanonicals = append(sortedCanonicals, canonical)
@@ -564,32 +604,74 @@ func (t *toolsTuple) applyArgsAliases(toolName string, toolIdx int, argumentsAli
 	sort.Strings(sortedCanonicals)
 
 	for _, canonical := range sortedCanonicals {
-		aliases := argumentsAliases[canonical]
-		if strings.TrimSpace(canonical) == "" {
+		trimmed := strings.TrimSpace(canonical)
+		if trimmed == "" {
 			return fmt.Errorf("tool '%s' has empty canonical argument key", toolName)
 		}
-		if strings.Contains(canonical, ".") {
-			return fmt.Errorf("tool '%s' has unsupported '.' in canonical argument key '%s': nested field matching is not yet supported",
-				toolName, canonical)
+		for _, seg := range strings.Split(trimmed, ".") {
+			if strings.TrimSpace(seg) == "" {
+				return fmt.Errorf("tool '%s' has empty path segment in canonical argument key '%s'", toolName, canonical)
+			}
 		}
+
+		parent, leaf := splitDottedPath(trimmed)
+		schemaKeys := schemaPropertiesAt(rootSchema, parent)
+		aliases := argumentsAliases[canonical]
+
 		for _, alias := range aliases {
 			if strings.TrimSpace(alias) == "" {
 				return fmt.Errorf("tool '%s' has empty argument alias for canonical key '%s'", toolName, canonical)
 			}
-			if schemaKeys[alias] {
+			if schemaKeys != nil && schemaKeys[alias] {
 				return fmt.Errorf("tool '%s' has arg alias '%s' that conflicts with existing schema property '%s'",
 					toolName, alias, alias)
 			}
-			if existingCanonical, conflict := reverseMap[alias]; conflict {
-				return fmt.Errorf("tool '%s' has conflicting arg alias '%s' mapped to both '%s' and '%s'",
-					toolName, alias, existingCanonical, canonical)
+			atPath := pathAliases[parent]
+			if atPath == nil {
+				atPath = make(map[string]string)
+				pathAliases[parent] = atPath
 			}
-			reverseMap[alias] = canonical
+			if existingLeaf, conflict := atPath[alias]; conflict {
+				existing := existingLeaf
+				if parent != "" {
+					existing = parent + "." + existingLeaf
+				}
+				return fmt.Errorf("tool '%s' has conflicting arg alias '%s' mapped to both '%s' and '%s'",
+					toolName, alias, existing, trimmed)
+			}
+			atPath[alias] = leaf
 		}
 	}
-	t.argsAliasMap[toolName] = reverseMap
+	t.argsAliasMap[toolName] = pathAliases
 
 	return nil
+}
+
+// schemaPropertiesAt returns the set of property names declared at the given
+// dotted path within a JSON schema, or nil if the path does not resolve to an
+// object (or the schema is unavailable).
+func schemaPropertiesAt(s *jsonschema.Schema, path string) map[string]bool {
+	cur := s
+	if path != "" {
+		for _, seg := range strings.Split(path, ".") {
+			if cur == nil || cur.Properties == nil {
+				return nil
+			}
+			next, ok := cur.Properties.Get(seg)
+			if !ok {
+				return nil
+			}
+			cur = next
+		}
+	}
+	if cur == nil || cur.Properties == nil {
+		return nil
+	}
+	keys := make(map[string]bool, cur.Properties.Len())
+	for pair := cur.Properties.Oldest(); pair != nil; pair = pair.Next() {
+		keys[pair.Key] = true
+	}
+	return keys
 }
 
 func convTools(ctx context.Context, params convToolsParams) (*toolsTuple, error) {
