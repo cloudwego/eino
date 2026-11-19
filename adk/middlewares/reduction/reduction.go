@@ -1189,7 +1189,7 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 	editTarget = append(editTarget, state.Messages[:start]...)
 
 	if clearAtLeastTokens > 0 {
-		needProcessPart = copyMessagesGeneric(state.Messages[start:end])
+		needProcessPart = internalschema.CloneMessages(state.Messages[start:end])
 	} else {
 		needProcessPart = state.Messages[start:end]
 	}
@@ -1374,7 +1374,7 @@ func sameStringSlice(a, b []string) bool {
 }
 
 func cloneMessageWithFreshID[M adk.MessageType](msg M) M {
-	cloned := copyMessagesGeneric([]M{msg})[0]
+	cloned := internalschema.CloneMessage(msg)
 	switch m := any(cloned).(type) {
 	case *schema.Message:
 		if m.Extra != nil {
@@ -1441,7 +1441,7 @@ func ensureMessageIDsOnCopiedMessages[M adk.MessageType](msgs []M) []M {
 			continue
 		}
 		if copied == nil {
-			copied = copyMessagesGeneric(msgs)
+			copied = internalschema.CloneMessages(msgs)
 		}
 		adk.EnsureMessageID(copied[i])
 	}
@@ -1684,16 +1684,6 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 			return
 		}
 	}
-}
-
-// copyMessagesGeneric uses the shared message clone contract: known fields are
-// copied, while opaque values and tool parameter definitions remain shared.
-func copyMessagesGeneric[M adk.MessageType](msgs []M) []M {
-	return internalschema.CloneMessages(msgs)
-}
-
-func copyMessages(msgs []*schema.Message) []*schema.Message {
-	return internalschema.CloneMessages(msgs)
 }
 
 // defaultTokenCounter estimates tokens, which treats one token as ~4 characters of text for common English text.
