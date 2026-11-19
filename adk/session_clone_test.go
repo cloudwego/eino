@@ -38,10 +38,11 @@ func TestCloneSessionEventPayloads(t *testing.T) {
 	})
 }
 
+type cloneTestPayload struct{ Value string }
+
 func testCloneSessionEventPayloads[M MessageType](t *testing.T, newMessage func(string) M, mutate func(M)) {
 	t.Helper()
-	type payload struct{ Value string }
-	extra, info, data := &payload{"extra"}, &payload{"info"}, &payload{"data"}
+	extra, info, data := &cloneTestPayload{"extra"}, &cloneTestPayload{"info"}, &cloneTestPayload{"data"}
 	var absent M
 	messages := []M{absent, newMessage("replacement")}
 	// Populate every payload at once: cloning preserves data even when the event
