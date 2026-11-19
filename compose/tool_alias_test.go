@@ -138,6 +138,90 @@ func TestArgumentsAliases(t *testing.T) {
 	assert.NotContains(t, args, "max_results")
 }
 
+type nestedUserArgs struct {
+	User struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+	} `json:"user"`
+}
+
+func TestNestedArgumentsAliases(t *testing.T) {
+	ctx := context.Background()
+
+	var gotName string
+	var gotAge int
+	searchTool := newTool(&schema.ToolInfo{
+		Name: "search",
+		Desc: "Search",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"user": {
+				Type: schema.Object,
+				SubParams: map[string]*schema.ParameterInfo{
+					"name": {Type: schema.String},
+					"age":  {Type: schema.Integer},
+				},
+			},
+		}),
+	}, func(ctx context.Context, args *nestedUserArgs) (string, error) {
+		gotName = args.User.Name
+		gotAge = args.User.Age
+		return "result", nil
+	})
+
+	config := &ToolsNodeConfig{
+		Tools: []tool.BaseTool{searchTool},
+		ToolAliases: map[string]ToolAliasConfig{
+			"search": {
+				ArgumentsAliases: map[string][]string{
+					"user.name": {"n"},
+					"user.age":  {"a"},
+				},
+			},
+		},
+	}
+
+	node, err := NewToolNode(ctx, config)
+	require.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID: "call_1",
+			Function: schema.FunctionCall{
+				Name:      "search",
+				Arguments: `{"user": {"n": "test", "a": 30}}`,
+			},
+		},
+	})
+
+	_, err = node.Invoke(ctx, input)
+	require.NoError(t, err)
+
+	assert.Equal(t, "test", gotName)
+	assert.Equal(t, 30, gotAge)
+}
+
+func TestRemapArgsNested(t *testing.T) {
+	aliasMap := map[string]map[string]string{
+		"user": {"n": "name", "a": "age"},
+	}
+
+	result, err := remapArgs(`{"user": {"n": "test", "a": 30}, "q": "keep"}`, aliasMap)
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(result), &m))
+
+	user, ok := m["user"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "test", user["name"])
+	assert.Equal(t, float64(30), user["age"])
+	assert.NotContains(t, user, "n")
+	assert.NotContains(t, user, "a")
+
+	// top-level keys are left untouched
+	assert.Equal(t, "keep", m["q"])
+}
+
 type emptyArgs struct{}
 
 func TestAliasConflict(t *testing.T) {
@@ -408,7 +492,7 @@ func TestToolAliasesE2E(t *testing.T) {
 }
 
 func TestRemapArgsEdgeCases(t *testing.T) {
-	aliasMap := map[string]string{"q": "query"}
+	aliasMap := map[string]map[string]string{"": {"q": "query"}}
 
 	t.Run("empty string", func(t *testing.T) {
 		result, err := remapArgs("", aliasMap)
