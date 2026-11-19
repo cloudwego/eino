@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -28,27 +29,30 @@ import (
 
 func TestCloneSessionEventPayloads(t *testing.T) {
 	t.Run("Message", func(t *testing.T) {
-		testCloneSessionEventPayloads(t, schema.UserMessage("original"), func(m *schema.Message) { m.Content = "changed" })
+		testCloneSessionEventPayloads(t, schema.UserMessage, func(m *schema.Message) { m.Content = "changed" })
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
-		message := &schema.AgenticMessage{ContentBlocks: []*schema.ContentBlock{{UserInputText: &schema.UserInputText{Text: "original"}}}}
-		testCloneSessionEventPayloads(t, message, func(m *schema.AgenticMessage) { m.ContentBlocks[0].UserInputText.Text = "changed" })
+		testCloneSessionEventPayloads(t, func(text string) *schema.AgenticMessage {
+			return &schema.AgenticMessage{ContentBlocks: []*schema.ContentBlock{{UserInputText: &schema.UserInputText{Text: text}}}}
+		}, func(m *schema.AgenticMessage) { m.ContentBlocks[0].UserInputText.Text = "changed" })
 	})
 }
 
-func testCloneSessionEventPayloads[M MessageType](t *testing.T, message M, mutate func(M)) {
+func testCloneSessionEventPayloads[M MessageType](t *testing.T, newMessage func(string) M, mutate func(M)) {
 	t.Helper()
-	opaque := &struct{ Value string }{Value: "shared"}
-	messages := []M{message}
+	type payload struct{ Value string }
+	extra, info, data := &payload{"extra"}, &payload{"info"}, &payload{"data"}
+	var absent M
+	messages := []M{absent, newMessage("replacement")}
 	// Populate every payload at once: cloning preserves data even when the event
 	// would be rejected at the write boundary for having multiple active payloads.
 	source := &SessionEvent[M]{
 		EventID: "event", TurnID: "turn", Timestamp: time.Now(), Kind: SessionEventMessage,
-		Extra: map[string]any{"value": opaque}, Message: message,
-		MessageStreamIncomplete: &MessageStreamIncompleteEvent[M]{Message: message, Error: "stream"},
+		Extra: map[string]any{"value": extra}, Message: newMessage("message"),
+		MessageStreamIncomplete: &MessageStreamIncompleteEvent[M]{Message: newMessage("incomplete"), Error: "stream"},
 		MessagesReplaced:        &messages,
-		MessageUpdated:          &MessageUpdatedEvent[M]{MessageID: "message", Message: message},
-		MessageInserted:         &MessageInsertedEvent[M]{BeforeMessageID: "before", Message: message},
+		MessageUpdated:          &MessageUpdatedEvent[M]{MessageID: "message", Message: newMessage("update")},
+		MessageInserted:         &MessageInsertedEvent[M]{BeforeMessageID: "before", Message: newMessage("insert")},
 		MessagesDeleted:         &MessagesDeletedEvent{MessageIDs: []string{"deleted"}},
 		Rollback:                &SessionRollbackEvent{ToEventID: "target"},
 		Lifecycle:               &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: StopReasonEndTurn}},
@@ -58,20 +62,45 @@ func testCloneSessionEventPayloads[M MessageType](t *testing.T, message M, mutat
 			Tool:  &ToolSpanMeta{Name: "tool"},
 		},
 		Cancel:    &CancelEvent{Reason: "cancel"},
-		Interrupt: &InterruptEvent{Contexts: []*InterruptContext{nil, {InterruptID: "interrupt", Info: opaque}}},
-		Extension: &SessionExtensionEvent{Data: opaque},
+		Interrupt: &InterruptEvent{Contexts: []*InterruptContext{nil, {InterruptID: "interrupt", Info: info}}},
+		Extension: &SessionExtensionEvent{Data: data},
 	}
 	cloned := cloneSessionEvent(source)
 	require.Equal(t, source, cloned)
-	require.Same(t, opaque, cloned.Extra["value"])
-	require.Same(t, opaque, cloned.Interrupt.Contexts[1].Info)
-	require.Same(t, opaque, cloned.Extension.Data)
-	mutate(message)
-	require.NotEqual(t, source.Message, cloned.Message)
-	require.Equal(t, cloned.Message, cloned.MessageStreamIncomplete.Message)
-	require.Equal(t, cloned.Message, (*cloned.MessagesReplaced)[0])
-	require.Equal(t, cloned.Message, cloned.MessageUpdated.Message)
-	require.Equal(t, cloned.Message, cloned.MessageInserted.Message)
+	require.NotSame(t, source, cloned)
+
+	// Every top-level payload pointer must be present in this fixture and owned
+	// by the clone. A new pointer field needs a representative payload here.
+	srcFields, dstFields := reflect.ValueOf(source).Elem(), reflect.ValueOf(cloned).Elem()
+	for i := 0; i < srcFields.NumField(); i++ {
+		src, dst := srcFields.Field(i), dstFields.Field(i)
+		if src.Kind() == reflect.Ptr {
+			name := srcFields.Type().Field(i).Name
+			require.False(t, src.IsNil(), "populate %s in the fixture", name)
+			require.NotSame(t, src.Interface(), dst.Interface(), name)
+		}
+	}
+	require.NotSame(t, source.Span.Model, cloned.Span.Model, "Span.Model")
+	require.NotSame(t, &(*source.MessagesReplaced)[0], &(*cloned.MessagesReplaced)[0], "MessagesReplaced backing array")
+	require.NotSame(t, &source.Interrupt.Contexts[0], &cloned.Interrupt.Contexts[0], "Interrupt.Contexts backing array")
+	require.Nil(t, (*cloned.MessagesReplaced)[0])
+	require.Same(t, extra, cloned.Extra["value"])
+	require.Same(t, info, cloned.Interrupt.Contexts[1].Info)
+	require.Same(t, data, cloned.Extension.Data)
+	for _, pair := range []struct {
+		text           string
+		source, cloned M
+	}{
+		{"message", source.Message, cloned.Message},
+		{"incomplete", source.MessageStreamIncomplete.Message, cloned.MessageStreamIncomplete.Message},
+		{"replacement", messages[1], (*cloned.MessagesReplaced)[1]},
+		{"update", source.MessageUpdated.Message, cloned.MessageUpdated.Message},
+		{"insert", source.MessageInserted.Message, cloned.MessageInserted.Message},
+	} {
+		require.NotSame(t, pair.source, pair.cloned, pair.text)
+		mutate(pair.source)
+		require.Equal(t, newMessage(pair.text), pair.cloned, pair.text)
+	}
 
 	source.Extra["value"] = "replaced"
 	source.MessageUpdated.MessageID = "changed"
@@ -88,7 +117,7 @@ func testCloneSessionEventPayloads[M MessageType](t *testing.T, message M, mutat
 	source.Interrupt.Contexts[1].InterruptID = "changed"
 	source.Interrupt.Contexts[1].Info = "replaced"
 	source.Extension.Data = "replaced"
-	require.Same(t, opaque, cloned.Extra["value"])
+	require.Same(t, extra, cloned.Extra["value"])
 	require.Equal(t, "message", cloned.MessageUpdated.MessageID)
 	require.Equal(t, "before", cloned.MessageInserted.BeforeMessageID)
 	require.Equal(t, "stream", cloned.MessageStreamIncomplete.Error)
@@ -101,8 +130,8 @@ func testCloneSessionEventPayloads[M MessageType](t *testing.T, message M, mutat
 	require.Equal(t, "tool", cloned.Span.Tool.Name)
 	require.Equal(t, "cancel", cloned.Cancel.Reason)
 	require.Equal(t, "interrupt", cloned.Interrupt.Contexts[1].InterruptID)
-	require.Same(t, opaque, cloned.Interrupt.Contexts[1].Info)
-	require.Same(t, opaque, cloned.Extension.Data)
+	require.Same(t, info, cloned.Interrupt.Contexts[1].Info)
+	require.Same(t, data, cloned.Extension.Data)
 }
 
 func TestCloneSessionEventPresence(t *testing.T) {

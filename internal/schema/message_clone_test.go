@@ -187,6 +187,54 @@ func TestCloneMessageOpaqueValuesAreNotCopied(t *testing.T) {
 	require.Contains(t, cloned.Extra["self"], "payload", "opaque map values still refer to the original map")
 }
 
+// Exercise the boundary between mutable tool metadata and the tool's shared
+// parameter definitions through both supported message representations.
+func TestCloneMessageToolSearchResult(t *testing.T) {
+	check := func(t *testing.T, cloneResult func(*schema.ToolSearchResult) *schema.ToolSearchResult) {
+		t.Helper()
+		definition := &jsonschema.Schema{Type: "object"}
+		definition.Items = definition
+		type annotation struct{ Label string }
+		labels := []annotation{{Label: "original"}}
+		tool := &schema.ToolInfo{Name: "search", Desc: "original", ParamsOneOf: schema.NewParamsOneOfByJSONSchema(definition),
+			Extra: map[string]any{"labels": labels, "optional": (*annotation)(nil)},
+		}
+		original := &schema.ToolSearchResult{Tools: []*schema.ToolInfo{nil, tool}}
+		cloned := cloneResult(original)
+		require.Equal(t, original, cloned)
+		require.NotSame(t, original, cloned)
+		require.NotSame(t, &original.Tools[0], &cloned.Tools[0])
+		copiedTool := cloned.Tools[1]
+		require.NotSame(t, tool, copiedTool)
+		require.Same(t, tool.ParamsOneOf, copiedTool.ParamsOneOf)
+		require.Same(t, &labels[0], &copiedTool.Extra["labels"].([]annotation)[0], "opaque slice retains its backing array")
+		require.IsType(t, (*annotation)(nil), copiedTool.Extra["optional"])
+		require.Nil(t, copiedTool.Extra["optional"])
+
+		cloned.Tools[0] = copiedTool
+		copiedTool.Name, copiedTool.Desc = "other", "updated"
+		delete(copiedTool.Extra, "labels")
+		copiedTool.Extra["new"] = true
+		require.Nil(t, original.Tools[0])
+		require.Equal(t, "search", tool.Name)
+		require.Equal(t, "original", tool.Desc)
+		require.Contains(t, tool.Extra, "labels")
+		require.NotContains(t, tool.Extra, "new")
+	}
+	t.Run("Message", func(t *testing.T) {
+		check(t, func(result *schema.ToolSearchResult) *schema.ToolSearchResult {
+			msg := &schema.Message{UserInputMultiContent: []schema.MessageInputPart{{ToolSearchResult: result}}}
+			return CloneMessage(msg).UserInputMultiContent[0].ToolSearchResult
+		})
+	})
+	t.Run("AgenticMessage", func(t *testing.T) {
+		check(t, func(result *schema.ToolSearchResult) *schema.ToolSearchResult {
+			msg := &schema.AgenticMessage{ContentBlocks: []*schema.ContentBlock{{ToolSearchFunctionToolResult: &schema.ToolSearchFunctionToolResult{Result: result}}}}
+			return CloneMessage(msg).ContentBlocks[0].ToolSearchFunctionToolResult.Result
+		})
+	})
+}
+
 func TestCloneMessageConcurrentIndependentEdits(t *testing.T) {
 	source := &schema.Message{
 		Content: "original", Extra: map[string]any{"key": "original"},
