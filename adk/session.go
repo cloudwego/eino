@@ -76,31 +76,36 @@ const (
 // same store instance and session are rejected with ErrSessionBusy. Callers must
 // serialize operations across store instances and processes.
 type SessionEventStore[M MessageType] interface {
+	// LoadEvents returns caller-owned events. Eino normalizes and validates their
+	// Kind and payload before replay, including compatibility with historical kinds.
 	LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
+	// AppendEvents persists events whose Kind and payload have already been
+	// validated by Eino. Implementations handle storage integrity, including event
+	// IDs, duplicates, and serialization; they need not infer or validate Kind.
+	// Callers writing directly to a store must supply complete, valid events.
 	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
 }
 
-type openSessionRequest struct {
-	sessionID string
-}
-
-type openSessionResult[M MessageType] struct {
-	handle sessionHandle[M]
-}
-
-type sessionHandle[M MessageType] interface {
-	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	appendEvents(ctx context.Context, events []*SessionEvent[M]) error
-	close(ctx context.Context) error
+func openRunnerSession[M MessageType](ctx context.Context, store SessionEventStore[M], sessionID string) (*sessionHandle[M], error) {
+	if store == nil {
+		return nil, errors.New("adk: session store is nil")
+	}
+	return openLocalSession(ctx, store, sessionID)
 }
 
 // LoadSessionEventsRequest configures typed event loading pagination and direction.
 type LoadSessionEventsRequest struct {
-	// After is the last-seen event_id used as an exclusive append-position cursor.
+	// After is the event_id used as the exclusive starting cursor in the traversal
+	// direction controlled by Reverse. The cursor event itself is not returned:
+	// forward traversal loads events appended after it; reverse traversal loads
+	// events appended before it. Empty starts at the oldest event when Reverse is
+	// false, or the newest event when Reverse is true.
 	After string
 	// Limit is the maximum number of events to return. 0 means no limit.
 	Limit int
-	// Reverse, when true, returns events in newest-first order.
+	// Reverse controls the traversal direction: false traverses from oldest to
+	// newest, true from newest to oldest. Order is based on append position,
+	// not event timestamps.
 	Reverse bool
 	// Kinds filters events by their Kind field. Empty means no kind filter.
 	Kinds []SessionEventKind
@@ -108,9 +113,12 @@ type LoadSessionEventsRequest struct {
 
 // LoadSessionEventsResult is the response from SessionEventStore.LoadEvents.
 type LoadSessionEventsResult[M MessageType] struct {
-	// Events are typed SessionEvent values owned by the caller.
+	// Events are returned in traversal order: oldest to newest when Reverse is
+	// false, newest to oldest when Reverse is true. The values are owned by the caller.
 	Events []*SessionEvent[M]
-	// Next is the event_id of the last event in this page in the direction of travel.
+	// Next is the event_id of the last event in this page when more events remain
+	// in the traversal direction. Pass it as After with the same Reverse value to
+	// load the next page. Empty means there are no more events in that direction.
 	Next string
 }
 
@@ -120,6 +128,9 @@ type LoadSessionEventsResult[M MessageType] struct {
 // persisted event.
 // Exactly one semantic content field is active per event. The MessagesReplaced field
 // uses pointer-to-slice semantics (nil = absent, non-nil = active replacement).
+// Persistence queues copy known payload structs and containers. Extra values
+// and opaque application payloads remain shared and must not be mutated after
+// publication. Tool parameter definitions are also shared as read-only data.
 type SessionEvent[M MessageType] struct {
 	// EventID is the canonical, session-unique identity of this event.
 	// Assigned exactly once by the Runner at event materialization
@@ -315,10 +326,8 @@ const (
 
 type RetryStatus struct {
 	// Type identifies whether a retry-like mechanism is still retrying or has
-	// exhausted its attempts. It remains a string for gob compatibility with
-	// previously persisted SessionEvent bytes; compare it with the RetryStatus*
-	// constants.
-	Type string `json:"type,omitempty"`
+	// exhausted its attempts.
+	Type RetryStatusType `json:"type,omitempty"`
 }
 
 // RetryStatusType identifies whether a retry-like mechanism is still retrying
@@ -333,23 +342,28 @@ const (
 )
 
 type SpanEvent struct {
-	SpanID       string `json:"span_id"`
+	// SpanID identifies one call and is shared by its start and end events.
+	SpanID string `json:"span_id"`
+	// ParentSpanID links a tool call to its model span. For model failover,
+	// it identifies the group of attempts; that group has no separate span event.
 	ParentSpanID string `json:"parent_span_id,omitempty"`
 
 	Kind SpanKind `json:"kind"`
-	Name string   `json:"name,omitempty"`
 
+	// StartedAt is also carried on the end event so its duration is self-contained.
 	StartedAt time.Time `json:"started_at,omitempty"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
+	// EndedAt is zero on start events.
+	EndedAt time.Time `json:"ended_at,omitempty"`
 
-	TTFTMS int64 `json:"ttft_ms,omitempty"`
-
-	Status string `json:"status,omitempty"`
-	Err    string `json:"err,omitempty"`
+	// Status is empty on start events. A model response rejected by the retry
+	// policy ends with SpanStatusError, even if the model call itself succeeded.
+	Status SpanStatus `json:"status,omitempty"`
+	// Err describes this call's failure or retry-policy rejection.
+	Err string `json:"err,omitempty"`
 
 	// Model and Tool are mutually exclusive: exactly one must be non-nil for
-	// every Span-carrying SessionEvent. ClassifySessionEvent enforces this
-	// invariant.
+	// every Span-carrying SessionEvent. Eino validates this before emitting or
+	// replaying the event.
 	Model *ModelSpanMeta `json:"model,omitempty"`
 	Tool  *ToolSpanMeta  `json:"tool,omitempty"`
 }
@@ -361,21 +375,45 @@ const (
 	SpanKindTool  SpanKind = "tool"
 )
 
+// SpanStatus is the outcome of a completed model or tool call.
+type SpanStatus = string
+
+const (
+	SpanStatusOK        SpanStatus = "ok"
+	SpanStatusError     SpanStatus = "error"
+	SpanStatusCancelled SpanStatus = "cancelled"
+)
+
+// ModelSpanMeta describes one model-call attempt, not an aggregate across retries.
 type ModelSpanMeta struct {
+	// Provider is the component type reported by the current failover model,
+	// when available. It is not necessarily a provider name and is empty when
+	// no failover model is present in the context.
 	Provider string `json:"provider,omitempty"`
 	// Model is the model name from options (model.WithModel). Best-effort: empty
 	// if the user configures model name directly on the ChatModel implementation
 	// without passing model.WithModel in call-site options.
-	Model                    string            `json:"model,omitempty"`
-	Attempt                  int               `json:"attempt,omitempty"`
-	ModelRequestStartEventID string            `json:"model_request_start_event_id,omitempty"`
-	Usage                    *ModelUsage       `json:"usage,omitempty"`
-	FinishReason             string            `json:"finish_reason,omitempty"`
-	Timeout                  *ModelTimeoutMeta `json:"timeout,omitempty"`
-	Accepted                 bool              `json:"accepted"`
+	Model string `json:"model,omitempty"`
+	// Attempt is one-based. It is the failover attempt when a failover context
+	// exists; otherwise it is the retry attempt. It does not count nested retries
+	// separately within a failover attempt.
+	Attempt int `json:"attempt,omitempty"`
+	// ModelRequestStartEventID links an end event to its start event.
+	ModelRequestStartEventID string `json:"model_request_start_event_id,omitempty"`
+	// TTFTMS measures milliseconds from request start to the first successfully
+	// received stream chunk, which need not contain a text token. Set only on
+	// stream end events; zero also covers no chunk or a duration below 1 ms.
+	TTFTMS int64 `json:"ttft_ms,omitempty"`
+	// Usage is the usage reported by this attempt's response, including responses
+	// rejected by the retry policy. It has the same meaning as message usage and
+	// is not accumulated across attempts. Nil means unavailable, not zero usage.
+	Usage        *schema.TokenUsage `json:"usage,omitempty"`
+	FinishReason string             `json:"finish_reason,omitempty"`
+	Timeout      *ModelTimeoutMeta  `json:"timeout,omitempty"`
 }
 
-// ModelTimeoutMeta records timeout details for a model span that ended with a timeout-aware error.
+// ModelTimeoutMeta records timeout details supplied by an error implementing
+// ModelTimeoutSpanMeta() (phase string, timeout time.Duration, elapsed time.Duration, chunksReceived int).
 type ModelTimeoutMeta struct {
 	// Phase identifies which part of the model call exceeded its timeout budget.
 	Phase string `json:"phase,omitempty"`
@@ -385,14 +423,6 @@ type ModelTimeoutMeta struct {
 	ElapsedMS int64 `json:"elapsed_ms,omitempty"`
 	// ChunksReceived is the number of stream chunks delivered before the timeout.
 	ChunksReceived int `json:"chunks_received,omitempty"`
-}
-
-type ModelUsage struct {
-	InputTokens              int                `json:"input_tokens,omitempty"`
-	OutputTokens             int                `json:"output_tokens,omitempty"`
-	CacheCreationInputTokens int                `json:"cache_creation_input_tokens,omitempty"`
-	CacheReadInputTokens     int                `json:"cache_read_input_tokens,omitempty"`
-	Raw                      *schema.TokenUsage `json:"raw,omitempty"`
 }
 
 // ToolSpanMeta carries the operational metadata of a single tool call span.
@@ -513,6 +543,10 @@ type MessagesDeletedEvent struct {
 // DefaultSessionEventIDGenerator[M] rather than allocating a UUID directly,
 // so that the default behavior stays consistent with the framework default.
 //
+// The event argument is read-only; the returned string is the generator's only
+// supported output. For streaming messages, the draft has Kind=message but no
+// Message yet, because identity is reserved before the stream is materialized.
+//
 // A returned empty event_id is treated as a generator-side contract violation
 // (ErrSessionEventIDGeneratorEmpty); the runner fails closed before the
 // event is appended to the store.
@@ -586,7 +620,6 @@ func init() {
 	schema.RegisterName[*SpanEvent]("_eino_adk_span_event")
 	schema.RegisterName[*ModelSpanMeta]("_eino_adk_model_span_meta")
 	schema.RegisterName[*ModelTimeoutMeta]("_eino_adk_model_timeout_meta")
-	schema.RegisterName[*ModelUsage]("_eino_adk_model_usage")
 	schema.RegisterName[*ToolSpanMeta]("_eino_adk_tool_span_meta")
 	// Note: SessionEventVariant and MessageStreamRef are not registered here
 	// because they never reach a serializer: checkpoint sanitizers strip
@@ -634,9 +667,6 @@ func decodeSessionEvent[M MessageType](data []byte) (*SessionEvent[M], error) {
 }
 
 func encodeSessionEventWithSerializer[M MessageType](event *SessionEvent[M], serializer schema.Serializer) ([]byte, error) {
-	if err := NormalizeSessionEventKind(event); err != nil {
-		return nil, err
-	}
 	return normalizeSerializer(serializer).Marshal(event)
 }
 
@@ -645,18 +675,7 @@ func decodeSessionEventWithSerializer[M MessageType](data []byte, serializer sch
 	if err := normalizeSerializer(serializer).Unmarshal(data, &event); err != nil {
 		return nil, err
 	}
-	if err := NormalizeSessionEventKind(&event); err != nil {
-		return nil, err
-	}
 	return &event, nil
-}
-
-func snapshotSessionEvent[M MessageType](event *SessionEvent[M]) (*SessionEvent[M], error) {
-	data, err := encodeSessionEvent(event)
-	if err != nil {
-		return nil, err
-	}
-	return decodeSessionEvent[M](data)
 }
 
 func normalizeSerializer(serializer schema.Serializer) schema.Serializer {
@@ -674,24 +693,19 @@ func makeInputSessionEvent[M MessageType](msg M) *SessionEvent[M] {
 	return &SessionEvent[M]{Timestamp: newEventTimestamp(), Kind: SessionEventMessage, Message: msg}
 }
 
-// toSessionEvent converts an internal TypedAgentEvent into the persistence format.
-// Returns nil if the event has no persistable content.
-func toSessionEvent[M MessageType](event *TypedAgentEvent[M]) *SessionEvent[M] {
-	se, _ := toSessionEventChecked(event)
-	return se
-}
-
+// toSessionEventChecked copies an already-prepared session event for persistence.
+// It does not allocate identity, fill metadata, or modify the live agent event.
 func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEvent[M], error) {
 	if event == nil {
 		return nil, nil
 	}
 	if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
-		se, err := normalizeAgentSessionEvent(event)
-		if err != nil {
-			return nil, err
+		se := *event.SessionEventVariant.Event
+		if se.EventID == "" {
+			return nil, ErrInvalidEventID
 		}
-		if err := ValidateEmittedSessionEventKind(&se); err != nil {
-			return nil, err
+		if se.Kind == "" {
+			return nil, errors.New("emitted session event must set non-empty Kind")
 		}
 		return &se, nil
 	}
@@ -700,44 +714,6 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 		return nil, errors.New("persistable AgentEvent has no SessionEventVariant.Event")
 	}
 	return nil, nil
-}
-
-func normalizeAgentSessionEvent[M MessageType](event *TypedAgentEvent[M]) (SessionEvent[M], error) {
-	return normalizeAgentSessionEventWithAssigner(event, func(*SessionEvent[M]) (string, error) {
-		return uuid.NewString(), nil
-	})
-}
-
-// normalizeAgentSessionEventWithAssigner unifies the agent event / session
-// event identity, allocating a fresh ID via assign when neither side carries
-// one. The assigner is invoked with the (still-empty-ID) draft session event
-// so callers may route allocation through SessionEventIDGenerator[M].
-func normalizeAgentSessionEventWithAssigner[M MessageType](
-	event *TypedAgentEvent[M],
-	assign func(*SessionEvent[M]) (string, error),
-) (SessionEvent[M], error) {
-	if event == nil || event.SessionEventVariant == nil || event.SessionEventVariant.Event == nil {
-		return SessionEvent[M]{}, errors.New("missing session event")
-	}
-	if assign == nil {
-		assign = func(*SessionEvent[M]) (string, error) { return uuid.NewString(), nil }
-	}
-	se := *event.SessionEventVariant.Event
-	if se.EventID == "" {
-		id, err := assign(&se)
-		if err != nil {
-			return SessionEvent[M]{}, err
-		}
-		if id == "" {
-			return SessionEvent[M]{}, ErrSessionEventIDGeneratorEmpty
-		}
-		se.EventID = id
-	}
-	if se.Timestamp.IsZero() {
-		se.Timestamp = newEventTimestamp()
-	}
-	event.SessionEventVariant.Event = &se
-	return se, nil
 }
 
 func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M]) error {
@@ -753,88 +729,71 @@ func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M])
 	return nil
 }
 
-// ClassifySessionEvent derives the canonical event kind from the single active
-// payload carried by event.
-func ClassifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKind, error) {
+// classifySessionEvent checks that exactly one payload is active before
+// validating its contents and deriving the canonical event kind.
+func classifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKind, error) {
 	if event == nil {
 		return "", errors.New("nil session event")
 	}
-	var kinds []SessionEventKind
-	add := func(kind SessionEventKind) {
-		kinds = append(kinds, kind)
+	if count := countActiveSessionEventPayloads(event); count != 1 {
+		return "", fmt.Errorf("session event must have exactly one active payload, got %d", count)
 	}
-	if !isNilMessage(event.Message) {
-		add(SessionEventMessage)
-	}
-	if event.MessageStreamIncomplete != nil {
+
+	switch {
+	case !isNilMessage(event.Message):
+		return SessionEventMessage, nil
+	case event.MessageStreamIncomplete != nil:
 		if isNilMessage(event.MessageStreamIncomplete.Message) {
 			return "", errors.New("message stream incomplete event must set non-nil Message")
 		}
-		add(SessionEventMessageStreamIncomplete)
-	}
-	if event.MessagesReplaced != nil {
-		add(SessionEventMessagesReplaced)
-	}
-	if event.MessageUpdated != nil {
-		add(SessionEventMessageUpdated)
-	}
-	if event.MessageInserted != nil {
-		add(SessionEventMessageInserted)
-	}
-	if event.MessagesDeleted != nil {
+		return SessionEventMessageStreamIncomplete, nil
+	case event.MessagesReplaced != nil:
+		return SessionEventMessagesReplaced, nil
+	case event.MessageUpdated != nil:
+		return SessionEventMessageUpdated, nil
+	case event.MessageInserted != nil:
+		return SessionEventMessageInserted, nil
+	case event.MessagesDeleted != nil:
 		if err := validateMessageIDs("MessagesDeleted.MessageIDs", event.MessagesDeleted.MessageIDs); err != nil {
 			return "", err
 		}
-		add(SessionEventMessagesDeleted)
-	}
-	if event.Rollback != nil {
+		return SessionEventMessagesDeleted, nil
+	case event.Rollback != nil:
 		if event.EventID == "" {
 			return "", errors.New("rollback session event must set non-empty EventID")
 		}
 		if event.Rollback.ToEventID == "" {
 			return "", errors.New("rollback session event must set non-empty ToEventID")
 		}
-		add(SessionEventRollback)
-	}
-	if event.Lifecycle != nil {
+		return SessionEventRollback, nil
+	case event.Lifecycle != nil:
 		switch event.Lifecycle.State {
 		case SessionRunStateRunning:
-			add(SessionEventSessionStatusRunning)
+			return SessionEventSessionStatusRunning, nil
 		case SessionRunStateIdle:
-			add(SessionEventSessionStatusIdle)
+			return SessionEventSessionStatusIdle, nil
 		default:
 			return "", fmt.Errorf("unknown lifecycle state %q", event.Lifecycle.State)
 		}
-	}
-	if event.Error != nil {
-		add(SessionEventSessionError)
-	}
-	if event.Span != nil {
-		kind, err := classifySpanSessionEvent(event.Span)
-		if err != nil {
-			return "", err
-		}
-		add(kind)
-	}
-	if event.Cancel != nil {
-		add(SessionEventCancel)
-	}
-	if event.Interrupt != nil {
-		add(SessionEventInterrupt)
-	}
-	if event.Extension != nil {
+	case event.Error != nil:
+		return SessionEventSessionError, nil
+	case event.Span != nil:
+		return classifySpanSessionEvent(event.Span)
+	case event.Cancel != nil:
+		return SessionEventCancel, nil
+	case event.Interrupt != nil:
+		return SessionEventInterrupt, nil
+	case event.Extension != nil:
 		if event.Kind == "" {
 			return "", errors.New("session extension event must set kind")
 		}
 		if !strings.HasPrefix(string(event.Kind), SessionEventExtensionPrefix) {
 			return "", fmt.Errorf("session extension event kind %q must start with %q", event.Kind, SessionEventExtensionPrefix)
 		}
-		add(event.Kind)
+		return event.Kind, nil
+	default:
+		return "", errors.New("session event has no recognized payload")
 	}
-	if len(kinds) != 1 {
-		return "", fmt.Errorf("session event must have exactly one active payload, got %d", len(kinds))
-	}
-	return kinds[0], nil
 }
 
 func countActiveSessionEventPayloads[M MessageType](event *SessionEvent[M]) int {
@@ -918,7 +877,7 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 	}
 }
 
-// NormalizeSessionEventKind fills an empty Kind from the active payload and
+// normalizeSessionEventKind fills an empty Kind from the active payload and
 // rejects mismatches between Kind and payload shape.
 //
 // Unknown kinds (kinds not in the known set and not prefixed with "x.") with
@@ -926,11 +885,11 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 // mechanism: legacy data (e.g. pre-refactor "turn_end") and events written by
 // newer code with kinds we don't yet understand are accepted as-is rather than
 // failing replay.
-func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
+func normalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	if event != nil && event.Kind != "" && !isKnownSessionEventKind(event.Kind) && countActiveSessionEventPayloads(event) == 0 {
 		return nil
 	}
-	kind, err := ClassifySessionEvent(event)
+	kind, err := classifySessionEvent(event)
 	if err != nil {
 		return err
 	}
@@ -941,16 +900,16 @@ func NormalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	return nil
 }
 
-// ValidateEmittedSessionEventKind enforces that runtime-emitted session events
+// validateEmittedSessionEventKind enforces that runtime-emitted session events
 // carry an explicit Kind matching their active payload.
-func ValidateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) error {
+func validateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	if event == nil {
 		return errors.New("nil session event")
 	}
 	if event.Kind == "" {
 		return errors.New("emitted session event must set non-empty Kind")
 	}
-	if err := NormalizeSessionEventKind(event); err != nil {
+	if err := normalizeSessionEventKind(event); err != nil {
 		return err
 	}
 	return nil
@@ -1024,10 +983,15 @@ func applySessionEventExtraProvider[M MessageType](
 }
 
 type sessionEventEnvelopeOptions struct {
-	PreserveEventID       bool
-	AllowPayloadlessDraft bool
+	// RequireEventID rejects an empty EventID instead of allocating one.
+	// Existing IDs are always retained, regardless of this option.
+	RequireEventID bool
 }
 
+// prepareSessionEventEnvelope fills Timestamp, merges Extra, and assigns an ID
+// when needed. It does not inspect or validate Kind or payloads.
+// Callers pass a nil provider for events that were prepared earlier; stream
+// materialization may supply a provider while preserving the reserved ID.
 func prepareSessionEventEnvelope[M MessageType](
 	ctx context.Context,
 	event *SessionEvent[M],
@@ -1038,33 +1002,70 @@ func prepareSessionEventEnvelope[M MessageType](
 	if event == nil {
 		return nil
 	}
-	if opts.AllowPayloadlessDraft {
-		if event.Kind == "" {
-			return errors.New("session event draft must set non-empty Kind")
-		}
-	} else {
-		if err := NormalizeSessionEventKind(event); err != nil {
-			return err
-		}
-	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = newEventTimestamp()
 	}
 	if err := applySessionEventExtraProvider(ctx, event, provider); err != nil {
 		return err
 	}
-	if opts.PreserveEventID && event.EventID == "" {
-		return ErrInvalidEventID
-	}
-	if event.EventID == "" && !opts.PreserveEventID {
+	if event.EventID == "" {
+		if opts.RequireEventID {
+			return ErrInvalidEventID
+		}
 		if err := assignSessionEventID(ctx, event, gen); err != nil {
 			return err
 		}
 	}
-	if opts.AllowPayloadlessDraft {
-		return nil
+	return nil
+}
+
+// prepareReceivedSessionEvent copies an event received from an agent or SendEvent.
+// Drafts without an ID may omit Kind; identified events must supply it. Both
+// paths check payload consistency before filling metadata. Only drafts run the
+// configured callbacks, so forwarding an identified event does not rerun them.
+// The copy is returned even on error for the caller's error delivery path.
+func prepareReceivedSessionEvent[M MessageType](
+	ctx context.Context,
+	event *SessionEvent[M],
+	sc sessionEventContext[M],
+) (*SessionEvent[M], error) {
+	if event == nil {
+		return nil, nil
 	}
-	return ValidateEmittedSessionEventKind(event)
+	prepared := *event
+	stampSessionEventTurnID(&prepared, sc.turnID)
+	var gen SessionEventIDGenerator[M]
+	var provider SessionEventExtraProvider[M]
+	if prepared.EventID == "" {
+		if err := normalizeSessionEventKind(&prepared); err != nil {
+			return &prepared, err
+		}
+		gen, provider = sc.generator, sc.provider
+	} else if err := validateEmittedSessionEventKind(&prepared); err != nil {
+		return &prepared, err
+	}
+	err := prepareSessionEventEnvelope(ctx, &prepared, gen, provider, sessionEventEnvelopeOptions{})
+	return &prepared, err
+}
+
+// reserveMessageStreamRef allocates identity before the message is available.
+// The temporary callback draft always has Kind=message and no payload; only the
+// returned reference is emitted. Materialization must reuse its EventID.
+func reserveMessageStreamRef[M MessageType](
+	ctx context.Context,
+	timestamp time.Time,
+	sc sessionEventContext[M],
+) (*MessageStreamRef, error) {
+	draft := &SessionEvent[M]{Timestamp: timestamp, TurnID: sc.turnID, Kind: SessionEventMessage}
+	if err := prepareSessionEventEnvelope(ctx, draft, sc.generator, sc.provider, sessionEventEnvelopeOptions{}); err != nil {
+		return nil, err
+	}
+	return &MessageStreamRef{
+		EventID:   draft.EventID,
+		TurnID:    draft.TurnID,
+		Timestamp: draft.Timestamp,
+		Kind:      SessionEventMessage,
+	}, nil
 }
 
 // assignSessionEventID assigns the EventID of a draft SessionEvent[M] using
@@ -1073,9 +1074,9 @@ func prepareSessionEventEnvelope[M MessageType](
 // in ADK; runner / wrappers paths must route every draft through this helper
 // before sending or persisting the event.
 //
-// Callers MUST construct the draft with EventID == "" and populate every
-// other relevant session-local field (Kind, payload, timestamp) so the
-// generator sees a complete draft. A nil event is a no-op.
+// Callers MUST construct the draft with EventID == "" and populate all
+// other available session-local fields (Kind, payload, timestamp). Streaming
+// reservations have Kind=message and no payload yet. A nil event is a no-op.
 //
 // On generator-side contract violations, the helper returns:
 //   - ErrSessionEventIDGeneratorEmpty when gen returns an empty id;
@@ -1151,10 +1152,9 @@ func stampSessionEventTurnID[M MessageType](event *SessionEvent[M], turnID strin
 }
 
 type sessionEventPersister[M MessageType] struct {
-	ctx       context.Context
-	handle    sessionHandle[M]
-	sessionID string
-	pending   []*SessionEvent[M]
+	ctx     context.Context
+	handle  *sessionHandle[M]
+	pending []*SessionEvent[M]
 
 	mu  sync.Mutex
 	err error
@@ -1162,13 +1162,11 @@ type sessionEventPersister[M MessageType] struct {
 
 func newSessionEventPersister[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 ) *sessionEventPersister[M] {
 	return &sessionEventPersister[M]{
-		ctx:       ctx,
-		handle:    handle,
-		sessionID: sessionID,
+		ctx:    ctx,
+		handle: handle,
 	}
 }
 
@@ -1176,14 +1174,10 @@ func (p *sessionEventPersister[M]) enqueueAsync(event *SessionEvent[M]) error {
 	if event == nil || event.EventID == "" {
 		return p.getErr()
 	}
-	snapshot, err := snapshotSessionEvent(event)
-	if err != nil {
-		p.setErr(err)
-		return err
-	}
 	if err := p.getErr(); err != nil {
 		return err
 	}
+	snapshot := cloneSessionEvent(event)
 	p.mu.Lock()
 	p.pending = append(p.pending, snapshot)
 	p.mu.Unlock()
@@ -1194,11 +1188,7 @@ func (p *sessionEventPersister[M]) commitBoundary(event *SessionEvent[M]) error 
 	if event == nil || event.EventID == "" {
 		return p.getErr()
 	}
-	snapshot, err := snapshotSessionEvent(event)
-	if err != nil {
-		p.setErr(err)
-		return err
-	}
+	snapshot := cloneSessionEvent(event)
 	if err := p.flushPending(); err != nil {
 		return err
 	}
@@ -1490,23 +1480,20 @@ func RollbackSession[M MessageType](
 			opt(&cfg)
 		}
 	}
-	openResult, err := openRunnerSession[M](ctx, store, sessionID)
+	handle, err := openRunnerSession[M](ctx, store, sessionID)
 	if err != nil {
 		return err
 	}
-	if openResult == nil || openResult.handle == nil {
-		return ErrSessionBusy
-	}
-	defer openResult.handle.close(ctx)
+	defer handle.close(ctx)
 
-	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, openResult.handle, sessionID, defaultLoadPageSize)
+	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, handle, defaultLoadPageSize)
 	if err != nil {
 		return err
 	}
 	target, head, err := resolveRollbackTarget[M](activeEvents, targetEventID)
 	if err != nil {
 		if errors.Is(err, ErrRollbackTargetNotFound) {
-			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, openResult.handle, sessionID, targetEventID, defaultLoadPageSize)
+			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, handle, targetEventID, defaultLoadPageSize)
 			if evidenceErr != nil {
 				return evidenceErr
 			}
@@ -1534,7 +1521,7 @@ func RollbackSession[M MessageType](
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
 		return err
 	}
-	if err := openResult.handle.appendEvents(ctx, []*SessionEvent[M]{rb}); err != nil {
+	if err := handle.appendEvents(ctx, []*SessionEvent[M]{rb}); err != nil {
 		return err
 	}
 	if cfg.CheckPointStore != nil {
@@ -1552,8 +1539,7 @@ func RollbackSession[M MessageType](
 // applied as reconstructed state.
 func reconstructSessionState[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 	pageSize int,
 ) (*sessionReconstructResult[M], error) {
 	allEvents, err := loadSessionEventsForReconstructionReverse[M](ctx, handle, pageSize)
@@ -1573,7 +1559,7 @@ func reconstructSessionState[M MessageType](
 
 func loadSessionEventsForReconstructionReverse[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
+	handle *sessionHandle[M],
 	pageSize int,
 ) ([]*SessionEvent[M], error) {
 	return loadProjectedSessionEventsReverse(ctx, handle, pageSize, true)
@@ -1581,8 +1567,7 @@ func loadSessionEventsForReconstructionReverse[M MessageType](
 
 func loadActiveSessionEventsReverse[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 	pageSize int,
 ) ([]*SessionEvent[M], error) {
 	return loadProjectedSessionEventsReverse(ctx, handle, pageSize, false)
@@ -1590,7 +1575,7 @@ func loadActiveSessionEventsReverse[M MessageType](
 
 func loadProjectedSessionEventsReverse[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
+	handle *sessionHandle[M],
 	pageSize int,
 	stopAtMessagesReplaced bool,
 ) ([]*SessionEvent[M], error) {
@@ -1692,8 +1677,7 @@ const (
 
 func findPhysicalRollbackTargetEvidence[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 	targetEventID string,
 	pageSize int,
 ) (rollbackTargetEvidence, error) {

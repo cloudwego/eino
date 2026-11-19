@@ -35,6 +35,7 @@ import (
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal/gmap"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1188,7 +1189,7 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 	editTarget = append(editTarget, state.Messages[:start]...)
 
 	if clearAtLeastTokens > 0 {
-		needProcessPart = copyMessagesGeneric(state.Messages[start:end])
+		needProcessPart = internalschema.CloneMessages(state.Messages[start:end])
 	} else {
 		needProcessPart = state.Messages[start:end]
 	}
@@ -1373,7 +1374,7 @@ func sameStringSlice(a, b []string) bool {
 }
 
 func cloneMessageWithFreshID[M adk.MessageType](msg M) M {
-	cloned := copyMessagesGeneric([]M{msg})[0]
+	cloned := internalschema.CloneMessage(msg)
 	switch m := any(cloned).(type) {
 	case *schema.Message:
 		if m.Extra != nil {
@@ -1440,7 +1441,7 @@ func ensureMessageIDsOnCopiedMessages[M adk.MessageType](msgs []M) []M {
 			continue
 		}
 		if copied == nil {
-			copied = copyMessagesGeneric(msgs)
+			copied = internalschema.CloneMessages(msgs)
 		}
 		adk.EnsureMessageID(copied[i])
 	}
@@ -1683,103 +1684,6 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 			return
 		}
 	}
-}
-
-// copyMessagesGeneric deep-copies a slice of messages.
-func copyMessagesGeneric[M adk.MessageType](msgs []M) []M {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		origMsgs := any(msgs).([]*schema.Message)
-		copied := copyMessages(origMsgs)
-		return any(copied).([]M)
-	case *schema.AgenticMessage:
-		origMsgs := any(msgs).([]*schema.AgenticMessage)
-		copied := copyAgenticMessages(origMsgs)
-		return any(copied).([]M)
-	}
-	panic("unreachable")
-}
-
-func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage {
-	resp := make([]*schema.AgenticMessage, len(msgs))
-	for i, msg := range msgs {
-		if msg == nil {
-			continue
-		}
-		copied := &schema.AgenticMessage{
-			Role:         msg.Role,
-			ResponseMeta: msg.ResponseMeta,
-		}
-		if msg.ContentBlocks != nil {
-			copied.ContentBlocks = make([]*schema.ContentBlock, len(msg.ContentBlocks))
-			for j, block := range msg.ContentBlocks {
-				if block == nil {
-					continue
-				}
-				cb := *block
-				// Deep copy mutable sub-fields
-				if block.FunctionToolCall != nil {
-					ftc := *block.FunctionToolCall
-					cb.FunctionToolCall = &ftc
-				}
-				if block.FunctionToolResult != nil {
-					ftr := *block.FunctionToolResult
-					if block.FunctionToolResult.Content != nil {
-						ftr.Content = make([]*schema.FunctionToolResultContentBlock, len(block.FunctionToolResult.Content))
-						for k, rb := range block.FunctionToolResult.Content {
-							if rb != nil {
-								rbCopy := *rb // shallow copy: Image/Audio/Video/File sub-fields are not deep-copied.
-								// This is safe because the clear logic replaces entire blocks rather than
-								// mutating media fields in-place. Custom ClearHandlers should follow the same pattern.
-								if rb.Text != nil {
-									t := *rb.Text
-									rbCopy.Text = &t
-								}
-								rbCopy.Extra = gmap.Clone(rb.Extra)
-								ftr.Content[k] = &rbCopy
-							}
-						}
-					}
-					cb.FunctionToolResult = &ftr
-				}
-				cb.Extra = gmap.Clone(block.Extra)
-				copied.ContentBlocks[j] = &cb
-			}
-		}
-		copied.Extra = gmap.Clone(msg.Extra)
-		resp[i] = copied
-	}
-	return resp
-}
-
-func copyMessages(msgs []*schema.Message) []*schema.Message {
-	resp := make([]*schema.Message, len(msgs))
-	for i, msg := range msgs {
-		if msg == nil {
-			continue
-		}
-		copied := &schema.Message{
-			Role:                     msg.Role,
-			Content:                  msg.Content,
-			MultiContent:             msg.MultiContent,
-			UserInputMultiContent:    msg.UserInputMultiContent,
-			AssistantGenMultiContent: msg.AssistantGenMultiContent,
-			Name:                     msg.Name,
-			ToolCalls:                nil,
-			ToolCallID:               msg.ToolCallID,
-			ToolName:                 msg.ToolName,
-			ResponseMeta:             msg.ResponseMeta,
-			ReasoningContent:         msg.ReasoningContent,
-			Extra:                    nil,
-		}
-		if msg.ToolCalls != nil {
-			copied.ToolCalls = append(make([]schema.ToolCall, 0, len(msg.ToolCalls)), msg.ToolCalls...)
-		}
-		copied.Extra = gmap.Clone(msg.Extra)
-		resp[i] = copied
-	}
-	return resp
 }
 
 // defaultTokenCounter estimates tokens, which treats one token as ~4 characters of text for common English text.

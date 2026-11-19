@@ -28,11 +28,11 @@ var localSessionAdmission = struct {
 	locked map[string]bool
 }{locked: make(map[string]bool)}
 
-func openLocalSession[M MessageType](_ context.Context, store SessionEventStore[M], req *openSessionRequest) (*openSessionResult[M], error) {
-	if store == nil || req == nil || req.sessionID == "" {
+func openLocalSession[M MessageType](_ context.Context, store SessionEventStore[M], sessionID string) (*sessionHandle[M], error) {
+	if store == nil || sessionID == "" {
 		return nil, ErrSessionBusy
 	}
-	key := localSessionAdmissionKey(store, req.sessionID)
+	key := localSessionAdmissionKey(store, sessionID)
 	if key == "" {
 		return nil, ErrSessionBusy
 	}
@@ -42,12 +42,10 @@ func openLocalSession[M MessageType](_ context.Context, store SessionEventStore[
 		return nil, ErrSessionBusy
 	}
 	localSessionAdmission.locked[key] = true
-	return &openSessionResult[M]{
-		handle: &localSessionHandle[M]{
-			key:       key,
-			store:     store,
-			sessionID: req.sessionID,
-		},
+	return &sessionHandle[M]{
+		key:       key,
+		store:     store,
+		sessionID: sessionID,
 	}, nil
 }
 
@@ -73,7 +71,7 @@ func releaseLocalSession(key string) {
 	localSessionAdmission.mu.Unlock()
 }
 
-type localSessionHandle[M MessageType] struct {
+type sessionHandle[M MessageType] struct {
 	key       string
 	store     SessionEventStore[M]
 	sessionID string
@@ -82,14 +80,23 @@ type localSessionHandle[M MessageType] struct {
 	closed bool
 }
 
-func (h *localSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error) {
+func (h *sessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error) {
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	result, err := h.store.LoadEvents(ctx, h.sessionID, req)
+	if err != nil || result == nil {
+		return result, err
+	}
+	for i, event := range result.Events {
+		if err := normalizeSessionEventKind(event); err != nil {
+			return nil, fmt.Errorf("adk: load session event at index %d: %w", i, err)
+		}
+	}
+	return result, nil
 }
 
-func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*SessionEvent[M]) error {
+func (h *sessionHandle[M]) appendEvents(ctx context.Context, events []*SessionEvent[M]) error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -97,13 +104,15 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*Sess
 	}
 	h.mu.Unlock()
 
-	if err := h.store.AppendEvents(ctx, h.sessionID, events); err != nil {
-		return err
+	for i, event := range events {
+		if err := validateEmittedSessionEventKind(event); err != nil {
+			return fmt.Errorf("adk: append session event at index %d: %w", i, err)
+		}
 	}
-	return nil
+	return h.store.AppendEvents(ctx, h.sessionID, events)
 }
 
-func (h *localSessionHandle[M]) close(context.Context) error {
+func (h *sessionHandle[M]) close(context.Context) error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()

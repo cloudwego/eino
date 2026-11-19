@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -276,14 +277,14 @@ func testHelperFunctions[M adk.MessageType](t *testing.T) {
 		}
 	})
 
-	t.Run("copyMessagesGeneric", func(t *testing.T) {
+	t.Run("CloneMessages", func(t *testing.T) {
 		original := []M{
 			makeAssistantMsgWithToolCallsG[M]([]testToolCall{
 				{ID: "c1", Name: "t1", Arguments: `{"k":"v"}`},
 			}),
 			makeUserMsgG[M]("user text"),
 		}
-		copied := copyMessagesGeneric(original)
+		copied := internalschema.CloneMessages(original)
 		require.Len(t, copied, 2)
 
 		// Modify the copy's tool call arguments.
@@ -588,7 +589,7 @@ func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
 		},
 	}
 
-	copied := copyMessagesGeneric(original)
+	copied := internalschema.CloneMessages(original)
 	require.Len(t, copied, 1)
 
 	// Mutate the copy and verify original is unchanged.
@@ -1341,8 +1342,7 @@ func TestReductionGeneric(t *testing.T) {
 	})
 }
 
-// testCopyNilMessage verifies that copyMessagesGeneric does not panic when
-// the input slice contains nil message elements (regression test).
+// testCopyNilMessage verifies that CloneMessages preserves nil elements in a mixed slice.
 func testCopyNilMessage[M adk.MessageType](t *testing.T) {
 	var zero M
 	var msgs []M
@@ -1362,7 +1362,7 @@ func testCopyNilMessage[M adk.MessageType](t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		copied := copyMessagesGeneric(msgs)
+		copied := internalschema.CloneMessages(msgs)
 		assert.Len(t, copied, 3)
 		assert.Nil(t, copied[1], "nil element should be preserved as nil")
 	})

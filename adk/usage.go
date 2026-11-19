@@ -57,16 +57,3 @@ func assistantFinishReason[M MessageType](msg M) string {
 		return ""
 	}
 }
-
-func modelUsageFromAssistant[M MessageType](msg M) *ModelUsage {
-	usage := assistantTokenUsage(msg)
-	if usage == nil {
-		return nil
-	}
-	return &ModelUsage{
-		InputTokens:          usage.PromptTokens,
-		OutputTokens:         usage.CompletionTokens,
-		CacheReadInputTokens: usage.PromptTokenDetails.CachedTokens,
-		Raw:                  usage,
-	}
-}

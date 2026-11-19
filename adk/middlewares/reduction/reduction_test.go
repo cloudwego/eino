@@ -36,6 +36,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -2580,10 +2581,10 @@ func TestGetMsgClearedFlag(t *testing.T) {
 
 func TestCopyMessages(t *testing.T) {
 	t.Run("test empty messages", func(t *testing.T) {
-		result := copyMessages(nil)
+		result := internalschema.CloneMessages([]*schema.Message(nil))
 		assert.Len(t, result, 0)
 
-		result = copyMessages([]*schema.Message{})
+		result = internalschema.CloneMessages([]*schema.Message{})
 		assert.Len(t, result, 0)
 	})
 
@@ -2606,7 +2607,7 @@ func TestCopyMessages(t *testing.T) {
 			{Type: schema.ChatMessagePartTypeText, Text: "assistant gen"},
 		}
 
-		result := copyMessages([]*schema.Message{msg})
+		result := internalschema.CloneMessages([]*schema.Message{msg})
 		assert.Len(t, result, 1)
 		assert.NotEqual(t, &msg, result[0])
 		assert.Len(t, result[0].ToolCalls, 1)
@@ -3687,7 +3688,7 @@ type reductionRewritePersistModel struct {
 
 func (m *reductionRewritePersistModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	m.calls++
-	m.inputs = append(m.inputs, copyMessages(input))
+	m.inputs = append(m.inputs, internalschema.CloneMessages(input))
 	if m.calls == 1 {
 		return schema.AssistantMessage("", []schema.ToolCall{
 			{

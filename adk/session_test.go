@@ -109,18 +109,6 @@ func (s *blockingAppendStore) AppendEvents(ctx context.Context, sessionID string
 	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
-func (s *blockingAppendStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.sessionID
-	}
-	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}}, nil
-}
-
-func (s *blockingAppendStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return s.AppendEventsForSession(ctx, "", events)
-}
-
 // withTestEventID assigns a fresh UUIDv4 to the SessionEvent if its EventID is
 // empty. Tests that construct SessionEvent literals directly bypass the Runner
 // allocation paths, so they must still satisfy the AppendEvents wire contract.
@@ -391,7 +379,7 @@ func (s *sessionHelperStore) AppendEventsForSession(_ context.Context, _ string,
 		if e == nil || e.EventID == "" {
 			return ErrInvalidEventID
 		}
-		if err := NormalizeSessionEventKind(e); err != nil {
+		if err := normalizeSessionEventKind(e); err != nil {
 			return err
 		}
 		if err := s.kindErr[e.Kind]; err != nil {
@@ -512,87 +500,33 @@ func (s *sessionHelperStore) LoadEventsForSession(_ context.Context, _ string, o
 	return &LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
-func (s *sessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.sessionID
-	}
-	return &openSessionResult[*schema.Message]{
-		handle: &testSessionHandle{store: s, sessionID: sessionID},
-	}, nil
-}
-
-func (s *sessionHelperStore) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	return s.LoadEventsForSession(ctx, "", req)
-}
-
-func (s *sessionHelperStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return s.AppendEventsForSession(ctx, "", events)
-}
-
-func (s *sessionHelperStore) close(context.Context) error { return nil }
-
-type testSessionHandle struct {
-	store     *sessionHelperStore
-	sessionID string
-}
-
-type recordingSessionHandle struct {
-	sessionHandle[*schema.Message]
+type sessionLoadRecorder struct {
+	SessionEventStore[Message]
 	loadRequests []*LoadSessionEventsRequest
 }
 
-func (h *recordingSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
+func (s *sessionLoadRecorder) LoadEvents(ctx context.Context, sessionID string, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
 	recorded := *req
 	recorded.Kinds = append([]SessionEventKind(nil), req.Kinds...)
-	h.loadRequests = append(h.loadRequests, &recorded)
-	return h.sessionHandle.loadEvents(ctx, req)
+	s.loadRequests = append(s.loadRequests, &recorded)
+	return s.SessionEventStore.LoadEvents(ctx, sessionID, req)
 }
 
-func (h *testSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	if req == nil {
-		req = &LoadSessionEventsRequest{}
-	}
-	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
-}
-
-func (h *testSessionHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
-}
-
-func (h *testSessionHandle) close(context.Context) error { return nil }
-
-type legacyMessageTestStore interface {
-	AppendEventsForSession(context.Context, string, []*SessionEvent[*schema.Message]) error
-	LoadEventsForSession(context.Context, string, *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error)
-}
-
-type legacyMessageTestHandle struct {
-	store     legacyMessageTestStore
-	sessionID string
-}
-
-func (h *legacyMessageTestHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	if req == nil {
-		req = &LoadSessionEventsRequest{}
-	}
-	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
-}
-
-func (h *legacyMessageTestHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
-}
-
-func (h *legacyMessageTestHandle) close(context.Context) error { return nil }
-
-func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, store SessionEventStore[M], sessionID string) sessionHandle[M] {
+func mustOpenTestSession[M MessageType](t testing.TB, ctx context.Context, store SessionEventStore[M], sessionID string) *sessionHandle[M] {
 	t.Helper()
-	res, err := openLocalSession(ctx, store, &openSessionRequest{sessionID: sessionID})
+	handle, err := openLocalSession(ctx, store, sessionID)
 	require.NoError(t, err)
-	require.NotNil(t, res)
-	require.NotNil(t, res.handle)
-	t.Cleanup(func() { _ = res.handle.close(ctx) })
-	return res.handle
+	require.NotNil(t, handle)
+	t.Cleanup(func() { _ = handle.close(ctx) })
+	return handle
+}
+
+func reconstructTestSession(t testing.TB, ctx context.Context, store SessionEventStore[Message], sessionID string, pageSize int) (*sessionReconstructResult[Message], error) {
+	t.Helper()
+	handle, err := openRunnerSession(ctx, store, sessionID)
+	require.NoError(t, err)
+	defer handle.close(ctx)
+	return reconstructSessionState(ctx, handle, pageSize)
 }
 
 func buildTestKindSet(kinds []SessionEventKind) map[SessionEventKind]struct{} {
@@ -1142,14 +1076,68 @@ func TestAttack_RunClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
 	require.Empty(t, secondErrs, "session handle must be released after checkpoint decode failure")
 }
 
+func TestRunnerReleasesSessionAfterPanic(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		kind   SessionEventKind
+		resume bool
+		async  bool
+	}{
+		{"run preparation", SessionEventSessionStatusRunning, false, false},
+		{"run input", SessionEventMessage, false, false},
+		{"run event loop", SessionEventSessionStatusIdle, false, true},
+		{"resume preparation", SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"), true, false},
+		{"resume before handoff", SessionEventSessionStatusRunning, true, false},
+		{"resume event loop", SessionEventSessionStatusIdle, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newSessionHelperStore()
+			const sessionID = "panic-session"
+			cfg := RunnerConfig{Agent: &runnerInterruptAgent{}, SessionStore: store, SessionID: sessionID, CheckPointStore: store}
+			if tc.resume {
+				drainSessionEvents(t, NewRunner(ctx, cfg).Query(ctx, "interrupt"))
+			}
+			var concurrentOpenErr error
+			cfg.SessionConfig = &SessionConfig[Message]{EventIDGenerator: func(ctx context.Context, e *SessionEvent[Message]) (string, error) {
+				if e.Kind == tc.kind {
+					opened, err := openRunnerSession[Message](ctx, store, sessionID)
+					concurrentOpenErr = err
+					if err == nil {
+						_ = opened.close(ctx)
+					}
+					panic("session callback panic")
+				}
+				return DefaultSessionEventIDGenerator(ctx, e)
+			}}
+			runner := NewRunner(ctx, cfg)
+			start := func() *AsyncIterator[*AgentEvent] {
+				if tc.resume {
+					iter, err := runner.Resume(ctx, "")
+					require.NoError(t, err)
+					return iter
+				}
+				return runner.Query(ctx, "hello")
+			}
+			if tc.async {
+				errs := drainResumeErrors(t, start())
+				require.Len(t, errs, 1)
+				require.ErrorContains(t, errs[0], "session callback panic")
+			} else {
+				require.PanicsWithValue(t, "session callback panic", func() { start() })
+			}
+			require.ErrorIs(t, concurrentOpenErr, ErrSessionBusy)
+			reopened, err := openRunnerSession[Message](ctx, store, sessionID)
+			require.NoError(t, err)
+			require.NoError(t, reopened.close(ctx))
+		})
+	}
+}
+
 func TestRunnerSessionModeDeleteCheckpointFailureIsReported(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	persister := newSessionEventPersister[*schema.Message](
-		ctx,
-		store,
-		"delete-fail-session",
-	)
+	persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "delete-fail-session"))
 	checkPointID := "delete-fail-checkpoint"
 	store.deleteErr = errors.New("delete failed")
 
@@ -1651,7 +1639,7 @@ func TestSessionPersister_EnqueueAfterFlush(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 
-	persister := newSessionEventPersister[*schema.Message](ctx, store, "enqueue-after-flush")
+	persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "enqueue-after-flush"))
 
 	require.NoError(t, persister.closeAndWait())
 	assert.NoError(t, persister.enqueueAsync(validTestPayload()))
@@ -1665,7 +1653,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 
-	persister := newSessionEventPersister[*schema.Message](ctx, store, "empty-payload")
+	persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "empty-payload"))
 
 	assert.NoError(t, persister.enqueueAsync(nil))
 	assert.NoError(t, persister.enqueueAsync(&SessionEvent[*schema.Message]{}))
@@ -1681,7 +1669,7 @@ func TestSessionPersister_EmptyPayloadSkipped(t *testing.T) {
 func TestSessionPersister_AsyncEnqueueFlushesOnClose(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	persister := newSessionEventPersister[*schema.Message](ctx, store, "async-enqueue")
+	persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "async-enqueue"))
 
 	require.NoError(t, persister.enqueueAsync(validTestPayload()))
 	store.mu.Lock()
@@ -1697,7 +1685,7 @@ func TestSessionPersister_AsyncEnqueueFlushesOnClose(t *testing.T) {
 func TestSessionPersister_CommitBoundaryFlushesPendingBatchShape(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	persister := newSessionEventPersister[*schema.Message](ctx, store, "boundary-shape")
+	persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "boundary-shape"))
 
 	annotation := withTestEventID(&SessionEvent[*schema.Message]{
 		Kind:      SessionEventKind(SessionEventExtensionPrefix + "annotation"),
@@ -1721,7 +1709,7 @@ func TestSessionPersister_CommitBoundaryFlushesPendingBatchShape(t *testing.T) {
 func TestSessionPersister_CommitBoundaryPreservesPendingOnFlushFailure(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	persister := newSessionEventPersister[*schema.Message](ctx, store, "boundary-fail")
+	persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "boundary-fail"))
 
 	annotation := withTestEventID(&SessionEvent[*schema.Message]{
 		Kind:      SessionEventKind(SessionEventExtensionPrefix + "annotation"),
@@ -1799,7 +1787,7 @@ func TestSessionPersister_DirectAppendNoRetryAndLatch(t *testing.T) {
 			failsLeft:          2,
 			appendErrVal:       errors.New("transient"),
 		}
-		persister := newSessionEventPersister[*schema.Message](ctx, store, "no-retry")
+		persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "no-retry"))
 
 		err := persister.commitBoundary(validTestPayload())
 		require.Error(t, err)
@@ -1814,7 +1802,7 @@ func TestSessionPersister_DirectAppendNoRetryAndLatch(t *testing.T) {
 			failsLeft:          100,
 			appendErrVal:       errors.New("permanent"),
 		}
-		persister := newSessionEventPersister[*schema.Message](ctx, store, "latch")
+		persister := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "latch"))
 
 		err := persister.commitBoundary(validTestPayload())
 		require.Error(t, err)
@@ -1895,7 +1883,7 @@ func TestSessionEvent_HumanReadableSerializerDirectRoundTrip(t *testing.T) {
 
 	var decoded SessionEvent[*schema.Message]
 	require.NoError(t, serializer.Unmarshal(data, &decoded))
-	require.NoError(t, NormalizeSessionEventKind(&decoded))
+	require.NoError(t, normalizeSessionEventKind(&decoded))
 	assert.Equal(t, se.EventID, decoded.EventID)
 	assert.Equal(t, se.TurnID, decoded.TurnID)
 	assert.Equal(t, se.Kind, decoded.Kind)
@@ -1985,6 +1973,7 @@ func TestSessionEvent_HumanReadableRoundTrip(t *testing.T) {
 
 	t.Run("MessagesDeleted", func(t *testing.T) {
 		se := &SessionEvent[*schema.Message]{
+			Kind:            SessionEventMessagesDeleted,
 			MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{"m1", "m2"}},
 		}
 		data, err := encodeSessionEvent(se)
@@ -2226,7 +2215,8 @@ func TestSessionEventTimestamp(t *testing.T) {
 		},
 	}
 
-	se := toSessionEvent(event)
+	se, err := toSessionEventChecked(event)
+	require.NoError(t, err)
 	require.NotNil(t, se)
 	assert.Equal(t, ts, se.Timestamp)
 
@@ -2241,7 +2231,7 @@ func TestSessionEventTimestamp(t *testing.T) {
 func TestReconstructFromEventLog_EmptySession(t *testing.T) {
 	store := newSessionHelperStore()
 	ctx := context.Background()
-	result, err := reconstructSessionState[*schema.Message](ctx, store, "empty", defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, "empty", defaultLoadPageSize)
 	require.NoError(t, err)
 	assert.Nil(t, result)
 }
@@ -2271,7 +2261,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -2282,7 +2272,7 @@ func TestReconstructFromEventLog_MultiTurn(t *testing.T) {
 	assert.Equal(t, "A2", result.state.Messages[3].Content)
 
 	// Verify pagination: use page size 2 so that 4 events require multiple pages.
-	result2, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+	result2, err := reconstructTestSession(t, ctx, store, sid, 2)
 	require.NoError(t, err)
 	require.NotNil(t, result2)
 	require.NotNil(t, result2.state)
@@ -2504,7 +2494,7 @@ func TestAttack_ReconstructParallelToolResultsAcrossPaginationAndDeletion(t *tes
 		},
 	})
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+	result, err := reconstructTestSession(t, ctx, store, sid, 2)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -2548,7 +2538,7 @@ func TestAttack_ReconstructParallelToolResultsAfterUpdateAndRollback(t *testing.
 	}))
 	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, firstTurn.EventID))
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+	result, err := reconstructTestSession(t, ctx, store, sid, 2)
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -2582,7 +2572,7 @@ func TestReconstructFromEventLog_CorruptEventReturnsError(t *testing.T) {
 	store.eventIDIdx[corruptID] = len(store.events) - 1
 	store.mu.Unlock()
 
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.Error(t, err, "corrupt event must cause reconstruction failure")
 }
 
@@ -2607,14 +2597,14 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 			MessagesReplaced: &messages,
 		}
 	}
-	reconstruct := func(t *testing.T, store *sessionHelperStore, sid string, pageSize int) (*sessionReconstructResult[*schema.Message], *recordingSessionHandle) {
+	reconstruct := func(t *testing.T, store *sessionHelperStore, sid string, pageSize int) (*sessionReconstructResult[*schema.Message], *sessionLoadRecorder) {
 		t.Helper()
-		handle := &recordingSessionHandle{sessionHandle: store}
-		result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, pageSize)
+		recorder := &sessionLoadRecorder{SessionEventStore: store}
+		result, err := reconstructTestSession(t, ctx, recorder, sid, pageSize)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.state)
-		return result, handle
+		return result, recorder
 	}
 
 	for _, tc := range []struct {
@@ -2640,9 +2630,9 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 				appendEvents(t, store, sid, messageEvent(fmt.Sprintf("post-%d", i)))
 			}
 
-			result, handle := reconstruct(t, store, sid, tc.pageSize)
+			result, recorder := reconstruct(t, store, sid, tc.pageSize)
 
-			require.Len(t, handle.loadRequests, tc.wantLoads)
+			require.Len(t, recorder.loadRequests, tc.wantLoads)
 			require.Len(t, result.state.Messages, tc.postCount+1)
 			assert.Equal(t, "summary", result.state.Messages[0].Content)
 			for i := 0; i < tc.postCount; i++ {
@@ -2662,9 +2652,9 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 			messageEvent("post"),
 		)
 
-		result, handle := reconstruct(t, store, sid, 3)
+		result, recorder := reconstruct(t, store, sid, 3)
 
-		require.Len(t, handle.loadRequests, 1)
+		require.Len(t, recorder.loadRequests, 1)
 		require.Len(t, result.state.Messages, 1)
 		assert.Equal(t, "post", result.state.Messages[0].Content)
 	})
@@ -2707,7 +2697,7 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 
 		assert.Equal(t, []*schema.Message{updated, inserted, second}, result.state.Messages)
 
-		fullEvents, err := loadActiveSessionEventsReverse[*schema.Message](ctx, store, sid, 2)
+		fullEvents, err := loadActiveSessionEventsReverse(ctx, mustOpenTestSession[Message](t, ctx, store, sid), 2)
 		require.NoError(t, err)
 		fullState, err := replayDurableContextEvents(fullEvents)
 		require.NoError(t, err)
@@ -2737,9 +2727,9 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 			},
 		})
 
-		result, handle := reconstruct(t, store, sid, 4)
+		result, recorder := reconstruct(t, store, sid, 4)
 
-		require.Len(t, handle.loadRequests, 2)
+		require.Len(t, recorder.loadRequests, 2)
 		require.Len(t, result.state.Messages, 2)
 		assert.Equal(t, "Q1", result.state.Messages[0].Content)
 		assert.Equal(t, "A1", result.state.Messages[1].Content)
@@ -2752,11 +2742,11 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 			appendEvents(t, store, sid, messageEvent(fmt.Sprintf("message-%d", i)))
 		}
 
-		result, handle := reconstruct(t, store, sid, 2)
+		result, recorder := reconstruct(t, store, sid, 2)
 
-		require.Len(t, handle.loadRequests, 3)
+		require.Len(t, recorder.loadRequests, 3)
 		require.Len(t, result.state.Messages, 5)
-		fullEvents, err := loadActiveSessionEventsReverse[*schema.Message](ctx, store, sid, 2)
+		fullEvents, err := loadActiveSessionEventsReverse(ctx, mustOpenTestSession[Message](t, ctx, store, sid), 2)
 		require.NoError(t, err)
 		fullState, err := replayDurableContextEvents(fullEvents)
 		require.NoError(t, err)
@@ -2786,13 +2776,13 @@ func TestAttack_ReconstructionReplacementBoundaryOrdering(t *testing.T) {
 			Message: post,
 		})
 
-		handle := &recordingSessionHandle{sessionHandle: store}
-		result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, 4)
+		recorder := &sessionLoadRecorder{SessionEventStore: store}
+		result, err := reconstructTestSession(t, ctx, recorder, sid, 4)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.state)
 		assert.Equal(t, []*schema.Message{summary, post}, result.state.Messages)
-		assert.Len(t, handle.loadRequests, 1)
+		assert.Len(t, recorder.loadRequests, 1)
 		t.Log("a rollback older than the latest replacement remains outside the replay window")
 	})
 
@@ -2813,15 +2803,15 @@ func TestAttack_ReconstructionReplacementBoundaryOrdering(t *testing.T) {
 			appendTestSessionEvent(t, ctx, store, sid, event)
 		}
 
-		handle := &recordingSessionHandle{sessionHandle: store}
-		result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, 4)
+		recorder := &sessionLoadRecorder{SessionEventStore: store}
+		result, err := reconstructTestSession(t, ctx, recorder, sid, 4)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.state)
 		require.Len(t, result.state.Messages, 2)
 		assert.Equal(t, "second-summary", result.state.Messages[0].Content)
 		assert.Equal(t, "post", result.state.Messages[1].Content)
-		assert.Len(t, handle.loadRequests, 1)
+		assert.Len(t, recorder.loadRequests, 1)
 		t.Log("the newest replacement is selected without reading through an older replacement")
 	})
 }
@@ -2885,7 +2875,7 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 	))
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, 2)
+	result, err := reconstructTestSession(t, ctx, store, sid, 2)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -2916,7 +2906,7 @@ func TestRollbackSessionMultipleRollbacksProjectActiveBranch(t *testing.T) {
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
 	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -3054,7 +3044,7 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 			ToEventID: msg.EventID,
 		},
 	})
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
 
 	store = newSessionHelperStore()
@@ -3077,7 +3067,7 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 	store.eventIDs = append(store.eventIDs, payloadEvent.EventID)
 	store.eventIDIdx[payloadEvent.EventID] = len(store.events) - 1
 	store.mu.Unlock()
-	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err = reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.ErrorIs(t, err, ErrRollbackTargetInactive)
 
 	store = newSessionHelperStore()
@@ -3090,7 +3080,7 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 			ToEventID: staleTarget.EventID,
 		},
 	})
-	_, err = reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err = reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.ErrorIs(t, err, ErrRollbackTargetInactive)
 }
 
@@ -3206,18 +3196,6 @@ func (s *recordingHelperStore) AppendEventsForSession(ctx context.Context, sid s
 
 func (s *recordingHelperStore) AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[*schema.Message]) error {
 	return s.AppendEventsForSession(ctx, sessionID, events)
-}
-
-func (s *recordingHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.sessionID
-	}
-	return &openSessionResult[*schema.Message]{handle: &legacyMessageTestHandle{store: s, sessionID: sessionID}}, nil
-}
-
-func (s *recordingHelperStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return s.AppendEventsForSession(ctx, "", events)
 }
 
 func (s *recordingHelperStore) Set(ctx context.Context, key string, value []byte) error {
@@ -3484,7 +3462,7 @@ func TestSessionPersister_EnqueueAfterAppendError(t *testing.T) {
 	store := newSessionHelperStore()
 	store.appendErr = errors.New("append failed")
 
-	p := newSessionEventPersister[*schema.Message](ctx, store, "sid")
+	p := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "sid"))
 
 	require.NoError(t, p.enqueueAsync(validTestPayload()))
 	require.Error(t, p.closeAndWait())
@@ -3526,10 +3504,6 @@ func (s *transientFailStore) AppendEvents(ctx context.Context, sessionID string,
 	return s.AppendEventsForSession(ctx, sessionID, events)
 }
 
-func (s *transientFailStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return s.AppendEventsForSession(ctx, "", events)
-}
-
 func (s *transientFailStore) getAppendCalls() int {
 	s.retryMu.Lock()
 	defer s.retryMu.Unlock()
@@ -3544,7 +3518,7 @@ func TestSessionPersister_FlushDoesNotRetryTransientFailure(t *testing.T) {
 		appendErrVal:       errors.New("transient"),
 	}
 
-	p := newSessionEventPersister[*schema.Message](ctx, store, "sid")
+	p := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "sid"))
 
 	require.NoError(t, p.enqueueAsync(validTestPayload()))
 
@@ -3565,7 +3539,7 @@ func TestSessionPersister_FlushPermanentFailureLatched(t *testing.T) {
 		appendErrVal:       errors.New("permanent"),
 	}
 
-	p := newSessionEventPersister[*schema.Message](ctx, store, "sid")
+	p := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "sid"))
 
 	require.NoError(t, p.enqueueAsync(validTestPayload()))
 
@@ -3583,7 +3557,7 @@ func TestSessionPersister_FlushContextCancellation(t *testing.T) {
 		appendErrVal:       errors.New("failing"),
 	}
 
-	p := newSessionEventPersister[*schema.Message](ctx, store, "sid")
+	p := newSessionEventPersister(ctx, mustOpenTestSession[Message](t, ctx, store, "sid"))
 
 	require.NoError(t, p.enqueueAsync(validTestPayload()))
 
@@ -3625,7 +3599,7 @@ func TestAttack_ReconstructionIncludesInterruptedTailOnResume(t *testing.T) {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -3657,7 +3631,7 @@ func TestAttack_ReconstructionWithoutCommittedIdle(t *testing.T) {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -4405,7 +4379,7 @@ func TestStreamPersistence_IncompleteStreamExcludedFromReconstruction(t *testing
 		},
 	})
 
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -4431,7 +4405,7 @@ func TestMessageStreamIncompleteEvent_RoundTripAndValidation(t *testing.T) {
 	assert.Equal(t, "model stream failed", decoded.MessageStreamIncomplete.Error)
 	assert.False(t, isContextSessionEvent(decoded))
 
-	_, err = encodeSessionEvent(withTestEventID(&SessionEvent[*schema.Message]{
+	err = validateEmittedSessionEventKind(withTestEventID(&SessionEvent[*schema.Message]{
 		Kind:                    SessionEventMessageStreamIncomplete,
 		MessageStreamIncomplete: &MessageStreamIncompleteEvent[*schema.Message]{Error: "missing message"},
 	}))
@@ -4791,7 +4765,7 @@ func TestStreamPersistence_AgenticIncompleteStreamPrefixPersisted(t *testing.T) 
 	assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, streamErr.Error())
 	assert.Empty(t, normalToolMessages)
 
-	reconstructed, err := reconstructSessionState[*schema.AgenticMessage](ctx, mustOpenTestSession[*schema.AgenticMessage](t, ctx, store, sid), sid, defaultLoadPageSize)
+	reconstructed, err := reconstructSessionState[*schema.AgenticMessage](ctx, mustOpenTestSession[*schema.AgenticMessage](t, ctx, store, sid), defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, reconstructed)
 	require.NotNil(t, reconstructed.state)
@@ -5082,8 +5056,10 @@ func TestTailReplay_PartialTurnWithoutCommittedIdle(t *testing.T) {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	// Boot: prepareRunnerSessionRun reconstructs durable context through the log tail.
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
+	// Boot: prepareRun reconstructs durable context through the log tail.
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	err := state.prepareRun(ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
 	require.Len(t, state.latestState.Messages, 4)
@@ -5108,7 +5084,9 @@ func TestTailReplay_NoTailEvents(t *testing.T) {
 	turnEndSE := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	err := state.prepareRun(ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "Q", state.latestState.Messages[0].Content)
@@ -5140,7 +5118,9 @@ func TestTailReplay_EmptySnapshotCursor(t *testing.T) {
 	se := withTestEventID(&SessionEvent[*schema.Message]{Message: postMsg})
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 
-	state, err := prepareRunnerSessionRun[*schema.Message](ctx, nil, nil, sid, store, nil)
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	err := state.prepareRun(ctx, nil, nil, sid, store, nil)
 	require.NoError(t, err)
 	require.Len(t, state.latestState.Messages, 1)
 	assert.Equal(t, "post", state.latestState.Messages[0].Content)
@@ -5185,7 +5165,7 @@ func (s *agenticSessionHelperStore) AppendEventsForSession(_ context.Context, _ 
 		if event == nil || event.EventID == "" {
 			return ErrInvalidEventID
 		}
-		if err := NormalizeSessionEventKind(event); err != nil {
+		if err := normalizeSessionEventKind(event); err != nil {
 			return err
 		}
 		if _, ok := s.eventIDIdx[event.EventID]; ok {
@@ -5248,34 +5228,6 @@ func (s *agenticSessionHelperStore) LoadEventsForSession(_ context.Context, _ st
 	}
 	return &LoadSessionEventsResult[*schema.AgenticMessage]{Events: out}, nil
 }
-
-func (s *agenticSessionHelperStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.AgenticMessage], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.sessionID
-	}
-	return &openSessionResult[*schema.AgenticMessage]{
-		handle: &agenticTestSessionHandle{store: s, sessionID: sessionID},
-	}, nil
-}
-
-type agenticTestSessionHandle struct {
-	store     *agenticSessionHelperStore
-	sessionID string
-}
-
-func (h *agenticTestSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.AgenticMessage], error) {
-	if req == nil {
-		req = &LoadSessionEventsRequest{}
-	}
-	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
-}
-
-func (h *agenticTestSessionHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.AgenticMessage]) error {
-	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
-}
-
-func (h *agenticTestSessionHandle) close(context.Context) error { return nil }
 
 // TestPartialInterrupted_ThenNewRun verifies that when a turn is interrupted
 // after some events have been appended (but before the committed idle marker), a new
@@ -5394,7 +5346,9 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	explicitCheckpointID := "user-supplied-cp"
 	require.NoError(t, store.Set(ctx, explicitCheckpointID, cpBytes))
 
-	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, explicitCheckpointID)
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	effective, err := state.prepareResume(ctx, store, sid, store, nil, explicitCheckpointID)
 	require.NoError(t, err)
 	require.True(t, state.enabled, "session mode must remain enabled when an explicit checkpoint ID is supplied")
 	require.NotNil(t, state.latestState)
@@ -5414,7 +5368,9 @@ func TestPrepareRunnerSessionResume_LegacyCheckpointUsesResumeEventTurnID(t *tes
 	require.NoError(t, err)
 	require.NoError(t, store.Set(ctx, cpID, cpBytes))
 
-	state, effective, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, nil, cpID)
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	effective, err := state.prepareResume(ctx, store, sid, store, nil, cpID)
 	require.NoError(t, err)
 	require.True(t, state.enabled)
 	require.Equal(t, cpID, effective)
@@ -5458,7 +5414,9 @@ func TestResumePath_TailReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cpStore.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
 
-	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, cpStore, sid, store, nil, "")
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	_, err = state.prepareResume(ctx, cpStore, sid, store, nil, "")
 	require.NoError(t, err)
 	assert.Nil(t, state.latestState.Messages)
 }
@@ -5618,7 +5576,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	assert.Equal(t, 2, updates, "both MessageUpdated events must be persisted")
 
 	// Reconstruction must apply both updates correctly.
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -5713,7 +5671,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	assert.Equal(t, 2, inserts, "both MessageInserted events must be persisted")
 
 	// Verify reconstruction applies insertions correctly.
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -5890,7 +5848,7 @@ func TestRunnerNoPersist_GeneratedLeadingSystemMessage(t *testing.T) {
 	assert.Equal(t, "system v1", model.inputs[0][0].Content)
 
 	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
-	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NoError(t, handle.close(ctx))
 	for _, msg := range result.state.Messages {
@@ -6030,7 +5988,7 @@ func TestRunnerPreserves_CallerSuppliedLeadingSystemMessage(t *testing.T) {
 	assert.Equal(t, 1, systemEvents, "caller-supplied system message must be persisted")
 
 	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
-	result, err := reconstructSessionState[*schema.Message](ctx, handle, sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NoError(t, handle.close(ctx))
 	require.GreaterOrEqual(t, len(result.state.Messages), 2)
@@ -6182,7 +6140,7 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 	}
 	assert.True(t, foundDeleted, "MessagesDeleted must be persisted")
 
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, result.state.Messages, 2)
@@ -6208,7 +6166,7 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	committedIdleEvent := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleEvent}))
 
-	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), sid, defaultLoadPageSize)
+	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ghost-id")
 }
@@ -6244,7 +6202,7 @@ func TestReconstructSessionState_MessageInsertedBeforeDeletedAnchor(t *testing.T
 	}
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, events))
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -6283,7 +6241,7 @@ func TestReconstructSessionState_MessageInsertedAnchorBeforeReplacementFails(t *
 	}
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, events))
 
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), GetMessageID(oldAnchor))
 	assert.Contains(t, err.Error(), "anchor message")
@@ -6495,7 +6453,7 @@ func TestAttack_MessageStreamRefWrongKind(t *testing.T) {
 func TestAttack_ClassifySessionEventZeroValue(t *testing.T) {
 	ev := &SessionEvent[Message]{}
 
-	_, err := ClassifySessionEvent(ev)
+	_, err := classifySessionEvent(ev)
 	if err == nil {
 		t.Fatal("expected error for zero-value session event with no payload, got nil")
 	}
@@ -6503,7 +6461,7 @@ func TestAttack_ClassifySessionEventZeroValue(t *testing.T) {
 }
 
 func TestAttack_ClassifySessionEventNil(t *testing.T) {
-	_, err := ClassifySessionEvent[Message](nil)
+	_, err := classifySessionEvent[Message](nil)
 	if err == nil {
 		t.Fatal("expected error for nil session event, got nil")
 	}
@@ -6516,7 +6474,7 @@ func TestAttack_ClassifySessionEventMultiplePayloads(t *testing.T) {
 		Cancel:  &CancelEvent{Reason: "test"},
 	}
 
-	_, err := ClassifySessionEvent(ev)
+	_, err := classifySessionEvent(ev)
 	if err == nil {
 		t.Fatal("expected error for event with multiple active payloads, got nil")
 	}
@@ -6529,7 +6487,7 @@ func TestAttack_NormalizeSessionEventKindMismatch(t *testing.T) {
 		Message: schema.UserMessage("hello"),
 	}
 
-	err := NormalizeSessionEventKind(ev)
+	err := normalizeSessionEventKind(ev)
 	if err == nil {
 		t.Fatal("expected error for kind mismatch, got nil")
 	}
@@ -6547,7 +6505,7 @@ func TestAttack_NormalizeSessionEventKindUnknownKindTolerated(t *testing.T) {
 		ev := &SessionEvent[Message]{
 			Kind: k,
 		}
-		err := NormalizeSessionEventKind(ev)
+		err := normalizeSessionEventKind(ev)
 		if err != nil {
 			t.Fatalf("unknown kind %q should be tolerated, got error: %v", k, err)
 		}
@@ -6561,7 +6519,7 @@ func TestAttack_NormalizeSessionEventKindKnownKindMissingPayloadStillErrors(t *t
 	ev := &SessionEvent[Message]{
 		Kind: SessionEventMessage,
 	}
-	err := NormalizeSessionEventKind(ev)
+	err := normalizeSessionEventKind(ev)
 	if err == nil {
 		t.Fatal("expected error for known kind with missing payload, got nil")
 	}
@@ -6573,7 +6531,7 @@ func TestAttack_NormalizeSessionEventKindUnknownKindWithPayloadStillErrors(t *te
 		Kind:    "future.new_kind",
 		Message: schema.UserMessage("hello"),
 	}
-	err := NormalizeSessionEventKind(ev)
+	err := normalizeSessionEventKind(ev)
 	if err == nil {
 		t.Fatal("expected error for unknown kind with recognized payload, got nil")
 	}
@@ -6585,7 +6543,7 @@ func TestAttack_ValidateEmittedSessionEventEmptyKind(t *testing.T) {
 		Message: schema.UserMessage("hello"),
 	}
 
-	err := ValidateEmittedSessionEventKind(ev)
+	err := validateEmittedSessionEventKind(ev)
 	if err == nil {
 		t.Fatal("expected error for emitted event with empty Kind, got nil")
 	}
@@ -6593,7 +6551,7 @@ func TestAttack_ValidateEmittedSessionEventEmptyKind(t *testing.T) {
 }
 
 func TestAttack_ValidateEmittedSessionEventNil(t *testing.T) {
-	err := ValidateEmittedSessionEventKind[Message](nil)
+	err := validateEmittedSessionEventKind[Message](nil)
 	if err == nil {
 		t.Fatal("expected error for nil emitted event, got nil")
 	}
@@ -6968,7 +6926,7 @@ func TestAttack_SessionEventCancelClassification(t *testing.T) {
 		Cancel: &CancelEvent{Reason: "user cancelled"},
 	}
 
-	kind, err := ClassifySessionEvent(ev)
+	kind, err := classifySessionEvent(ev)
 	if err != nil {
 		t.Fatalf("classification failed: %v", err)
 	}
@@ -6987,7 +6945,7 @@ func TestAttack_SessionEventInterruptClassification(t *testing.T) {
 		},
 	}
 
-	kind, err := ClassifySessionEvent(ev)
+	kind, err := classifySessionEvent(ev)
 	if err != nil {
 		t.Fatalf("classification failed: %v", err)
 	}
@@ -7005,7 +6963,7 @@ func TestAttack_SessionRollbackEventValidation(t *testing.T) {
 		},
 	}
 
-	kind, err := ClassifySessionEvent(ev)
+	kind, err := classifySessionEvent(ev)
 	if err != nil {
 		t.Fatalf("classification failed: %v", err)
 	}
@@ -7021,7 +6979,7 @@ func TestAttack_SessionRollbackEventMissingToEventID(t *testing.T) {
 		Rollback: &SessionRollbackEvent{},
 	}
 
-	_, err := ClassifySessionEvent(ev)
+	_, err := classifySessionEvent(ev)
 	if err == nil {
 		t.Fatal("expected error for rollback with empty ToEventID, got nil")
 	}
@@ -7035,7 +6993,7 @@ func TestAttack_SessionRollbackEventMissingOwnEventID(t *testing.T) {
 		},
 	}
 
-	_, err := ClassifySessionEvent(ev)
+	_, err := classifySessionEvent(ev)
 	if err == nil {
 		t.Fatal("expected error for rollback with empty own EventID, got nil")
 	}
@@ -7056,11 +7014,10 @@ func TestSessionEventExtraSerializationContract(t *testing.T) {
 			"custom": sessionEventExtraRegisteredValue{Reason: "registered"},
 		},
 	}
-	require.NoError(t, ValidateEmittedSessionEventKind(valid))
+	require.NoError(t, validateEmittedSessionEventKind(valid))
 	assert.Equal(t, 1, countActiveSessionEventPayloads(valid), "Extra must not count as a semantic payload")
 
-	snapshot, err := snapshotSessionEvent(valid)
-	require.NoError(t, err)
+	snapshot := cloneSessionEvent(valid)
 	require.NotNil(t, snapshot)
 	assert.Equal(t, "registered", snapshot.Extra["custom"].(sessionEventExtraRegisteredValue).Reason)
 
@@ -7070,7 +7027,7 @@ func TestSessionEventExtraSerializationContract(t *testing.T) {
 		Message: schema.UserMessage("hello"),
 		Extra:   map[string]any{"custom": sessionEventExtraUnregisteredValue{Reason: "unregistered"}},
 	}
-	_, err = encodeSessionEvent(invalid)
+	_, err := encodeSessionEvent(invalid)
 	require.Error(t, err)
 }
 
@@ -7135,21 +7092,92 @@ func TestSessionEventExtraProviderMerge(t *testing.T) {
 		assert.Empty(t, ev.EventID)
 	})
 
-	t.Run("payloadless draft requires kind", func(t *testing.T) {
-		err := prepareSessionEventEnvelope(ctx, &SessionEvent[*schema.Message]{}, nil, nil, sessionEventEnvelopeOptions{AllowPayloadlessDraft: true})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "non-empty Kind")
+	t.Run("require event id rejects missing id", func(t *testing.T) {
+		err := prepareSessionEventEnvelope(ctx, &SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: schema.UserMessage("hello")},
+			func(context.Context, *SessionEvent[*schema.Message]) (string, error) {
+				t.Fatal("missing required ID must not be replaced")
+				return "replacement", nil
+			}, nil, sessionEventEnvelopeOptions{RequireEventID: true})
+		require.ErrorIs(t, err, ErrInvalidEventID)
 	})
 
-	t.Run("preserve event id requires existing id", func(t *testing.T) {
-		err := prepareSessionEventEnvelope(ctx, &SessionEvent[*schema.Message]{Kind: SessionEventMessage, Message: schema.UserMessage("hello")}, nil, nil, sessionEventEnvelopeOptions{PreserveEventID: true})
-		require.ErrorIs(t, err, ErrInvalidEventID)
+	t.Run("existing id is always retained and provider still runs", func(t *testing.T) {
+		for _, requireID := range []bool{false, true} {
+			ev := &SessionEvent[*schema.Message]{EventID: "reserved", Kind: SessionEventMessage, Message: schema.UserMessage("hello")}
+			err := prepareSessionEventEnvelope(ctx, ev,
+				func(context.Context, *SessionEvent[*schema.Message]) (string, error) {
+					t.Fatal("existing ID must not be regenerated")
+					return "replacement", nil
+				}, func(_ context.Context, draft *SessionEvent[*schema.Message]) (map[string]any, error) {
+					require.Equal(t, "reserved", draft.EventID)
+					return map[string]any{"materialized": true}, nil
+				}, sessionEventEnvelopeOptions{RequireEventID: requireID})
+			require.NoError(t, err)
+			assert.Equal(t, "reserved", ev.EventID)
+			assert.Equal(t, true, ev.Extra["materialized"])
+		}
 	})
 
 	t.Run("nil event is no-op", func(t *testing.T) {
 		require.NoError(t, prepareSessionEventEnvelope[*schema.Message](ctx, nil, nil, nil, sessionEventEnvelopeOptions{}))
 		require.NoError(t, applySessionEventExtraProvider[*schema.Message](ctx, nil, nil))
 	})
+}
+
+func TestReserveMessageStreamRef(t *testing.T) {
+	for _, timestamp := range []time.Time{{}, time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)} {
+		var calls []string
+		ref, err := reserveMessageStreamRef(context.Background(), timestamp, sessionEventContext[*schema.Message]{
+			turnID: "turn-1",
+			provider: func(_ context.Context, draft *SessionEvent[*schema.Message]) (map[string]any, error) {
+				calls = append(calls, "provider")
+				assert.Equal(t, SessionEventMessage, draft.Kind)
+				assert.Nil(t, draft.Message)
+				assert.Empty(t, draft.EventID)
+				assert.Equal(t, "turn-1", draft.TurnID)
+				assert.False(t, draft.Timestamp.IsZero())
+				return map[string]any{"reserved": true}, nil
+			},
+			generator: func(_ context.Context, draft *SessionEvent[*schema.Message]) (string, error) {
+				calls = append(calls, "generator")
+				assert.Equal(t, true, draft.Extra["reserved"])
+				return "stream-event", nil
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"provider", "generator"}, calls)
+		assert.Equal(t, "stream-event", ref.EventID)
+		assert.Equal(t, "turn-1", ref.TurnID)
+		assert.Equal(t, SessionEventMessage, ref.Kind)
+		assert.False(t, ref.Timestamp.IsZero())
+		if !timestamp.IsZero() {
+			assert.Equal(t, timestamp, ref.Timestamp)
+		}
+	}
+}
+
+func TestSessionEventCodecAndCloneValidationBoundaries(t *testing.T) {
+	// Historical data can omit Kind. Decoding leaves normalization to the read boundary.
+	original := &SessionEvent[*schema.Message]{EventID: "legacy", Message: schema.UserMessage("hello")}
+	data, err := encodeSessionEvent(original)
+	require.NoError(t, err)
+	assert.Empty(t, original.Kind)
+	decoded, err := decodeSessionEvent[*schema.Message](data)
+	require.NoError(t, err)
+	assert.Empty(t, decoded.Kind)
+	require.NoError(t, normalizeSessionEventKind(decoded))
+	assert.Equal(t, SessionEventMessage, decoded.Kind)
+
+	// Cloning preserves even incomplete input; the write boundary validates it.
+	assert.Equal(t, original, cloneSessionEvent(original))
+	handle := &sessionHandle[*schema.Message]{}
+	err = handle.appendEvents(context.Background(), []*SessionEvent[*schema.Message]{original})
+	require.ErrorContains(t, err, "non-empty Kind")
+	err = handle.appendEvents(context.Background(), []*SessionEvent[*schema.Message]{{EventID: "payloadless", Kind: SessionEventMessage}})
+	require.ErrorContains(t, err, "exactly one")
+	snapshot := cloneSessionEvent(decoded)
+	assert.Equal(t, decoded, snapshot)
+	assert.NotSame(t, decoded.Message, snapshot.Message)
 }
 
 func TestSessionEventContextMergesGeneratorProviderAndTurnID(t *testing.T) {
@@ -7181,6 +7209,63 @@ func TestSessionEventContextMergesGeneratorProviderAndTurnID(t *testing.T) {
 	assert.Equal(t, "turn-2", event.TurnID)
 	assert.Equal(t, "test", event.Extra["reason"])
 	assert.Equal(t, "event-1", event.EventID)
+}
+
+func TestAppendRunnerSessionInputEventsBatch(t *testing.T) {
+	ctx := context.Background()
+	messages := []Message{schema.UserMessage("one"), schema.UserMessage("two"), schema.UserMessage("three")}
+	running := &SessionEvent[Message]{EventID: "turn", Kind: SessionEventSessionStatusRunning}
+	newState := func(store *serviceContractStore) *runnerSessionRunState[Message] {
+		return &runnerSessionRunState[Message]{
+			enabled: true, turnID: running.EventID,
+			sessionHandle:   &sessionHandle[Message]{store: store, sessionID: "session"},
+			sessionConfig:   SessionConfig[Message]{EventIDGenerator: testSequentialEventIDGenerator("input-")},
+			initialTimeline: []*SessionEvent[Message]{running},
+		}
+	}
+
+	t.Run("one ordered batch", func(t *testing.T) {
+		store := &serviceContractStore{}
+		state := newState(store)
+		require.NoError(t, appendRunnerSessionInputEvents(ctx, state, nil))
+		require.Empty(t, store.appendEvents)
+		require.NoError(t, appendRunnerSessionInputEvents(ctx, state, messages))
+		require.Len(t, store.appendEvents, 1)
+		batch := store.appendEvents[0]
+		require.Len(t, batch, len(messages))
+		require.Len(t, state.initialTimeline, len(messages)+1)
+		require.Same(t, running, state.initialTimeline[0])
+		for i, event := range batch {
+			require.Equal(t, messages[i], event.Message)
+			require.Equal(t, fmt.Sprintf("input-%d", i+1), event.EventID)
+			require.Equal(t, running.EventID, event.TurnID)
+			require.Same(t, event, state.initialTimeline[i+1])
+		}
+	})
+
+	t.Run("second message fails preparation", func(t *testing.T) {
+		store := &serviceContractStore{}
+		state := newState(store)
+		wantErr := errors.New("cannot generate event ID")
+		state.sessionConfig.EventIDGenerator = func(_ context.Context, e *SessionEvent[Message]) (string, error) {
+			if e.Message == messages[1] {
+				return "", wantErr
+			}
+			return e.Message.Content, nil
+		}
+		require.ErrorIs(t, appendRunnerSessionInputEvents(ctx, state, messages), wantErr)
+		require.Empty(t, store.appendEvents)
+		require.Equal(t, []*SessionEvent[Message]{running}, state.initialTimeline)
+	})
+
+	t.Run("store rejects batch", func(t *testing.T) {
+		store := &serviceContractStore{appendErr: errors.New("append failed")}
+		state := newState(store)
+		require.ErrorIs(t, appendRunnerSessionInputEvents(ctx, state, messages), store.appendErr)
+		require.Len(t, store.appendEvents, 1)
+		require.Len(t, store.appendEvents[0], len(messages))
+		require.Equal(t, []*SessionEvent[Message]{running}, state.initialTimeline)
+	})
 }
 
 func TestRunnerSessionEventExtraProviderDecoratesPreparationEvents(t *testing.T) {
@@ -7410,7 +7495,9 @@ func TestRunnerSessionEventExtraProviderDecoratesResumeRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
 
-	state, _, err := prepareRunnerSessionResume[*schema.Message](ctx, store, sid, store, &SessionConfig[*schema.Message]{
+	state := &runnerSessionRunState[Message]{}
+	defer state.close(ctx)
+	_, err = state.prepareResume(ctx, store, sid, store, &SessionConfig[*schema.Message]{
 		EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
 			return map[string]any{"provider_kind": string(event.Kind)}, nil
 		},
@@ -7424,7 +7511,6 @@ func TestRunnerSessionEventExtraProviderDecoratesResumeRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.NotNil(t, state.sessionHandle)
-	require.NoError(t, state.sessionHandle.close(ctx))
 
 	events := decodeStoredSessionEvents(t, store.events)
 	resumeKind := SessionEventKind(SessionEventExtensionPrefix + "resume.request_started")
@@ -7722,9 +7808,9 @@ func TestSessionEventExtraIgnoredByReconstruction(t *testing.T) {
 		Kind:    SessionEventMessage,
 		Message: withoutExtraMsg,
 	})
-	withExtraState, err := reconstructSessionState[*schema.Message](ctx, storeWithExtra, "s", defaultLoadPageSize)
+	withExtraState, err := reconstructTestSession(t, ctx, storeWithExtra, "s", defaultLoadPageSize)
 	require.NoError(t, err)
-	withoutExtraState, err := reconstructSessionState[*schema.Message](ctx, storeWithoutExtra, "s", defaultLoadPageSize)
+	withoutExtraState, err := reconstructTestSession(t, ctx, storeWithoutExtra, "s", defaultLoadPageSize)
 	require.NoError(t, err)
 
 	require.NotNil(t, withExtraState)
