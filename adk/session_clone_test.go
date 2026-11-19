@@ -156,8 +156,8 @@ func TestCloneSessionEventPresence(t *testing.T) {
 
 func TestSessionPersisterCloneIsolatesQueuedFields(t *testing.T) {
 	store := newSessionHelperStore()
-	handle := &localSessionHandle[Message]{store: store, sessionID: "clone"}
-	persister := newSessionEventPersister[Message](context.Background(), handle, "clone")
+	handle := &sessionHandle[Message]{store: store, sessionID: "clone"}
+	persister := newSessionEventPersister[Message](context.Background(), handle)
 	event := &SessionEvent[Message]{
 		EventID: "original", Kind: SessionEventMessage,
 		Message: &schema.Message{Content: "original", Extra: map[string]any{"key": "original"}},
@@ -191,8 +191,8 @@ func TestSessionPersisterDefersValidationAndSerializationToWrite(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newSessionHelperStore()
-			handle := &localSessionHandle[Message]{store: store, sessionID: "clone"}
-			persister := newSessionEventPersister[Message](context.Background(), handle, "clone")
+			handle := &sessionHandle[Message]{store: store, sessionID: "clone"}
+			persister := newSessionEventPersister[Message](context.Background(), handle)
 			require.NoError(t, persister.enqueueAsync(tt.event))
 			err := persister.closeAndWait()
 			require.Error(t, err)

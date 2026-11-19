@@ -86,18 +86,11 @@ type SessionEventStore[M MessageType] interface {
 	AppendEvents(ctx context.Context, sessionID string, events []*SessionEvent[M]) error
 }
 
-type openSessionRequest struct {
-	sessionID string
-}
-
-type openSessionResult[M MessageType] struct {
-	handle sessionHandle[M]
-}
-
-type sessionHandle[M MessageType] interface {
-	loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[M], error)
-	appendEvents(ctx context.Context, events []*SessionEvent[M]) error
-	close(ctx context.Context) error
+func openRunnerSession[M MessageType](ctx context.Context, store SessionEventStore[M], sessionID string) (*sessionHandle[M], error) {
+	if store == nil {
+		return nil, errors.New("adk: session store is nil")
+	}
+	return openLocalSession(ctx, store, sessionID)
 }
 
 // LoadSessionEventsRequest configures typed event loading pagination and direction.
@@ -1159,10 +1152,9 @@ func stampSessionEventTurnID[M MessageType](event *SessionEvent[M], turnID strin
 }
 
 type sessionEventPersister[M MessageType] struct {
-	ctx       context.Context
-	handle    sessionHandle[M]
-	sessionID string
-	pending   []*SessionEvent[M]
+	ctx     context.Context
+	handle  *sessionHandle[M]
+	pending []*SessionEvent[M]
 
 	mu  sync.Mutex
 	err error
@@ -1170,13 +1162,11 @@ type sessionEventPersister[M MessageType] struct {
 
 func newSessionEventPersister[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 ) *sessionEventPersister[M] {
 	return &sessionEventPersister[M]{
-		ctx:       ctx,
-		handle:    handle,
-		sessionID: sessionID,
+		ctx:    ctx,
+		handle: handle,
 	}
 }
 
@@ -1490,23 +1480,20 @@ func RollbackSession[M MessageType](
 			opt(&cfg)
 		}
 	}
-	openResult, err := openRunnerSession[M](ctx, store, sessionID)
+	handle, err := openRunnerSession[M](ctx, store, sessionID)
 	if err != nil {
 		return err
 	}
-	if openResult == nil || openResult.handle == nil {
-		return ErrSessionBusy
-	}
-	defer openResult.handle.close(ctx)
+	defer handle.close(ctx)
 
-	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, openResult.handle, sessionID, defaultLoadPageSize)
+	activeEvents, err := loadActiveSessionEventsReverse[M](ctx, handle, defaultLoadPageSize)
 	if err != nil {
 		return err
 	}
 	target, head, err := resolveRollbackTarget[M](activeEvents, targetEventID)
 	if err != nil {
 		if errors.Is(err, ErrRollbackTargetNotFound) {
-			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, openResult.handle, sessionID, targetEventID, defaultLoadPageSize)
+			evidence, evidenceErr := findPhysicalRollbackTargetEvidence[M](ctx, handle, targetEventID, defaultLoadPageSize)
 			if evidenceErr != nil {
 				return evidenceErr
 			}
@@ -1534,7 +1521,7 @@ func RollbackSession[M MessageType](
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {
 		return err
 	}
-	if err := openResult.handle.appendEvents(ctx, []*SessionEvent[M]{rb}); err != nil {
+	if err := handle.appendEvents(ctx, []*SessionEvent[M]{rb}); err != nil {
 		return err
 	}
 	if cfg.CheckPointStore != nil {
@@ -1552,8 +1539,7 @@ func RollbackSession[M MessageType](
 // applied as reconstructed state.
 func reconstructSessionState[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 	pageSize int,
 ) (*sessionReconstructResult[M], error) {
 	allEvents, err := loadSessionEventsForReconstructionReverse[M](ctx, handle, pageSize)
@@ -1573,7 +1559,7 @@ func reconstructSessionState[M MessageType](
 
 func loadSessionEventsForReconstructionReverse[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
+	handle *sessionHandle[M],
 	pageSize int,
 ) ([]*SessionEvent[M], error) {
 	return loadProjectedSessionEventsReverse(ctx, handle, pageSize, true)
@@ -1581,8 +1567,7 @@ func loadSessionEventsForReconstructionReverse[M MessageType](
 
 func loadActiveSessionEventsReverse[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 	pageSize int,
 ) ([]*SessionEvent[M], error) {
 	return loadProjectedSessionEventsReverse(ctx, handle, pageSize, false)
@@ -1590,7 +1575,7 @@ func loadActiveSessionEventsReverse[M MessageType](
 
 func loadProjectedSessionEventsReverse[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
+	handle *sessionHandle[M],
 	pageSize int,
 	stopAtMessagesReplaced bool,
 ) ([]*SessionEvent[M], error) {
@@ -1692,8 +1677,7 @@ const (
 
 func findPhysicalRollbackTargetEvidence[M MessageType](
 	ctx context.Context,
-	handle sessionHandle[M],
-	sessionID string,
+	handle *sessionHandle[M],
 	targetEventID string,
 	pageSize int,
 ) (rollbackTargetEvidence, error) {

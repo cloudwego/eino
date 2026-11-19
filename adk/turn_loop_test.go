@@ -3363,34 +3363,6 @@ func (m *mockSessionStore) LoadEventsForSession(_ context.Context, sessionID str
 	return &LoadSessionEventsResult[*schema.Message]{Events: out, Next: next}, nil
 }
 
-func (m *mockSessionStore) openSession(_ context.Context, req *openSessionRequest) (*openSessionResult[*schema.Message], error) {
-	sessionID := ""
-	if req != nil {
-		sessionID = req.sessionID
-	}
-	return &openSessionResult[*schema.Message]{
-		handle: &mockSessionHandle{store: m, sessionID: sessionID},
-	}, nil
-}
-
-type mockSessionHandle struct {
-	store     *mockSessionStore
-	sessionID string
-}
-
-func (h *mockSessionHandle) loadEvents(ctx context.Context, req *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	if req == nil {
-		req = &LoadSessionEventsRequest{}
-	}
-	return h.store.LoadEventsForSession(ctx, h.sessionID, req)
-}
-
-func (h *mockSessionHandle) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return h.store.AppendEventsForSession(ctx, h.sessionID, events)
-}
-
-func (h *mockSessionHandle) close(context.Context) error { return nil }
-
 func TestTurnLoop_SessionStoreWithCheckpointIDWithoutStore(t *testing.T) {
 	ctx := context.Background()
 	sessionID := "test-session-id"

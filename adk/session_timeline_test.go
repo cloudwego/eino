@@ -357,7 +357,7 @@ func TestSessionTimeline_ReconstructionIgnoresNonContextVariants(t *testing.T) {
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -505,7 +505,7 @@ func TestSessionTimeline_ReconstructionIncludesPartialContextAfterLatestCommitte
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -538,7 +538,7 @@ func TestSessionTimeline_ReconstructionPartialContextMissingAnchorFails(t *testi
 		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	_, err := reconstructSessionState[*schema.Message](ctx, store, sid, defaultLoadPageSize)
+	_, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing-anchor")
 }
@@ -1947,28 +1947,10 @@ func TestSessionEventIDGenerator_CustomToolResultBusinessID(t *testing.T) {
 		"tool span end ToolResultMessageEventID must match the tool result message business ID")
 }
 
-type kindsRecordingStore struct {
-	inner         *sessionHelperStore
-	recordedKinds [][]SessionEventKind
-}
-
-func (s *kindsRecordingStore) loadEvents(ctx context.Context, opts *LoadSessionEventsRequest) (*LoadSessionEventsResult[*schema.Message], error) {
-	if opts != nil {
-		s.recordedKinds = append(s.recordedKinds, opts.Kinds)
-	}
-	return s.inner.LoadEventsForSession(ctx, "", opts)
-}
-
-func (s *kindsRecordingStore) appendEvents(ctx context.Context, events []*SessionEvent[*schema.Message]) error {
-	return s.inner.AppendEventsForSession(ctx, "", events)
-}
-
-func (s *kindsRecordingStore) close(context.Context) error { return nil }
-
 func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 	ctx := context.Background()
 	inner := newSessionHelperStore()
-	wrapper := &kindsRecordingStore{inner: inner}
+	recorder := &sessionLoadRecorder{SessionEventStore: inner}
 	sid := "timeline-kind-filter"
 
 	msg1 := schema.UserMessage("hello")
@@ -1985,13 +1967,13 @@ func TestSessionTimeline_ReconstructionUsesKindFilter(t *testing.T) {
 		require.NoError(t, inner.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
 	}
 
-	result, err := reconstructSessionState[*schema.Message](ctx, wrapper, sid, defaultLoadPageSize)
+	result, err := reconstructTestSession(t, ctx, recorder, sid, defaultLoadPageSize)
 	require.NoError(t, err)
 
 	// All recorded Kinds slices should equal sessionReplayEventKinds.
-	require.NotEmpty(t, wrapper.recordedKinds)
-	for _, kinds := range wrapper.recordedKinds {
-		assert.Equal(t, sessionReplayEventKinds, kinds)
+	require.NotEmpty(t, recorder.loadRequests)
+	for _, req := range recorder.loadRequests {
+		assert.Equal(t, sessionReplayEventKinds, req.Kinds)
 	}
 
 	// Verify reconstruction result.
