@@ -86,7 +86,16 @@ func (h *localSessionHandle[M]) loadEvents(ctx context.Context, req *LoadSession
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	return h.store.LoadEvents(ctx, h.sessionID, req)
+	result, err := h.store.LoadEvents(ctx, h.sessionID, req)
+	if err != nil || result == nil {
+		return result, err
+	}
+	for i, event := range result.Events {
+		if err := normalizeSessionEventKind(event); err != nil {
+			return nil, fmt.Errorf("adk: load session event at index %d: %w", i, err)
+		}
+	}
+	return result, nil
 }
 
 func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*SessionEvent[M]) error {
@@ -97,10 +106,12 @@ func (h *localSessionHandle[M]) appendEvents(ctx context.Context, events []*Sess
 	}
 	h.mu.Unlock()
 
-	if err := h.store.AppendEvents(ctx, h.sessionID, events); err != nil {
-		return err
+	for i, event := range events {
+		if err := validateEmittedSessionEventKind(event); err != nil {
+			return fmt.Errorf("adk: append session event at index %d: %w", i, err)
+		}
 	}
-	return nil
+	return h.store.AppendEvents(ctx, h.sessionID, events)
 }
 
 func (h *localSessionHandle[M]) close(context.Context) error {

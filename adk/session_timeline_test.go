@@ -180,7 +180,7 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.se.EventID = uuid.NewString()
-			require.NoError(t, NormalizeSessionEventKind(tc.se))
+			require.NoError(t, normalizeSessionEventKind(tc.se))
 			assert.Equal(t, tc.kind, tc.se.Kind)
 
 			data, err := encodeSessionEvent(tc.se)
@@ -198,9 +198,76 @@ func TestSessionTimeline_ClassifyAndSerializeVariants(t *testing.T) {
 	}
 }
 
+func TestSessionTimeline_PayloadCountValidationPrecedesContentValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		event   *SessionEvent[*schema.Message]
+		wantErr string
+	}{
+		{
+			name:    "invalid span",
+			event:   &SessionEvent[*schema.Message]{Span: &SpanEvent{}},
+			wantErr: "span event must populate exactly one of Model or Tool",
+		},
+		{
+			name:    "invalid incomplete message",
+			event:   &SessionEvent[*schema.Message]{MessageStreamIncomplete: &MessageStreamIncompleteEvent[*schema.Message]{}},
+			wantErr: "message stream incomplete event must set non-nil Message",
+		},
+		{
+			name:    "invalid extension",
+			event:   &SessionEvent[*schema.Message]{Extension: &SessionExtensionEvent{}},
+			wantErr: "session extension event must set kind",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.EqualError(t, normalizeSessionEventKind(tc.event), tc.wantErr)
+
+			// A payload conflict takes precedence over invalid payload contents.
+			tc.event.Message = schema.UserMessage("hello")
+			require.EqualError(t, normalizeSessionEventKind(tc.event),
+				"session event must have exactly one active payload, got 2")
+
+			// Keep reporting the actual count, rather than stopping at the second.
+			tc.event.Cancel = &CancelEvent{}
+			require.EqualError(t, normalizeSessionEventKind(tc.event),
+				"session event must have exactly one active payload, got 3")
+		})
+	}
+}
+
+func BenchmarkClassifySessionEvent(b *testing.B) {
+	cases := []struct {
+		name  string
+		event *SessionEvent[*schema.Message]
+	}{
+		{
+			name:  "message",
+			event: &SessionEvent[*schema.Message]{Message: schema.UserMessage("hello")},
+		},
+		{
+			name: "model span",
+			event: &SessionEvent[*schema.Message]{Span: &SpanEvent{
+				Kind: SpanKindModel, StartedAt: time.Unix(1, 0), Model: &ModelSpanMeta{},
+			}},
+		},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := classifySessionEvent(tc.event); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	t.Run("empty kind rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := normalizeSessionEventKind(&SessionEvent[*schema.Message]{
 			Extension: &SessionExtensionEvent{},
 		})
 		require.Error(t, err)
@@ -208,7 +275,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	})
 
 	t.Run("non extension kind rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := normalizeSessionEventKind(&SessionEvent[*schema.Message]{
 			Kind:      SessionEventKind("outcome.started"),
 			Extension: &SessionExtensionEvent{},
 		})
@@ -217,7 +284,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	})
 
 	t.Run("built in kind rejected", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := normalizeSessionEventKind(&SessionEvent[*schema.Message]{
 			Kind:      SessionEventMessage,
 			Extension: &SessionExtensionEvent{},
 		})
@@ -226,7 +293,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	})
 
 	t.Run("built in payload cannot use extension namespace", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := normalizeSessionEventKind(&SessionEvent[*schema.Message]{
 			Kind:    SessionEventKind("x.message"),
 			Message: schema.UserMessage("hello"),
 		})
@@ -235,7 +302,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 	})
 
 	t.Run("one active payload invariant", func(t *testing.T) {
-		err := NormalizeSessionEventKind(&SessionEvent[*schema.Message]{
+		err := normalizeSessionEventKind(&SessionEvent[*schema.Message]{
 			Kind:      SessionEventKind("x.outcome.started"),
 			Message:   schema.UserMessage("hello"),
 			Extension: &SessionExtensionEvent{},
@@ -251,7 +318,7 @@ func TestSessionTimeline_ExtensionValidation(t *testing.T) {
 			Kind:      SessionEventKind("x.outcome.grading"),
 			Extension: &SessionExtensionEvent{Data: &sessionTimelineExtensionPayload{Attempt: 1}},
 		}
-		require.NoError(t, NormalizeSessionEventKind(se))
+		require.NoError(t, normalizeSessionEventKind(se))
 		data, err := encodeSessionEvent(se)
 		require.NoError(t, err)
 		decoded, err := decodeSessionEvent[*schema.Message](data)
@@ -311,7 +378,7 @@ func TestSessionTimeline_AgentInterruptRoundTripPreservesContexts(t *testing.T) 
 			},
 		},
 	}
-	require.NoError(t, NormalizeSessionEventKind(se))
+	require.NoError(t, normalizeSessionEventKind(se))
 	require.Equal(t, SessionEventInterrupt, se.Kind)
 
 	data, err := encodeSessionEvent(se)
@@ -779,7 +846,7 @@ func TestSessionTimeline_SpanMetaMustBeOneOf(t *testing.T) {
 		},
 	}
 
-	err := NormalizeSessionEventKind(se)
+	err := normalizeSessionEventKind(se)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one of Model or Tool")
 }
@@ -810,24 +877,67 @@ func TestRetryTimelineEmitsRetryingError(t *testing.T) {
 	}, kinds)
 }
 
-func TestModelUsageFromAssistantMapsNormalizedUsage(t *testing.T) {
+func TestModelSpanEndPreservesTokenUsage(t *testing.T) {
 	usage := &schema.TokenUsage{
 		PromptTokens:     10,
 		CompletionTokens: 5,
+		TotalTokens:      15,
 		PromptTokenDetails: schema.PromptTokenDetails{
-			CachedTokens: 7,
+			CachedTokens:     7,
+			CacheWriteTokens: 2,
+		},
+		CompletionTokensDetails: schema.CompletionTokensDetails{
+			ReasoningTokens: 3,
 		},
 	}
 	msg := schema.AssistantMessage("ok", nil)
 	msg.ResponseMeta = &schema.ResponseMeta{Usage: usage}
+	agenticMsg := &schema.AgenticMessage{
+		Role:         schema.AgenticRoleTypeAssistant,
+		ResponseMeta: &schema.AgenticResponseMeta{TokenUsage: usage},
+	}
 
-	got := modelUsageFromAssistant[*schema.Message](msg)
-	require.NotNil(t, got)
-	assert.Equal(t, 10, got.InputTokens)
-	assert.Equal(t, 5, got.OutputTokens)
-	assert.Equal(t, 7, got.CacheReadInputTokens)
-	assert.Zero(t, got.CacheCreationInputTokens)
-	assert.Same(t, usage, got.Raw)
+	t.Run("Message", func(t *testing.T) {
+		testModelSpanUsageRoundTrip(t, msg, usage)
+	})
+	t.Run("AgenticMessage", func(t *testing.T) {
+		testModelSpanUsageRoundTrip(t, agenticMsg, usage)
+	})
+	t.Run("MissingMessage", func(t *testing.T) {
+		testModelSpanUsageRoundTrip(t, (*schema.Message)(nil), nil)
+	})
+	t.Run("MissingAgenticUsage", func(t *testing.T) {
+		testModelSpanUsageRoundTrip(t, &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant}, nil)
+	})
+}
+
+func testModelSpanUsageRoundTrip[M MessageType](t *testing.T, msg M, usage *schema.TokenUsage) {
+	t.Helper()
+	started := time.Now().UTC()
+	event := newModelSpanEndEvent(context.Background(), modelSpanEndEventInput[M]{
+		spanID:       "model-span",
+		startEventID: "model-start",
+		started:      started,
+		ended:        started.Add(time.Second),
+		msg:          msg,
+		firstChunk:   25 * time.Millisecond,
+	})
+	assert.Equal(t, usage, event.Span.Model.Usage)
+	assert.Equal(t, int64(25), event.Span.Model.TTFTMS)
+	for name, serializer := range map[string]schema.Serializer{
+		"HumanReadable": &schema.HumanReadableSerializer{},
+		"Gob":           &schema.GobSerializer{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, err := encodeSessionEventWithSerializer(event, serializer)
+			require.NoError(t, err)
+			decoded, err := decodeSessionEventWithSerializer[M](data, serializer)
+			require.NoError(t, err)
+			require.NotNil(t, decoded.Span.Model)
+			assert.Equal(t, usage, decoded.Span.Model.Usage)
+			assert.Equal(t, int64(25), decoded.Span.Model.TTFTMS)
+		})
+	}
 }
 
 func TestModelSpanEndCarriesAssistantUsage(t *testing.T) {
@@ -868,11 +978,10 @@ func TestModelSpanEndCarriesAssistantUsage(t *testing.T) {
 	require.NotNil(t, spanEnd)
 	require.NotNil(t, spanEnd.Span.Model)
 	require.NotNil(t, spanEnd.Span.Model.Usage)
-	assert.Equal(t, 12, spanEnd.Span.Model.Usage.InputTokens)
-	assert.Equal(t, 6, spanEnd.Span.Model.Usage.OutputTokens)
-	assert.Equal(t, 4, spanEnd.Span.Model.Usage.CacheReadInputTokens)
+	assert.Equal(t, usage, spanEnd.Span.Model.Usage)
 	assert.Equal(t, "stop", spanEnd.Span.Model.FinishReason)
-	assert.True(t, spanEnd.Span.Model.Accepted)
+	assert.Equal(t, SpanStatusOK, spanEnd.Span.Status)
+	assert.Zero(t, spanEnd.Span.Model.TTFTMS)
 }
 
 func TestSessionTimeline_EmittedKindIsDerivedBeforeSend(t *testing.T) {
@@ -911,7 +1020,6 @@ func TestSessionTimeline_TypedAgentEventGobRoundTripPreservesSessionEvent(t *tes
 				Span: &SpanEvent{
 					SpanID:    spanID,
 					Kind:      SpanKindTool,
-					Name:      "tool_call",
 					StartedAt: now,
 					Tool:      &ToolSpanMeta{ToolUseID: "call_1", Name: "lookup"},
 				},
@@ -952,7 +1060,6 @@ func TestModelSpanMetaFromContextPopulatesFailoverAndModelFields(t *testing.T) {
 			started:      started,
 			ended:        started.Add(time.Millisecond),
 			msg:          schema.AssistantMessage("ok", nil),
-			accepted:     true,
 		},
 		model.WithModel("claude-sonnet"),
 	)
@@ -973,20 +1080,28 @@ func TestRetryTimelineUsesRejectReasonMessage(t *testing.T) {
 	var calls int
 	inner := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 		calls++
+		msg := schema.AssistantMessage("ok", nil)
 		if calls == 1 {
-			return schema.AssistantMessage("bad", nil), nil
+			msg.Content = "bad"
 		}
-		return schema.AssistantMessage("ok", nil), nil
+		msg.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{
+			PromptTokens:     calls * 10,
+			CompletionTokens: calls * 5,
+			TotalTokens:      calls * 15,
+		}}
+		return msg, nil
 	}, nil)
-	wrapper := newTypedRetryModelWrapper[*schema.Message](inner, &ModelRetryConfig{
-		MaxRetries: 1,
-		ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
-			if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
-				return &RetryDecision{Retry: true, RejectReason: "policy rejected"}
-			}
-			return &RetryDecision{}
+	wrapper := buildModelWrappers[*schema.Message](inner, &modelWrapperConfig{
+		retryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
+					return &RetryDecision{Retry: true, RejectReason: "policy rejected"}
+				}
+				return &RetryDecision{}
+			},
+			BackoffFunc: func(context.Context, int) time.Duration { return 0 },
 		},
-		BackoffFunc: func(context.Context, int) time.Duration { return 0 },
 	})
 
 	msg, err := wrapper.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -995,6 +1110,8 @@ func TestRetryTimelineUsesRejectReasonMessage(t *testing.T) {
 	gen.Close()
 
 	var found bool
+	var ends []*SpanEvent
+	var outputs []string
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -1005,8 +1122,28 @@ func TestRetryTimelineUsesRejectReasonMessage(t *testing.T) {
 			assert.Equal(t, "policy rejected", event.SessionEventVariant.Event.Error.Message)
 			found = true
 		}
+		if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && event.SessionEventVariant.Event.Kind == SessionEventSpanModelRequestEnd {
+			ends = append(ends, event.SessionEventVariant.Event.Span)
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			outputs = append(outputs, event.Output.MessageOutput.Message.Content)
+		}
 	}
 	assert.True(t, found)
+	require.Len(t, ends, 2)
+	assert.Equal(t, SpanStatusError, ends[0].Status)
+	assert.Contains(t, ends[0].Err, "model output rejected by ShouldRetry")
+	assert.Equal(t, SpanStatusOK, ends[1].Status)
+	assert.Empty(t, ends[1].Err)
+	for i, end := range ends {
+		require.NotNil(t, end.Model.Usage)
+		assert.Equal(t, &schema.TokenUsage{
+			PromptTokens:     (i + 1) * 10,
+			CompletionTokens: (i + 1) * 5,
+			TotalTokens:      (i + 1) * 15,
+		}, end.Model.Usage, "usage belongs to this attempt, not the sum of attempts")
+	}
+	assert.Equal(t, []string{"ok"}, outputs)
 }
 
 func TestFailoverTimelineLinksAttemptsAndEmitsSessionErrors(t *testing.T) {
@@ -1094,31 +1231,155 @@ func TestSessionTimeline_EventIDMismatchRejectedAtPersistenceBoundary(t *testing
 	assert.Contains(t, err.Error(), "exactly one")
 }
 
-func TestSessionTimeline_NormalizeAgentSessionEventMaterializesEnvelope(t *testing.T) {
-	now := time.Now().UTC()
-	makeToolStartSpan := func() *SessionEvent[*schema.Message] {
-		return &SessionEvent[*schema.Message]{
-			Kind: SessionEventSpanToolCallStart,
-			Span: &SpanEvent{
-				SpanID:    uuid.NewString(),
-				Kind:      SpanKindTool,
-				StartedAt: now,
-				Tool:      &ToolSpanMeta{ToolUseID: "call_1"},
-			},
+func TestSessionTimeline_ConversionDoesNotPrepareEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+		kind SessionEventKind
+		err  string
+	}{
+		{name: "copies without filling timestamp", id: "prepared-id", kind: SessionEventMessage},
+		{name: "missing id", kind: SessionEventMessage, err: ErrInvalidEventID.Error()},
+		{name: "missing kind", id: "prepared-id", err: "emitted session event must set non-empty Kind"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := &SessionEvent[*schema.Message]{EventID: tc.id, Kind: tc.kind, Message: schema.UserMessage("hello")}
+			event := &AgentEvent{SessionEventVariant: &SessionEventVariant[*schema.Message]{Event: original}}
+			se, err := toSessionEventChecked(event)
+			if tc.err != "" {
+				require.EqualError(t, err, tc.err)
+				assert.Nil(t, se)
+			} else {
+				require.NoError(t, err)
+				assert.NotSame(t, original, se)
+				assert.Equal(t, *original, *se)
+			}
+			assert.Same(t, original, event.SessionEventVariant.Event)
+			assert.Equal(t, tc.id, original.EventID)
+			assert.Equal(t, tc.kind, original.Kind)
+			assert.True(t, original.Timestamp.IsZero())
+		})
+	}
+}
+
+func TestRunnerRejectsIdentifiedEventWithoutKind(t *testing.T) {
+	ctx := context.Background()
+	original := &SessionEvent[*schema.Message]{EventID: "assigned", Message: schema.AssistantMessage("hello", nil)}
+	store := newSessionHelperStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: &runnerSingleEventAgent{event: &AgentEvent{
+			SessionEventVariant: &SessionEventVariant[*schema.Message]{Event: original},
+		}},
+		SessionID: "missing-kind", SessionStore: store,
+	})
+	iter := runner.Query(ctx, "hello", WithTimelineEvents())
+	var eventErrors []error
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			eventErrors = append(eventErrors, event.Err)
 		}
 	}
+	require.NotEmpty(t, eventErrors)
+	for _, err := range eventErrors {
+		require.ErrorContains(t, err, "emitted session event must set non-empty Kind")
+	}
+	assert.Empty(t, original.Kind)
+	assert.True(t, original.Timestamp.IsZero())
+	assert.Empty(t, filterStoredSessionEvents(t, store.events, func(event *SessionEvent[*schema.Message]) bool {
+		return event.EventID == original.EventID
+	}))
+}
 
-	t.Run("id empty", func(t *testing.T) {
-		original := makeToolStartSpan()
-		event := &AgentEvent{SessionEventVariant: &SessionEventVariant[*schema.Message]{Event: original}}
-		se, err := normalizeAgentSessionEvent(event)
-		require.NoError(t, err)
-		require.NotEmpty(t, se.EventID)
-		assert.Equal(t, se.EventID, event.SessionEventVariant.Event.EventID)
-		require.False(t, se.Timestamp.IsZero())
-		assert.Equal(t, se.Timestamp, event.SessionEventVariant.Event.Timestamp)
-		assert.Empty(t, original.EventID)
-	})
+func TestRunnerSessionEventEnvelopePreparedBeforeConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		id        string
+		timestamp time.Time
+	}{
+		{name: "draft"},
+		{name: "existing id", id: "preassigned-id"},
+		{name: "existing envelope", id: "preassigned-id", timestamp: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			original := &SessionEvent[*schema.Message]{
+				EventID: tc.id, Timestamp: tc.timestamp,
+				Message: schema.AssistantMessage("envelope", nil),
+			}
+			if tc.id != "" {
+				original.Kind = SessionEventMessage
+			}
+			store := newSessionHelperStore()
+			var generatorCalls, providerCalls int
+			isOutput := func(event *SessionEvent[*schema.Message]) bool {
+				return event.Message != nil && event.Message.Content == "envelope"
+			}
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent: &runnerSingleEventAgent{event: &AgentEvent{
+					SessionEventVariant: &SessionEventVariant[*schema.Message]{Event: original},
+				}},
+				SessionID: "envelope-session", SessionStore: store,
+				SessionConfig: &SessionConfig[*schema.Message]{
+					EventIDGenerator: func(ctx context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+						if isOutput(event) {
+							generatorCalls++
+							assert.Equal(t, SessionEventMessage, event.Kind)
+							assert.False(t, event.Timestamp.IsZero())
+							assert.Equal(t, "provider", event.Extra["source"])
+							return "generated-id", nil
+						}
+						return DefaultSessionEventIDGenerator(ctx, event)
+					},
+					EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+						if isOutput(event) {
+							providerCalls++
+							assert.Empty(t, event.EventID)
+							assert.False(t, event.Timestamp.IsZero())
+							return map[string]any{"source": "provider"}, nil
+						}
+						return nil, nil
+					},
+				},
+			})
+			var live *SessionEvent[*schema.Message]
+			iter := runner.Query(ctx, "hello", WithTimelineEvents())
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+				if event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil && isOutput(event.SessionEventVariant.Event) {
+					live = event.SessionEventVariant.Event
+				}
+			}
+			require.NotNil(t, live)
+			assert.Equal(t, SessionEventMessage, live.Kind)
+			assert.False(t, live.Timestamp.IsZero())
+			if tc.id == "" {
+				assert.Equal(t, "generated-id", live.EventID)
+				assert.Equal(t, 1, generatorCalls)
+				assert.Equal(t, 1, providerCalls)
+			} else {
+				assert.Equal(t, tc.id, live.EventID)
+				assert.Zero(t, generatorCalls)
+				assert.Zero(t, providerCalls)
+			}
+			if !tc.timestamp.IsZero() {
+				assert.Equal(t, tc.timestamp, live.Timestamp)
+			}
+			stored := filterStoredSessionEvents(t, store.events, isOutput)
+			require.Len(t, stored, 1)
+			assert.Equal(t, live.EventID, stored[0].EventID)
+			assert.True(t, live.Timestamp.Equal(stored[0].Timestamp))
+			assert.Equal(t, tc.id, original.EventID)
+			assert.Equal(t, tc.timestamp, original.Timestamp)
+		})
+	}
 }
 
 func TestRetryOnlyModelSpansHaveNoParentSpanID(t *testing.T) {

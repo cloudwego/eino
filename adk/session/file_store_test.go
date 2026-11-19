@@ -281,14 +281,13 @@ func TestFileStoreValidationReplayAndReversePagination(t *testing.T) {
 func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
 	ctx := context.Background()
 	cases := map[string]string{
-		"missing newline":     "e1\tmessage\t{}",
-		"empty event id":      "\tmessage\t{}\n",
-		"missing kind tab":    "e1\tmessage-only\n",
-		"duplicate event id":  "e1\tmessage\t{}\ne1\tmessage\t{}\n",
-		"header mismatches":   "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
-		"invalid event body":  "e1\tmessage\tnot-json\n",
-		"invalid event shape": "e1\tmessage\t{\"event_id\":\"e1\",\"kind\":\"message\"}\n",
-		"empty session id":    "",
+		"missing newline":    "e1\tmessage\t{}",
+		"empty event id":     "\tmessage\t{}\n",
+		"missing kind tab":   "e1\tmessage-only\n",
+		"duplicate event id": "e1\tmessage\t{}\ne1\tmessage\t{}\n",
+		"header mismatches":  "e1\tturn_end\t{\"event_id\":\"e1\",\"kind\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"x\"}}\n",
+		"invalid event body": "e1\tmessage\tnot-json\n",
+		"empty session id":   "",
 	}
 
 	for name, content := range cases {
@@ -309,6 +308,18 @@ func TestFileStoreRejectsCorruptedRecordsOnIndexRebuild(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestRollbackSessionRejectsInvalidStoredEventShape(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore[*schema.Message](dir, nil)
+	require.NoError(t, err)
+	path := filepath.Join(dir, "s.evlog")
+	// The record is well-formed storage, but the event is missing its payload.
+	content := "e1\tsession.status_idle\t{\"event_id\":\"e1\",\"kind\":\"session.status_idle\"}\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	err = adk.RollbackSession[*schema.Message](context.Background(), store, "s", "e1")
+	require.ErrorContains(t, err, "session event must have exactly one active payload, got 0")
 }
 
 type newlineSerializer struct{}

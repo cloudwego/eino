@@ -35,6 +35,7 @@ type serviceContractStore struct {
 	appendSessionIDs []string
 	appendEvents     [][]*SessionEvent[*schema.Message]
 	loadErr          error
+	loadResult       *LoadSessionEventsResult[*schema.Message]
 	appendErr        error
 }
 
@@ -43,6 +44,9 @@ func (s *serviceContractStore) LoadEvents(_ context.Context, sessionID string, r
 	s.loadReqs = append(s.loadReqs, req)
 	if s.loadErr != nil {
 		return nil, s.loadErr
+	}
+	if s.loadResult != nil {
+		return s.loadResult, nil
 	}
 	return &LoadSessionEventsResult[*schema.Message]{}, nil
 }
@@ -69,16 +73,10 @@ func TestUsageHelpersExtractAssistantMetadata(t *testing.T) {
 
 	assert.Same(t, usage, assistantTokenUsage[*schema.Message](msg))
 	assert.Equal(t, "stop", assistantFinishReason[*schema.Message](msg))
-	got := modelUsageFromAssistant[*schema.Message](msg)
-	require.NotNil(t, got)
-	assert.Equal(t, 11, got.InputTokens)
-	assert.Equal(t, 7, got.OutputTokens)
-	assert.Equal(t, 5, got.CacheReadInputTokens)
-	assert.Same(t, usage, got.Raw)
 
 	assert.Nil(t, assistantTokenUsage[*schema.Message](schema.UserMessage("q")))
 	assert.Empty(t, assistantFinishReason[*schema.Message](schema.UserMessage("q")))
-	assert.Nil(t, modelUsageFromAssistant[*schema.Message](schema.AssistantMessage("no usage", nil)))
+	assert.Nil(t, assistantTokenUsage[*schema.Message](schema.AssistantMessage("no usage", nil)))
 	assert.Nil(t, assistantTokenUsage[*schema.Message](nil))
 
 	agenticUsage := &schema.TokenUsage{PromptTokens: 3, CompletionTokens: 4}
@@ -215,4 +213,58 @@ func TestLocalSessionStoreHandleContracts(t *testing.T) {
 	err = opened.handle.appendEvents(ctx, []*SessionEvent[*schema.Message]{validTestPayload()})
 	require.ErrorContains(t, err, "append failed")
 	require.NoError(t, opened.handle.close(ctx))
+}
+
+func TestLocalSessionHandleNormalizesLoadedEvents(t *testing.T) {
+	ctx := context.Background()
+	message := &SessionEvent[*schema.Message]{EventID: "message", Message: schema.UserMessage("hello")}
+	legacy := &SessionEvent[*schema.Message]{EventID: "legacy", Kind: "turn_end"}
+	store := &serviceContractStore{loadResult: &LoadSessionEventsResult[*schema.Message]{
+		Events: []*SessionEvent[*schema.Message]{message, legacy},
+		Next:   "legacy",
+	}}
+	handle := &localSessionHandle[*schema.Message]{store: store, sessionID: "sid"}
+	result, err := handle.loadEvents(ctx, nil)
+	require.NoError(t, err)
+	require.Len(t, result.Events, 2)
+	assert.Equal(t, SessionEventMessage, result.Events[0].Kind)
+	assert.Equal(t, SessionEventKind("turn_end"), result.Events[1].Kind)
+	assert.Equal(t, "legacy", result.Next)
+}
+
+func TestLocalSessionHandleRejectsInvalidEvents(t *testing.T) {
+	cases := map[string]*SessionEvent[*schema.Message]{
+		"nil event":       nil,
+		"empty event":     {EventID: "bad"},
+		"missing payload": {EventID: "bad", Kind: SessionEventMessage},
+		"kind mismatch":   {EventID: "bad", Kind: SessionEventCancel, Message: schema.UserMessage("hello")},
+		"multiple payloads": {
+			EventID: "bad", Kind: SessionEventMessage, Message: schema.UserMessage("hello"),
+			Cancel: &CancelEvent{},
+		},
+	}
+	for name, event := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			events := []*SessionEvent[*schema.Message]{validTestPayload(), event}
+			store := &serviceContractStore{loadResult: &LoadSessionEventsResult[*schema.Message]{Events: events}}
+			handle := &localSessionHandle[*schema.Message]{store: store, sessionID: "sid"}
+			result, err := handle.loadEvents(ctx, nil)
+			require.ErrorContains(t, err, "load session event at index 1")
+			assert.Nil(t, result)
+
+			err = handle.appendEvents(ctx, events)
+			require.ErrorContains(t, err, "append session event at index 1")
+			assert.Empty(t, store.appendEvents, "invalid batches must not reach the store")
+		})
+	}
+}
+
+func TestLocalSessionHandleRequiresExplicitKindOnAppend(t *testing.T) {
+	store := &serviceContractStore{}
+	handle := &localSessionHandle[*schema.Message]{store: store, sessionID: "sid"}
+	event := &SessionEvent[*schema.Message]{EventID: "message", Message: schema.UserMessage("hello")}
+	err := handle.appendEvents(context.Background(), []*SessionEvent[*schema.Message]{event})
+	require.ErrorContains(t, err, "emitted session event must set non-empty Kind")
+	assert.Empty(t, store.appendEvents)
 }
