@@ -172,6 +172,7 @@ func concatString(sr *schema.StreamReader[string]) (string, error) {
 	if sr == nil {
 		return "", errors.New("stream is nil")
 	}
+	defer sr.Close()
 	sb := strings.Builder{}
 	for {
 		str, err := sr.Recv()
