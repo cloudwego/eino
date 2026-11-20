@@ -34,8 +34,10 @@ Skills follow a **progressive disclosure** pattern - you see their name and desc
 - You need specialized knowledge or structured workflows
 - A skill provides proven patterns for complex tasks
 
-**Executing Skill Scripts:**
-Skills may contain Python scripts or other executable files. Always use absolute paths.
+**Skill Script Support:**
+Skills may reference Python scripts or other executable files. This skill tool only loads
+the skill instructions; run scripts only when your environment provides file access and
+command execution tools, and always use absolute paths.
 
 **Example Workflow:**
 
@@ -66,8 +68,9 @@ Skill 遵循**渐进式展示**模式 - 你可以在上方看到 Skill 的名称
 - 你需要专业知识或结构化工作流程
 - 某个 Skill 为复杂任务提供了经过验证的模式
 
-**执行 Skill 脚本：**
-Skill 可能包含 Python 脚本或其他可执行文件。始终使用绝对路径。
+**Skill 脚本支持：**
+Skill 可能引用 Python 脚本或其他可执行文件。此 Skill 工具只负责加载 Skill
+说明；仅当运行环境提供文件访问和命令执行工具时才运行脚本，并始终使用绝对路径。
 
 **示例工作流程：**
 
