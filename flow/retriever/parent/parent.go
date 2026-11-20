@@ -74,6 +74,9 @@ func NewRetriever(ctx context.Context, config *Config) (retriever.Retriever, err
 	if config.OrigDocGetter == nil {
 		return nil, fmt.Errorf("orig doc getter is required")
 	}
+	if config.ParentIDKey == "" {
+		return nil, fmt.Errorf("parent id key is required")
+	}
 	return &parentRetriever{
 		retriever:     config.Retriever,
 		parentIDKey:   config.ParentIDKey,

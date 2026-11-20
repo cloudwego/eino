@@ -41,6 +41,27 @@ func (t *testRetriever) Retrieve(ctx context.Context, query string, opts ...retr
 	return ret, nil
 }
 
+func TestNewRetrieverValidation(t *testing.T) {
+	ctx := context.Background()
+	tr := &testRetriever{}
+	getter := func(ctx context.Context, ids []string) ([]*schema.Document, error) { return nil, nil }
+
+	_, err := NewRetriever(ctx, &Config{Retriever: nil, ParentIDKey: "k", OrigDocGetter: getter})
+	if err == nil {
+		t.Error("expected error when Retriever is nil")
+	}
+
+	_, err = NewRetriever(ctx, &Config{Retriever: tr, ParentIDKey: "k", OrigDocGetter: nil})
+	if err == nil {
+		t.Error("expected error when OrigDocGetter is nil")
+	}
+
+	_, err = NewRetriever(ctx, &Config{Retriever: tr, ParentIDKey: "", OrigDocGetter: getter})
+	if err == nil {
+		t.Error("expected error when ParentIDKey is empty")
+	}
+}
+
 func TestParentRetriever(t *testing.T) {
 	tests := []struct {
 		name   string
