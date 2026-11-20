@@ -27,6 +27,34 @@ import (
 	"github.com/cloudwego/eino/internal/generic"
 )
 
+func TestConcatUserTextPreservesPartExtra(t *testing.T) {
+	chunks := []*Message{
+		{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeText, Text: "hello ", Extra: map[string]any{"source": "note"}},
+			},
+		},
+		{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeText, Text: "world", Extra: map[string]any{"cache_control": map[string]any{"type": "ephemeral"}}},
+			},
+		},
+	}
+
+	merged, err := ConcatMessages(chunks)
+	assert.NoError(t, err)
+	if !assert.Len(t, merged.UserInputMultiContent, 1) {
+		return
+	}
+	assert.Equal(t, "hello world", merged.UserInputMultiContent[0].Text)
+	assert.Equal(t, map[string]any{
+		"source":        "note",
+		"cache_control": map[string]any{"type": "ephemeral"},
+	}, merged.UserInputMultiContent[0].Extra)
+}
+
 func TestMessageTemplate(t *testing.T) {
 	pyFmtMessage := UserMessage("input: {question}")
 	jinja2Message := UserMessage("input: {{question}}")
