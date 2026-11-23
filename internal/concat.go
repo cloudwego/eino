@@ -113,30 +113,33 @@ func ConcatItems[T any](items []T) (T, error) {
 func concatMaps(ms reflect.Value) (reflect.Value, error) {
 	typ := ms.Type().Elem()
 
-	rms := reflect.MakeMap(reflect.MapOf(typ.Key(), generic.TypeOf[[]any]()))
+	// Collect the values of each key in chunk order. A Go map from key to
+	// index avoids a reflect.Append and SetMapIndex for each key of each
+	// chunk. Keys that are not equal to themselves, such as NaN, get one
+	// entry for each occurrence, as with a reflect map.
+	var keys []reflect.Value
+	var keyVals [][]any
+	index := make(map[any]int)
 	ret := reflect.MakeMap(typ)
 
 	n := ms.Len()
 	for i := 0; i < n; i++ {
-		m := ms.Index(i)
-
-		for _, key := range m.MapKeys() {
-			vals := rms.MapIndex(key)
-			if !vals.IsValid() {
-				var s []any
-				vals = reflect.ValueOf(s)
+		iter := ms.Index(i).MapRange()
+		for iter.Next() {
+			k := iter.Key()
+			j, ok := index[k.Interface()]
+			if !ok {
+				j = len(keys)
+				index[k.Interface()] = j
+				keys = append(keys, k)
+				keyVals = append(keyVals, nil)
 			}
-
-			val := m.MapIndex(key)
-			vals = reflect.Append(vals, val)
-			rms.SetMapIndex(key, vals)
+			keyVals[j] = append(keyVals[j], iter.Value().Interface())
 		}
 	}
 
-	for _, key := range rms.MapKeys() {
-		vals := rms.MapIndex(key)
-
-		anyVals := vals.Interface().([]any)
+	for j, key := range keys {
+		anyVals := keyVals[j]
 
 		// nil represents an absent/empty value for this key in a chunk.
 		// Filter nils out so concat is order-independent and toSliceValue
