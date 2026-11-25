@@ -213,22 +213,35 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		}
 	}
 
+	// lastEvent tracks the most recent event of any kind and drives the
+	// interrupt handling below. It must not be used to pick the tool result:
+	// a middleware can emit a trailing event that only carries a customized
+	// action (e.g. an audit or progress notice from AfterAgent), and that
+	// event has no message output at all.
 	var lastEvent *TypedAgentEvent[M]
+
+	// lastOutputEvent tracks the most recent event that actually carries a
+	// message output, which is the only kind of event that can answer the
+	// tool call. Trailing action-only events leave it untouched.
+	var lastOutputEvent *TypedAgentEvent[M]
+
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
 
-		if lastEvent != nil &&
-			lastEvent.Output != nil &&
-			lastEvent.Output.MessageOutput != nil &&
-			lastEvent.Output.MessageOutput.MessageStream != nil {
-			lastEvent.Output.MessageOutput.MessageStream.Close()
+		if event.Err != nil {
+			closeRetainedOutput(lastOutputEvent)
+			return "", event.Err
 		}
 
-		if event.Err != nil {
-			return "", event.Err
+		// A new message output supersedes the retained one, so release the
+		// previous stream. Action-only events must not reach this branch,
+		// otherwise the retained answer stream is closed before it is read.
+		hasOutput := hasMessageOutput(event)
+		if hasOutput {
+			closeRetainedOutput(lastOutputEvent)
 		}
 
 		if gen != nil {
@@ -245,10 +258,19 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			}
 		}
 
+		// Retain the event after forwarding: when internal event forwarding is
+		// enabled, the forwarded event owns the original stream and this run
+		// keeps the copy, so the answer must be read from the copy.
+		if hasOutput {
+			lastOutputEvent = event
+		}
+
 		lastEvent = event
 	}
 
 	if lastEvent != nil && lastEvent.Action != nil && lastEvent.Action.Interrupted != nil {
+		closeRetainedOutput(lastOutputEvent)
+
 		data, existed, err_ := ms.Get(ctx, bridgeCheckpointID)
 		if err_ != nil {
 			return "", fmt.Errorf("failed to get interrupt info: %w", err_)
@@ -266,8 +288,8 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	var ret string
-	if lastEvent.Output != nil {
-		if output := lastEvent.Output.MessageOutput; output != nil {
+	if lastOutputEvent != nil && lastOutputEvent.Output != nil {
+		if output := lastOutputEvent.Output.MessageOutput; output != nil {
 			msg, err := output.GetMessage()
 			if err != nil {
 				return "", err
@@ -277,6 +299,23 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	}
 
 	return ret, nil
+}
+
+// hasMessageOutput reports whether the event carries a message output.
+func hasMessageOutput[M MessageType](event *TypedAgentEvent[M]) bool {
+	return event != nil && event.Output != nil && event.Output.MessageOutput != nil
+}
+
+// closeRetainedOutput releases the message stream of a retained event. Events
+// built from a non-streaming message hold no stream, so there is nothing to
+// release in that case.
+func closeRetainedOutput[M MessageType](event *TypedAgentEvent[M]) {
+	if !hasMessageOutput(event) {
+		return
+	}
+	if s := event.Output.MessageOutput.MessageStream; s != nil {
+		s.Close()
+	}
 }
 
 // agentToolOptions is a wrapper structure used to convert AgentRunOption slices to tool.Option.
