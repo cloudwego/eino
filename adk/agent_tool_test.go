@@ -1239,3 +1239,93 @@ func TestCrossTypeAgentToolGracefulError(t *testing.T) {
 			"Error should mention cross-message-type incompatibility")
 	}
 }
+
+// afterAgentCustomEventMiddleware emits a custom (non-message) event from
+// AfterAgent, mimicking audit/progress notifications that a middleware reports
+// once the sub-agent has already produced its final answer.
+type afterAgentCustomEventMiddleware struct {
+	*TypedBaseChatModelAgentMiddleware[*schema.Message]
+
+	action any
+}
+
+func (m *afterAgentCustomEventMiddleware) AfterAgent(
+	ctx context.Context, _ *TypedChatModelAgentState[*schema.Message],
+) (context.Context, error) {
+	err := TypedSendEvent(ctx, &TypedAgentEvent[*schema.Message]{
+		AgentName: "audit",
+		Action:    &AgentAction{CustomizedAction: m.action},
+	})
+	if err != nil {
+		return ctx, err
+	}
+
+	return ctx, nil
+}
+
+// TestAgentTool_InvokableRun_CustomEventAfterAnswer reproduces the case where the
+// sub-agent's last event only carries a customized action. The answer produced by
+// the sub-agent must still be returned instead of an empty string.
+func TestAgentTool_InvokableRun_CustomEventAfterAnswer(t *testing.T) {
+	ctx := context.Background()
+
+	inner, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "inner",
+		Description: "leaf",
+		Model:       &emitOnceModel{},
+		Handlers: []ChatModelAgentMiddleware{
+			&afterAgentCustomEventMiddleware{
+				TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+				action:                            "audit complete",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	agentTool := NewAgentTool(ctx, inner)
+	out, err := agentTool.(tool.InvokableTool).InvokableRun(ctx, `{"request":"q"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "inner2", out)
+}
+
+// customEventAfterStreamAgent emits a streaming message output and then a
+// customized action. The trailing action must not close the retained message
+// stream before it is read.
+type customEventAfterStreamAgent struct{}
+
+func (c *customEventAfterStreamAgent) Name(context.Context) string        { return "stream-audit" }
+func (c *customEventAfterStreamAgent) Description(context.Context) string { return "test" }
+
+func (c *customEventAfterStreamAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	it, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		gen.Send(&AgentEvent{
+			AgentName: "stream-audit",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)}),
+				},
+			},
+		})
+		gen.Send(&AgentEvent{
+			AgentName: "stream-audit",
+			Action:    &AgentAction{CustomizedAction: "audit complete"},
+		})
+		gen.Close()
+	}()
+
+	return it
+}
+
+// TestAgentTool_InvokableRun_CustomEventAfterStreamedAnswer covers the streaming
+// variant: the trailing customized action used to close the retained message
+// stream before the answer was extracted.
+func TestAgentTool_InvokableRun_CustomEventAfterStreamedAnswer(t *testing.T) {
+	ctx := context.Background()
+
+	agentTool := NewAgentTool(ctx, &customEventAfterStreamAgent{})
+	out, err := agentTool.(tool.InvokableTool).InvokableRun(ctx, `{"request":"q"}`)
+	require.NoError(t, err)
+	assert.Equal(t, "ab", out)
+}
