@@ -716,17 +716,34 @@ func toSessionEventChecked[M MessageType](event *TypedAgentEvent[M]) (*SessionEv
 	return nil, nil
 }
 
-func validateAgentSessionEventIdentity[M MessageType](event *TypedAgentEvent[M]) error {
-	if event == nil || event.SessionEventVariant == nil {
+func (v *SessionEventVariant[M]) isForeignTo(sessionID string) bool {
+	return v != nil && v.SessionID != "" && v.SessionID != sessionID
+}
+
+// prepareLiveSessionEvent checks the variant before delivery. Only its owner
+// may assign identity, stamp the turn or invoke the event callbacks.
+func prepareLiveSessionEvent[M MessageType](ctx context.Context, v *SessionEventVariant[M], sc sessionEventContext[M], foreign bool) error {
+	if v == nil {
 		return nil
 	}
-	if (event.SessionEventVariant.Event == nil) == (event.SessionEventVariant.MessageStreamRef == nil) {
+	if (v.Event == nil) == (v.MessageStreamRef == nil) {
 		return errors.New("session event variant must set exactly one payload")
 	}
-	if ref := event.SessionEventVariant.MessageStreamRef; ref != nil && ref.Kind != SessionEventMessage {
-		return fmt.Errorf("message stream ref kind must be %q, got %q", SessionEventMessage, ref.Kind)
+	if ref := v.MessageStreamRef; ref != nil {
+		if ref.Kind != SessionEventMessage {
+			return fmt.Errorf("message stream ref kind must be %q, got %q", SessionEventMessage, ref.Kind)
+		}
+		if !foreign && sc.turnID != "" {
+			ref.TurnID = sc.turnID
+		}
+		return nil
 	}
-	return nil
+	if foreign {
+		return validateEmittedSessionEventKind(v.Event)
+	}
+	var err error
+	v.Event, err = prepareReceivedSessionEvent(ctx, v.Event, sc)
+	return err
 }
 
 // classifySessionEvent checks that exactly one payload is active before
@@ -748,10 +765,24 @@ func classifySessionEvent[M MessageType](event *SessionEvent[M]) (SessionEventKi
 		}
 		return SessionEventMessageStreamIncomplete, nil
 	case event.MessagesReplaced != nil:
+		for i, message := range *event.MessagesReplaced {
+			if isNilMessage(message) {
+				return "", fmt.Errorf("MessagesReplaced[%d] must not be nil", i)
+			}
+		}
 		return SessionEventMessagesReplaced, nil
 	case event.MessageUpdated != nil:
+		if event.MessageUpdated.MessageID == "" {
+			return "", errors.New("MessageUpdated.MessageID must not be empty")
+		}
+		if isNilMessage(event.MessageUpdated.Message) {
+			return "", errors.New("MessageUpdated.Message must not be nil")
+		}
 		return SessionEventMessageUpdated, nil
 	case event.MessageInserted != nil:
+		if isNilMessage(event.MessageInserted.Message) {
+			return "", errors.New("MessageInserted.Message must not be nil")
+		}
 		return SessionEventMessageInserted, nil
 	case event.MessagesDeleted != nil:
 		if err := validateMessageIDs("MessagesDeleted.MessageIDs", event.MessagesDeleted.MessageIDs); err != nil {
@@ -877,26 +908,27 @@ func classifySpanSessionEvent(span *SpanEvent) (SessionEventKind, error) {
 	}
 }
 
-// normalizeSessionEventKind fills an empty Kind from the active payload and
-// rejects mismatches between Kind and payload shape.
-//
-// Unknown kinds (kinds not in the known set and not prefixed with "x.") with
-// no recognized payload are tolerated as a forward/backward compatibility
-// mechanism: legacy data (e.g. pre-refactor "turn_end") and events written by
-// newer code with kinds we don't yet understand are accepted as-is rather than
-// failing replay.
-func normalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
+// normalizeLoadedSessionEventKind preserves unknown records without a recognized
+// payload so logs from older (e.g. "turn_end") or newer writers can be replayed.
+func normalizeLoadedSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	if event != nil && event.Kind != "" && !isKnownSessionEventKind(event.Kind) && countActiveSessionEventPayloads(event) == 0 {
 		return nil
 	}
+	return normalizeSessionEventKind(event)
+}
+
+// normalizeSessionEventKind fills a missing Kind from a single valid payload.
+// Events with an explicit Kind are checked without mutation.
+func normalizeSessionEventKind[M MessageType](event *SessionEvent[M]) error {
 	kind, err := classifySessionEvent(event)
 	if err != nil {
 		return err
 	}
-	if event.Kind != "" && event.Kind != kind {
+	if event.Kind == "" {
+		event.Kind = kind
+	} else if event.Kind != kind {
 		return fmt.Errorf("session event kind %q does not match payload %q", event.Kind, kind)
 	}
-	event.Kind = kind
 	return nil
 }
 
@@ -909,10 +941,7 @@ func validateEmittedSessionEventKind[M MessageType](event *SessionEvent[M]) erro
 	if event.Kind == "" {
 		return errors.New("emitted session event must set non-empty Kind")
 	}
-	if err := normalizeSessionEventKind(event); err != nil {
-		return err
-	}
-	return nil
+	return normalizeSessionEventKind(event)
 }
 
 func isSessionDurableBoundaryKind(kind SessionEventKind) bool {

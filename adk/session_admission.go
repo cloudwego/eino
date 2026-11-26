@@ -89,7 +89,7 @@ func (h *sessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessionEvent
 		return result, err
 	}
 	for i, event := range result.Events {
-		if err := normalizeSessionEventKind(event); err != nil {
+		if err := normalizeLoadedSessionEventKind(event); err != nil {
 			return nil, fmt.Errorf("adk: load session event at index %d: %w", i, err)
 		}
 	}

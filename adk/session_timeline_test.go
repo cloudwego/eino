@@ -822,6 +822,35 @@ func TestRunner_EventExtraProviderRunsOnceForTypedSendEvent(t *testing.T) {
 	assert.Equal(t, int64(1), persisted[0].Extra["provider_call"])
 }
 
+func TestTypedSendEventPreservesForeignSessionIdentity(t *testing.T) {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	defer gen.Close()
+	ctx := (&Runner{sessionID: "parent"}).withRunnerSession(context.Background())
+	ctx = contextWithSessionEventContext[Message](ctx, nil, nil, "parent-turn")
+	ctx, _ = initTypedChatModelAgentExecCtx(ctx, gen, nil, true, false)
+	child := &SessionEvent[Message]{Kind: SessionEventMessage, Message: schema.UserMessage("child"), TurnID: "child-turn"}
+	ref := &MessageStreamRef{Kind: SessionEventMessage, TurnID: "child-turn"}
+	for _, variant := range []*SessionEventVariant[Message]{
+		{SessionID: "child", Event: child},
+		{SessionID: "child", MessageStreamRef: ref},
+	} {
+		require.NoError(t, TypedSendEvent(ctx, &AgentEvent{SessionEventVariant: variant}))
+		event, ok := iter.Next()
+		require.True(t, ok)
+		require.NoError(t, event.Err)
+		if event.SessionEventVariant.Event != nil {
+			assert.Same(t, child, event.SessionEventVariant.Event)
+		} else {
+			assert.Same(t, ref, event.SessionEventVariant.MessageStreamRef)
+		}
+	}
+	assert.Equal(t, "child-turn", ref.TurnID)
+	assert.Equal(t, "child-turn", child.TurnID)
+	assert.Empty(t, child.EventID)
+	assert.True(t, child.Timestamp.IsZero())
+	assert.Empty(t, GetMessageID(child.Message))
+}
+
 func TestTypedSendEventOutsideExecutionIsNoop(t *testing.T) {
 	err := SendEvent(context.Background(), &AgentEvent{
 		SessionEventVariant: &SessionEventVariant[*schema.Message]{
@@ -1207,26 +1236,25 @@ func TestFailoverTimelineLinksAttemptsAndEmitsSessionErrors(t *testing.T) {
 
 func TestSessionTimeline_EventIDMismatchRejectedAtPersistenceBoundary(t *testing.T) {
 	now := time.Now().UTC()
-	err := validateAgentSessionEventIdentity(&AgentEvent{
-		SessionEventVariant: &SessionEventVariant[*schema.Message]{
-			Event: &SessionEvent[*schema.Message]{
-				EventID:   uuid.NewString(),
-				Timestamp: now,
-				Kind:      SessionEventSpanToolCallStart,
-				Span: &SpanEvent{
-					SpanID:    uuid.NewString(),
-					Kind:      SpanKindTool,
-					StartedAt: now,
-					Tool:      &ToolSpanMeta{ToolUseID: "call_1"},
-				},
-			},
-			MessageStreamRef: &MessageStreamRef{
-				EventID:   uuid.NewString(),
-				Timestamp: now,
-				Kind:      SessionEventMessage,
+	variant := &SessionEventVariant[Message]{
+		Event: &SessionEvent[*schema.Message]{
+			EventID:   uuid.NewString(),
+			Timestamp: now,
+			Kind:      SessionEventSpanToolCallStart,
+			Span: &SpanEvent{
+				SpanID:    uuid.NewString(),
+				Kind:      SpanKindTool,
+				StartedAt: now,
+				Tool:      &ToolSpanMeta{ToolUseID: "call_1"},
 			},
 		},
-	})
+		MessageStreamRef: &MessageStreamRef{
+			EventID:   uuid.NewString(),
+			Timestamp: now,
+			Kind:      SessionEventMessage,
+		},
+	}
+	err := prepareLiveSessionEvent(context.Background(), variant, sessionEventContext[Message]{}, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one")
 }
@@ -1262,36 +1290,116 @@ func TestSessionTimeline_ConversionDoesNotPrepareEnvelope(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectsIdentifiedEventWithoutKind(t *testing.T) {
+func TestRunnerRejectsInvalidSessionEvents(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		owner   string
+		event   *SessionEvent[Message]
+		wantErr string
+	}{
+		{
+			name: "identified without kind", wantErr: "non-empty Kind",
+			event: &SessionEvent[Message]{EventID: "assigned", Message: schema.AssistantMessage("hello", nil)},
+		},
+		{
+			name: "unknown draft", wantErr: "exactly one active payload",
+			event: &SessionEvent[Message]{Kind: "future.typo"},
+		},
+		{
+			name: "unknown identified", wantErr: "exactly one active payload",
+			event: &SessionEvent[Message]{EventID: "assigned", Kind: "future.typo"},
+		},
+		{
+			name: "nil insertion", wantErr: "MessageInserted.Message",
+			event: &SessionEvent[Message]{EventID: "assigned", Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[Message]{}},
+		},
+		{
+			name: "foreign mismatch", owner: "child", wantErr: "does not match payload",
+			event: &SessionEvent[Message]{EventID: "assigned", Kind: SessionEventCancel, Message: schema.UserMessage("invalid")},
+		},
+	} {
+		for _, mode := range []string{"durable", "live only"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				ctx := context.Background()
+				var store *sessionHelperStore
+				tc.event.Extra = map[string]any{"test_event": tc.name}
+				original := *tc.event
+				config := RunnerConfig{
+					Agent: &runnerSingleEventAgent{event: &AgentEvent{
+						SessionEventVariant: &SessionEventVariant[Message]{SessionID: tc.owner, Event: tc.event},
+					}},
+					SessionID: "parent",
+				}
+				if mode == "durable" {
+					store = newSessionHelperStore()
+					config.SessionStore = store
+				}
+				runner := NewRunner(ctx, config)
+				isRejectedEvent := func(e *SessionEvent[Message]) bool {
+					return e.Extra["test_event"] == tc.name
+				}
+				iter := runner.Query(ctx, "query", WithTimelineEvents())
+				sawError := false
+				for {
+					event, ok := iter.Next()
+					if !ok {
+						break
+					}
+					if event.Err != nil {
+						require.ErrorContains(t, event.Err, tc.wantErr)
+						sawError = true
+					}
+					if v := event.SessionEventVariant; v != nil && v.Event != nil {
+						assert.False(t, isRejectedEvent(v.Event), "unexpected live event: %+v", v.Event)
+					}
+				}
+				assert.True(t, sawError)
+				assert.Equal(t, original, *tc.event)
+				if store != nil {
+					assert.Empty(t, filterStoredSessionEvents(t, store.events, isRejectedEvent))
+					require.NotEmpty(t, store.events)
+					assert.Equal(t, SessionEventSessionStatusIdle, store.events[len(store.events)-1].Kind)
+				}
+			})
+		}
+	}
+}
+
+func TestRunnerForwardsChildEventWithoutPreparingIt(t *testing.T) {
 	ctx := context.Background()
-	original := &SessionEvent[*schema.Message]{EventID: "assigned", Message: schema.AssistantMessage("hello", nil)}
-	store := newSessionHelperStore()
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent: &runnerSingleEventAgent{event: &AgentEvent{
-			SessionEventVariant: &SessionEventVariant[*schema.Message]{Event: original},
-		}},
-		SessionID: "missing-kind", SessionStore: store,
-	})
-	iter := runner.Query(ctx, "hello", WithTimelineEvents())
-	var eventErrors []error
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil {
-			eventErrors = append(eventErrors, event.Err)
-		}
+	for _, tc := range []struct {
+		name  string
+		store SessionEventStore[Message]
+	}{
+		{"live only", nil},
+		{"with parent store", newSessionHelperStore()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// AgentTool may create a materialized live event without a durable ID.
+			child := &SessionEvent[Message]{Kind: SessionEventMessage, Message: schema.UserMessage("child"), TurnID: "child-turn"}
+			variant := &SessionEventVariant[Message]{SessionID: "child", Event: child}
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent:     &runnerSingleEventAgent{event: &AgentEvent{SessionEventVariant: variant}},
+				SessionID: "parent", SessionStore: tc.store,
+			})
+			var got *SessionEvent[Message]
+			iter := runner.Query(ctx, "query", WithTimelineEvents())
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				require.NoError(t, event.Err)
+				if v := event.SessionEventVariant; v != nil && v.SessionID == "child" {
+					got = v.Event
+				}
+			}
+			require.NotNil(t, got)
+			assert.Empty(t, got.EventID)
+			assert.True(t, got.Timestamp.IsZero())
+			assert.Equal(t, "child-turn", got.TurnID)
+		})
 	}
-	require.NotEmpty(t, eventErrors)
-	for _, err := range eventErrors {
-		require.ErrorContains(t, err, "emitted session event must set non-empty Kind")
-	}
-	assert.Empty(t, original.Kind)
-	assert.True(t, original.Timestamp.IsZero())
-	assert.Empty(t, filterStoredSessionEvents(t, store.events, func(event *SessionEvent[*schema.Message]) bool {
-		return event.EventID == original.EventID
-	}))
 }
 
 func TestRunnerSessionEventEnvelopePreparedBeforeConversion(t *testing.T) {

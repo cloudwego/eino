@@ -234,10 +234,14 @@ func TestLocalSessionHandleNormalizesLoadedEvents(t *testing.T) {
 
 func TestLocalSessionHandleRejectsInvalidEvents(t *testing.T) {
 	cases := map[string]*SessionEvent[*schema.Message]{
-		"nil event":       nil,
-		"empty event":     {EventID: "bad"},
-		"missing payload": {EventID: "bad", Kind: SessionEventMessage},
-		"kind mismatch":   {EventID: "bad", Kind: SessionEventCancel, Message: schema.UserMessage("hello")},
+		"nil event":               nil,
+		"empty event":             {EventID: "bad"},
+		"missing payload":         {EventID: "bad", Kind: SessionEventMessage},
+		"kind mismatch":           {EventID: "bad", Kind: SessionEventCancel, Message: schema.UserMessage("hello")},
+		"nil insertion":           {Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[Message]{}},
+		"nil update":              {Kind: SessionEventMessageUpdated, MessageUpdated: &MessageUpdatedEvent[Message]{MessageID: "target"}},
+		"missing update target":   {Kind: SessionEventMessageUpdated, MessageUpdated: &MessageUpdatedEvent[Message]{Message: schema.UserMessage("new")}},
+		"nil replacement element": {Kind: SessionEventMessagesReplaced, MessagesReplaced: &[]Message{schema.UserMessage("ok"), nil}},
 		"multiple payloads": {
 			EventID: "bad", Kind: SessionEventMessage, Message: schema.UserMessage("hello"),
 			Cancel: &CancelEvent{},
@@ -260,11 +264,16 @@ func TestLocalSessionHandleRejectsInvalidEvents(t *testing.T) {
 	}
 }
 
-func TestLocalSessionHandleRequiresExplicitKindOnAppend(t *testing.T) {
+func TestLocalSessionHandleRejectsMissingAndUnknownKindOnAppend(t *testing.T) {
 	store := &serviceContractStore{}
 	handle := &sessionHandle[*schema.Message]{store: store, sessionID: "sid"}
 	event := &SessionEvent[*schema.Message]{EventID: "message", Message: schema.UserMessage("hello")}
 	err := handle.appendEvents(context.Background(), []*SessionEvent[*schema.Message]{event})
 	require.ErrorContains(t, err, "emitted session event must set non-empty Kind")
+	assert.Empty(t, store.appendEvents)
+
+	event = &SessionEvent[Message]{EventID: "typo", Kind: "future.typo"}
+	err = handle.appendEvents(context.Background(), []*SessionEvent[Message]{event})
+	require.ErrorContains(t, err, "exactly one active payload")
 	assert.Empty(t, store.appendEvents)
 }

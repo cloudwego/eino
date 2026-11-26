@@ -634,13 +634,6 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		iter = fa.Run(ctx, input, opts...)
 	}
 
-	// Short-circuit: no checkpoint to save, no cancel to handle, and no need to
-	// strip session-internal fields (enableSessionEvents means the caller wants
-	// them). The intermediate iterator pair adds no value in this case.
-	if store == nil && o.cancelCtx == nil && exposeTimelineEvents && !sessionState.enabled {
-		return iter
-	}
-
 	niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	checkPointID := o.checkPointID
 	if sessionState.checkPointID != nil {
@@ -793,12 +786,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		stampSessionEventTurnID(se, sessionState.turnID)
 	}
-	stampOwnStreamRefTurnID := func(ref *MessageStreamRef) {
-		if ref == nil || sessionState == nil || !sessionState.enabled || sessionState.turnID == "" {
-			return
-		}
-		ref.TurnID = sessionState.turnID
-	}
 	setPersistErr := func(err error) {
 		if err != nil && persistErr == nil {
 			persistErr = err
@@ -875,7 +862,6 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if ref.Timestamp.IsZero() {
 			ref.Timestamp = newEventTimestamp()
 		}
-		stampOwnStreamRefTurnID(ref)
 		ref.Kind = SessionEventMessage
 		if ref.EventID == "" {
 			reserved, err := reserveMessageStreamRef(ctx, ref.Timestamp, receivedEventContext)
@@ -907,29 +893,29 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 	}
 
+	parentSessionID, _ := RunnerSessionID(ctx)
+	if sessionState != nil && sessionState.enabled {
+		parentSessionID = sessionState.sessionID
+	}
+	liveOnly := persister == nil && store == nil && cancelCtx == nil && enableTimelineEvents
 	for {
 		event, ok := aIter.Next()
 		if !ok {
 			break
 		}
-		foreignEvent := event.SessionEventVariant != nil &&
-			sessionState != nil && sessionState.enabled &&
-			event.SessionEventVariant.SessionID != "" &&
-			event.SessionEventVariant.SessionID != sessionState.sessionID
-		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.Event != nil {
-			se, err := prepareReceivedSessionEvent(ctx, event.SessionEventVariant.Event, receivedEventContext)
-			if err != nil {
-				setPersistErr(err)
-				event.Err = err
-			}
-			event.SessionEventVariant.Event = se
+		variant := event.SessionEventVariant
+		foreignEvent := variant.isForeignTo(parentSessionID)
+		sessionEventErr := prepareLiveSessionEvent(ctx, variant, receivedEventContext, foreignEvent)
+		if sessionEventErr != nil {
+			setPersistErr(sessionEventErr)
+			event.Err = sessionEventErr
+			event = stripSessionEventFields(event)
 		}
-		if !foreignEvent && event.SessionEventVariant != nil && event.SessionEventVariant.MessageStreamRef != nil {
-			stampOwnStreamRefTurnID(event.SessionEventVariant.MessageStreamRef)
-		}
-		if err := validateAgentSessionEventIdentity(event); err != nil {
-			setPersistErr(err)
-			event.Err = err
+
+		// A live-only run forwards actions and errors as produced by the agent.
+		if liveOnly {
+			gen.Send(event)
+			continue
 		}
 
 		if event.Err != nil {
@@ -992,7 +978,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		if persister != nil {
 			// Skip persistence (but not live delivery) for events tagged with a
 			// foreign SessionID (inner agent events forwarded via AgentTool).
-			if !foreignEvent {
+			if !foreignEvent && sessionEventErr == nil {
 				if event.Output != nil && event.Output.MessageOutput != nil &&
 					event.Output.MessageOutput.IsStreaming && event.Output.MessageOutput.MessageStream != nil {
 					ref, err := prepareStreamRef(event)

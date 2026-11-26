@@ -6403,7 +6403,7 @@ func TestAttack_SessionEventVariantBothSet(t *testing.T) {
 		},
 	}
 
-	err := validateAgentSessionEventIdentity(ev)
+	err := prepareLiveSessionEvent(context.Background(), ev.SessionEventVariant, sessionEventContext[Message]{}, false)
 	if err == nil {
 		t.Fatal("expected error when both Event and MessageStreamRef are set, got nil")
 	}
@@ -6417,7 +6417,7 @@ func TestAttack_SessionEventVariantNeitherSet(t *testing.T) {
 		},
 	}
 
-	err := validateAgentSessionEventIdentity(ev)
+	err := prepareLiveSessionEvent(context.Background(), ev.SessionEventVariant, sessionEventContext[Message]{}, false)
 	if err == nil {
 		t.Fatal("expected error when neither Event nor MessageStreamRef is set, got nil")
 	}
@@ -6426,7 +6426,7 @@ func TestAttack_SessionEventVariantNeitherSet(t *testing.T) {
 
 func TestAttack_SessionEventVariantNil(t *testing.T) {
 	ev := &TypedAgentEvent[Message]{}
-	err := validateAgentSessionEventIdentity(ev)
+	err := prepareLiveSessionEvent(context.Background(), ev.SessionEventVariant, sessionEventContext[Message]{}, false)
 	if err != nil {
 		t.Fatalf("nil variant should be valid, got error: %v", err)
 	}
@@ -6443,7 +6443,7 @@ func TestAttack_MessageStreamRefWrongKind(t *testing.T) {
 		},
 	}
 
-	err := validateAgentSessionEventIdentity(ev)
+	err := prepareLiveSessionEvent(context.Background(), ev.SessionEventVariant, sessionEventContext[Message]{}, false)
 	if err == nil {
 		t.Fatal("expected error for MessageStreamRef with non-message kind, got nil")
 	}
@@ -6494,7 +6494,7 @@ func TestAttack_NormalizeSessionEventKindMismatch(t *testing.T) {
 	t.Logf("correctly rejected kind mismatch: %v", err)
 }
 
-func TestAttack_NormalizeSessionEventKindUnknownKindTolerated(t *testing.T) {
+func TestAttack_NormalizeLoadedSessionEventKindUnknownKindTolerated(t *testing.T) {
 	unknownKinds := []SessionEventKind{
 		"turn_end",
 		"session_started",
@@ -6505,7 +6505,7 @@ func TestAttack_NormalizeSessionEventKindUnknownKindTolerated(t *testing.T) {
 		ev := &SessionEvent[Message]{
 			Kind: k,
 		}
-		err := normalizeSessionEventKind(ev)
+		err := normalizeLoadedSessionEventKind(ev)
 		if err != nil {
 			t.Fatalf("unknown kind %q should be tolerated, got error: %v", k, err)
 		}
@@ -6515,23 +6515,23 @@ func TestAttack_NormalizeSessionEventKindUnknownKindTolerated(t *testing.T) {
 	}
 }
 
-func TestAttack_NormalizeSessionEventKindKnownKindMissingPayloadStillErrors(t *testing.T) {
+func TestAttack_NormalizeLoadedSessionEventKindKnownKindMissingPayloadStillErrors(t *testing.T) {
 	ev := &SessionEvent[Message]{
 		Kind: SessionEventMessage,
 	}
-	err := normalizeSessionEventKind(ev)
+	err := normalizeLoadedSessionEventKind(ev)
 	if err == nil {
 		t.Fatal("expected error for known kind with missing payload, got nil")
 	}
 	t.Logf("correctly rejected known kind with missing payload: %v", err)
 }
 
-func TestAttack_NormalizeSessionEventKindUnknownKindWithPayloadStillErrors(t *testing.T) {
+func TestAttack_NormalizeLoadedSessionEventKindUnknownKindWithPayloadStillErrors(t *testing.T) {
 	ev := &SessionEvent[Message]{
 		Kind:    "future.new_kind",
 		Message: schema.UserMessage("hello"),
 	}
-	err := normalizeSessionEventKind(ev)
+	err := normalizeLoadedSessionEventKind(ev)
 	if err == nil {
 		t.Fatal("expected error for unknown kind with recognized payload, got nil")
 	}
