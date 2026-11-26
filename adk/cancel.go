@@ -285,13 +285,16 @@ const (
 //
 // Transition rules:
 //
-//	interruptNotSent -> interruptImmediate (CancelImmediate or escalation)
+//	interruptNotSent -> interruptPending -> interruptImmediate
 const (
 	// interruptNotSent means no compose graph interrupt has been sent.
 	interruptNotSent int32 = 0
 	// interruptImmediate means an immediate graph interrupt was sent with
 	// timeout=0, forcing the graph to stop as soon as possible.
 	interruptImmediate int32 = 1
+	// interruptPending reserves the immediate request while recursive
+	// descendants are given time to return their checkpoint interrupts.
+	interruptPending int32 = 2
 )
 
 // defaultCancelImmediateGracePeriod is the bounded time a recursive cancel
@@ -323,13 +326,14 @@ func getCancelContext(ctx context.Context) *cancelContext {
 type cancelContext struct {
 	mode int32 // atomic, CancelMode
 
-	cancelChan    chan struct{} // closed when cancel is requested (all modes, not just safe-point)
-	immediateChan chan struct{} // closed when an immediate graph interrupt fires
-	doneChan      chan struct{} // closed when execution completes (by any mark* method)
-	doneOnce      sync.Once     // ensures doneChan is closed exactly once
+	cancelChan           chan struct{} // closed when cancel is requested (all modes, not just safe-point)
+	immediateRequestChan chan struct{} // closed when descendants should receive immediate cancellation
+	immediateChan        chan struct{} // closed after this scope's graph interrupts fire, to abort local streams
+	doneChan             chan struct{} // closed when execution completes (by any mark* method)
+	doneOnce             sync.Once     // ensures doneChan is closed exactly once
 
 	state            int32 // stateRunning, stateCancelling, stateDone, stateCancelHandled
-	interruptSent    int32 // interruptNotSent, interruptImmediate
+	interruptSent    int32 // interruptNotSent, interruptPending, interruptImmediate
 	escalated        int32 // 1 if escalated from safe-point to immediate
 	timeoutEscalated int32 // 1 if escalation was triggered by timeout
 	startedMode      int32 // atomic, mode when state transitioned to cancelling
@@ -354,12 +358,13 @@ type cancelContext struct {
 
 func newCancelContext() *cancelContext {
 	return &cancelContext{
-		cancelChan:    make(chan struct{}),
-		immediateChan: make(chan struct{}),
-		doneChan:      make(chan struct{}),
-		timeoutNotify: make(chan struct{}, 1),
-		recursiveChan: make(chan struct{}),
-		root:          true,
+		cancelChan:           make(chan struct{}),
+		immediateRequestChan: make(chan struct{}),
+		immediateChan:        make(chan struct{}),
+		doneChan:             make(chan struct{}),
+		timeoutNotify:        make(chan struct{}, 1),
+		recursiveChan:        make(chan struct{}),
+		root:                 true,
 	}
 }
 
@@ -422,7 +427,7 @@ func (cc *cancelContext) deriveCheckpointAwareCancelContext(ctx context.Context)
 
 	go func() {
 		select {
-		case <-cc.immediateChan:
+		case <-cc.immediateRequestChan:
 			if cc.isRecursive() {
 				child.setRecursive(true)
 				child.triggerImmediateCancel()
@@ -459,7 +464,7 @@ func deriveAbortOnlyCancelContext(ctx context.Context, parent *cancelContext) *c
 
 	go func() {
 		select {
-		case <-parent.immediateChan:
+		case <-parent.immediateRequestChan:
 			if parent.isRecursive() {
 				child.setRecursive(true)
 				child.triggerImmediateCancel()
@@ -572,7 +577,7 @@ func (cc *cancelContext) isImmediateCancelled() bool {
 
 // sendImmediateInterrupt sends the compose graph interrupt signal via graphInterruptFuncs.
 // Also closes immediateChan (used by cancelMonitoredModel to abort an in-progress stream).
-// Returns false if an interrupt was already sent or if no graphInterruptFuncs have been
+// Returns false if an interrupt was already requested or if no graphInterruptFuncs have been
 // registered yet (the deferred fire in setGraphInterruptFunc will handle that case).
 //
 // Ordering matters here. Closing immediateChan wakes wrapStreamWithCancelMonitoring,
@@ -580,61 +585,57 @@ func (cc *cancelContext) isImmediateCancelled() bool {
 // the stream's node almost immediately. If immediateChan closed before the compose
 // graph interrupt signal was sent, the task manager could observe the node's plain
 // error before it had any cancel signal to recognize, and report a normal node
-// failure instead of a cancellation (see issue #1148). So for the direct path, fire
+// failure instead of a cancellation (see issue #1148). Always fire
 // this level's own graph interrupt(s) first, and only then close immediateChan.
 //
-// The recursive-with-descendant path is different on purpose: immediateChan must
-// close early there so descendants (which select on it) can start tearing down
-// during the grace period, before this level's own interrupt is forced.
+// Recursive checkpoint cancellation uses a separate immediateRequestChan to
+// start descendant teardown during the bounded grace period without aborting
+// this level's streams before its graph can recognize the interrupt.
 func (cc *cancelContext) sendImmediateInterrupt() bool {
 	cc.mu.Lock()
 
-	if !atomic.CompareAndSwapInt32(&cc.interruptSent, interruptNotSent, interruptImmediate) {
+	if !atomic.CompareAndSwapInt32(&cc.interruptSent, interruptNotSent, interruptPending) {
 		cc.mu.Unlock()
 		return false
 	}
 
-	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
-	copy(fns, cc.graphInterruptFuncs)
-
-	if !cc.abortOnly && cc.isRecursive() && cc.hasCheckpointAwareDescendant() {
-		close(cc.immediateChan)
+	waitForDescendants := !cc.abortOnly && cc.isRecursive() && cc.hasCheckpointAwareDescendant()
+	if waitForDescendants {
+		close(cc.immediateRequestChan)
+		cc.mu.Unlock()
 
 		select {
 		case <-cc.doneChan:
-			cc.mu.Unlock()
 			return true
 		case <-time.After(defaultCancelImmediateGracePeriod):
 		}
 
-		if len(fns) == 0 {
-			cc.mu.Unlock()
-			return false
-		}
-
-		for _, fn := range fns {
-			fn(compose.WithGraphInterruptTimeout(0))
-		}
-		cc.mu.Unlock()
-		return true
+		cc.mu.Lock()
 	}
 
-	for _, fn := range fns {
+	// Include graphs registered during the grace period. Registration remains
+	// possible while waiting, but only the force phase may fire their signals.
+	atomic.StoreInt32(&cc.interruptSent, interruptImmediate)
+	for _, fn := range cc.graphInterruptFuncs {
 		fn(compose.WithGraphInterruptTimeout(0))
 	}
+	if !waitForDescendants {
+		close(cc.immediateRequestChan)
+	}
 	close(cc.immediateChan)
+	fired := len(cc.graphInterruptFuncs) > 0
 	cc.mu.Unlock()
-	return len(fns) > 0
+	return fired
 }
 
 // setGraphInterruptFunc appends a graph interrupt function to the list.
-// If an immediate cancel was already requested, fires it retroactively.
+// If immediate cancellation has reached the force phase, fires it retroactively.
 // Multiple functions can be registered (e.g. one per parallel sub-agent).
 //
-// Both this method and sendImmediateInterrupt hold cc.mu across the entire
-// check-and-fire sequence, ensuring each interrupt function is called exactly
-// once (compose.WithGraphInterrupt returns a non-idempotent closure that panics
-// on double-call).
+// Both this method and sendImmediateInterrupt hold cc.mu across the
+// check-and-fire sequence (but not the recursive grace period), ensuring each
+// interrupt function is called exactly once (compose.WithGraphInterrupt returns
+// a non-idempotent closure that panics on double-call).
 func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphInterruptOption)) {
 	cc.mu.Lock()
 	cc.graphInterruptFuncs = append(cc.graphInterruptFuncs, interrupt)
