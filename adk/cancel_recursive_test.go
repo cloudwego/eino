@@ -20,13 +20,191 @@ import (
 	"context"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestRecursiveImmediateInterrupt_GraceAndGraphRegistration(t *testing.T) {
+	parent, child, _ := setupParentChild(t)
+	abortCtx, abortCancel := context.WithCancel(context.Background())
+	t.Cleanup(abortCancel)
+	abortOnly := deriveAbortOnlyCancelContext(abortCtx, parent)
+	t.Cleanup(abortOnly.markDone)
+	parent.markCheckpointAwareDescendant()
+	parent.setRecursive(true)
+
+	var calls int32
+	newInterrupt := func(checkOrder bool) func(...compose.GraphInterruptOption) {
+		var called int32
+		return func(...compose.GraphInterruptOption) {
+			if atomic.AddInt32(&called, 1) != 1 {
+				t.Error("graph interrupt fired more than once")
+			}
+			if checkOrder && parent.isImmediateCancelled() {
+				t.Error("local stream teardown preceded its graph interrupt")
+			}
+			atomic.AddInt32(&calls, 1)
+		}
+	}
+	forceStarted := make(chan struct{})
+	continueForce := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseForce := func() { releaseOnce.Do(func() { close(continueForce) }) }
+	t.Cleanup(releaseForce)
+	firstInterrupt := newInterrupt(true)
+	parent.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+		close(forceStarted)
+		<-continueForce
+		firstInterrupt(opts...)
+	})
+
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		parent.triggerImmediateCancel()
+	}()
+	select {
+	case <-parent.immediateRequestChan:
+	case <-time.After(time.Second):
+		t.Fatal("descendant cancellation was not requested")
+	}
+	select {
+	case <-child.immediateChan:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("checkpoint child did not receive cancellation during the grace period")
+	}
+	select {
+	case <-abortOnly.immediateChan:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("abort-only child did not receive cancellation during the grace period")
+	}
+	require.False(t, parent.isImmediateCancelled())
+
+	const registrations = 16
+	var wg sync.WaitGroup
+	for i := 0; i < registrations; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			parent.setGraphInterruptFunc(newInterrupt(true))
+			assert.False(t, parent.sendImmediateInterrupt(), "duplicate request must not restart the grace period")
+		}()
+	}
+	registered := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(registered)
+	}()
+	select {
+	case <-registered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("graph registration or repeated cancellation blocked during the grace period")
+	}
+	require.Equal(t, int32(0), atomic.LoadInt32(&calls), "new graphs must not fire before the grace period expires")
+
+	// Park the force phase inside its first graph interrupt, then register
+	// more graphs while that phase is in progress. They must receive exactly
+	// one retroactive signal after the existing graphs have been interrupted.
+	select {
+	case <-forceStarted:
+	case <-time.After(2 * defaultCancelImmediateGracePeriod):
+		t.Fatal("graph interrupt force phase did not start")
+	}
+	atForceStarted := make(chan struct{}, registrations)
+	var forceWG sync.WaitGroup
+	for i := 0; i < registrations; i++ {
+		forceWG.Add(1)
+		go func() {
+			defer forceWG.Done()
+			atForceStarted <- struct{}{}
+			parent.setGraphInterruptFunc(newInterrupt(false))
+			assert.False(t, parent.sendImmediateInterrupt())
+		}()
+	}
+	for i := 0; i < registrations; i++ {
+		select {
+		case <-atForceStarted:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent graph registrar did not start")
+		}
+	}
+	registeredAtForce := make(chan struct{})
+	go func() {
+		forceWG.Wait()
+		close(registeredAtForce)
+	}()
+	assertNotClosedWithin(t, registeredAtForce, 20*time.Millisecond)
+	require.Equal(t, int32(0), atomic.LoadInt32(&calls), "registration must not race past the graph interrupt in progress")
+	releaseForce()
+
+	select {
+	case <-finished:
+	case <-time.After(2 * defaultCancelImmediateGracePeriod):
+		t.Fatal("recursive cancellation exceeded its bounded grace period")
+	}
+	select {
+	case <-registeredAtForce:
+	case <-time.After(time.Second):
+		t.Fatal("graph registration did not finish after the force phase")
+	}
+	require.True(t, parent.isImmediateCancelled())
+	require.Equal(t, int32(2*registrations+1), atomic.LoadInt32(&calls))
+
+	var lateCalls int32
+	parent.setGraphInterruptFunc(func(...compose.GraphInterruptOption) {
+		atomic.AddInt32(&lateCalls, 1)
+	})
+	require.Equal(t, int32(1), atomic.LoadInt32(&lateCalls), "registration after the force phase must fire retroactively")
+	require.False(t, parent.sendImmediateInterrupt())
+	require.Equal(t, int32(1), atomic.LoadInt32(&lateCalls))
+}
+
+func TestRecursiveImmediateInterrupt_CompletionDuringGraceDoesNotForce(t *testing.T) {
+	parent := newCancelContext()
+	parent.markCheckpointAwareDescendant()
+	parent.setRecursive(true)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		parent.triggerImmediateCancel()
+	}()
+	select {
+	case <-parent.immediateRequestChan:
+	case <-time.After(time.Second):
+		t.Fatal("descendant cancellation was not requested")
+	}
+
+	var calls int32
+	registered := make(chan struct{})
+	go func() {
+		defer close(registered)
+		parent.setGraphInterruptFunc(func(...compose.GraphInterruptOption) {
+			atomic.AddInt32(&calls, 1)
+		})
+	}()
+	select {
+	case <-registered:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("graph registration blocked during the grace period")
+	}
+	// A normal completion or business error remains a non-cancel outcome.
+	parent.markDone()
+	select {
+	case <-finished:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("completion did not end the grace period")
+	}
+	require.Equal(t, stateDone, atomic.LoadInt32(&parent.state))
+	require.Equal(t, int32(0), atomic.LoadInt32(&calls))
+	require.False(t, parent.isImmediateCancelled(), "local teardown requires a graph interrupt")
+}
 
 func assertNotClosedWithin(t *testing.T, ch <-chan struct{}, d time.Duration) {
 	t.Helper()
@@ -643,6 +821,68 @@ func TestResolveRunCancelContext_CheckpointAwareInheritedScope(t *testing.T) {
 	}
 	if owned {
 		t.Fatal("checkpoint-aware inherited scope should not be owned by the child run")
+	}
+}
+
+func TestAgentCancelFunc_ExpiredSafePointTimeout(t *testing.T) {
+	cc := newCancelContext()
+	t.Cleanup(cc.markDone)
+	var interrupts int32
+	cc.setGraphInterruptFunc(func(...compose.GraphInterruptOption) {
+		atomic.AddInt32(&interrupts, 1)
+	})
+
+	handle, contributed := cc.buildCancelFunc()(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(time.Nanosecond),
+	)
+	require.True(t, contributed)
+	select {
+	case <-cc.immediateChan:
+	case <-time.After(time.Second):
+		t.Fatal("expired safe-point timeout did not abort the stream")
+	}
+
+	cancelErr, handled := cc.createAndMarkCancelHandled()
+	require.True(t, handled)
+	require.Equal(t, &AgentCancelInfo{
+		Mode: CancelAfterChatModel, Escalated: true, Timeout: true,
+	}, cancelErr.Info)
+	require.ErrorIs(t, handle.Wait(), ErrCancelTimeout)
+	require.Equal(t, int32(1), atomic.LoadInt32(&interrupts))
+}
+
+func TestWrapStreamWithCancelMonitoring_ConsumerCloseStopsProducer(t *testing.T) {
+	cc := newCancelContext()
+	t.Cleanup(cc.markDone)
+	upstream, writer := schema.Pipe[string](0)
+	upstream.SetAutomaticClose()
+	t.Cleanup(upstream.Close)
+	stream := wrapStreamWithCancelMonitoring(upstream, cc)
+	stream.SetAutomaticClose()
+	t.Cleanup(stream.Close)
+
+	stopped := make(chan bool, 1)
+	go func() {
+		defer writer.Close()
+		for i := 0; i < 16; i++ {
+			if writer.Send("chunk", nil) {
+				stopped <- true
+				return
+			}
+		}
+		stopped <- false
+	}()
+
+	chunk, err := stream.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "chunk", chunk)
+	stream.Close()
+	select {
+	case closed := <-stopped:
+		require.True(t, closed, "producer drained instead of observing consumer closure")
+	case <-time.After(time.Second):
+		t.Fatal("closing the monitored stream left its producer blocked")
 	}
 }
 
