@@ -1291,6 +1291,10 @@ func TestSessionTimeline_ConversionDoesNotPrepareEnvelope(t *testing.T) {
 }
 
 func TestRunnerRejectsInvalidSessionEvents(t *testing.T) {
+	var nilMessages []Message
+	replacement := schema.UserMessage("revised")
+	typedSetMessageID(replacement, "m2")
+	conflictingUpdate := &MessageUpdatedEvent[Message]{MessageID: "m1", Message: replacement}
 	for _, tc := range []struct {
 		name    string
 		owner   string
@@ -1312,6 +1316,22 @@ func TestRunnerRejectsInvalidSessionEvents(t *testing.T) {
 		{
 			name: "nil insertion", wantErr: "MessageInserted.Message",
 			event: &SessionEvent[Message]{EventID: "assigned", Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[Message]{}},
+		},
+		{
+			name: "conflicting message ID in update draft", wantErr: "identity mismatch",
+			event: &SessionEvent[Message]{MessageUpdated: conflictingUpdate},
+		},
+		{
+			name: "conflicting message ID in identified update", wantErr: "identity mismatch",
+			event: &SessionEvent[Message]{EventID: "assigned", Kind: SessionEventMessageUpdated, MessageUpdated: conflictingUpdate},
+		},
+		{
+			name: "nil replacement slice in draft", wantErr: "messages_replaced must contain at least one message",
+			event: &SessionEvent[Message]{MessagesReplaced: &nilMessages},
+		},
+		{
+			name: "empty replacement slice in identified event", wantErr: "messages_replaced must contain at least one message",
+			event: &SessionEvent[Message]{EventID: "assigned", Kind: SessionEventMessagesReplaced, MessagesReplaced: &[]Message{}},
 		},
 		{
 			name: "foreign mismatch", owner: "child", wantErr: "does not match payload",

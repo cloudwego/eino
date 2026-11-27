@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -84,6 +85,9 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, sessionID string, eve
 	for _, e := range events {
 		if e == nil || e.EventID == "" {
 			return adk.ErrInvalidEventID
+		}
+		if err := internal.ValidateMessageReplacement(e.MessagesReplaced, e.Kind == adk.SessionEventMessagesReplaced); err != nil {
+			return err
 		}
 		if _, dup := seen[e.EventID]; dup {
 			return adk.ErrDuplicateEventID

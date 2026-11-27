@@ -309,7 +309,7 @@ func sendSessionTimelineEvent[M MessageType](ctx context.Context, se *SessionEve
 	}
 	sc := sessionEventContextFromContext[M](ctx)
 	stampSessionEventTurnID(se, sc.turnID)
-	if err := normalizeSessionEventKind(se); err != nil {
+	if err := normalizeEmittedSessionEventKind(se); err != nil {
 		execCtx.send(ctx, &TypedAgentEvent[M]{Err: err})
 		return
 	}

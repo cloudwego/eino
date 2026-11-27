@@ -17,9 +17,7 @@
 package adk
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"reflect"
@@ -194,17 +192,23 @@ func (r *TypedRunner[M]) Query(ctx context.Context,
 // This method is best for simpler use cases where the act of resuming implies that all previously
 // interrupted points should proceed without specific data.
 //
+// With a SessionStore, Resume checks the session ID recorded in the checkpoint.
+// If the checkpoint also records an idle event ID, Resume checks it against
+// the session log. A session or version mismatch returns ErrCheckpointStale.
+//
 // When using this method, all interrupted agents will receive `isResumeFlow = false` when they
 // call `GetResumeContext`, as no specific agent was targeted. This is suitable for the "Simple Confirmation"
 // pattern where an agent only needs to know `wasInterrupted` is true to continue.
 func (r *TypedRunner[M]) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
 	*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return r.resumeInternal(ctx, checkPointID, nil, opts...)
+	return r.ResumeWithParams(ctx, checkPointID, nil, opts...)
 }
 
 // ResumeWithParams continues an interrupted execution from a checkpoint with specific parameters.
 // This is the most common and powerful way to resume, allowing you to target specific interrupt points
 // (identified by their address/ID) and provide them with data.
+//
+// Session checkpoints use the same freshness check as Resume.
 //
 // The params.Targets map should contain the addresses of the components to be resumed as keys. These addresses
 // can point to any interruptible component in the entire execution graph, including ADK agents, compose
@@ -221,31 +225,37 @@ func (r *TypedRunner[M]) Resume(ctx context.Context, checkPointID string, opts .
 //     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
 //     new `CompositeInterrupt` signal from them.
 func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID string, params *ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return r.resumeInternal(ctx, checkPointID, params.Targets, opts...)
+	iter, _, err := r.resumeInternal(ctx, checkPointID, params, opts...)
+	return iter, err
 }
 
-func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
-	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
-	return typedRunnerResumeInternalImpl(
+// resumeInternal also reports whether the loaded runner state can be retired by TurnLoop.
+func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, params *ResumeParams,
+	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], bool, error) {
+	var resumeData map[string]any
+	if params != nil {
+		resumeData = params.Targets
+	}
+	state := &runnerSessionRunState[M]{}
+	iter, err := typedRunnerResumeInternalImpl(
 		r.a, r.store, r.sessionID, r.sessionStore, r.sessionConfig,
-		r.withRunnerSession(ctx), checkPointID, resumeData, opts...,
+		r.withRunnerSession(ctx), checkPointID, resumeData, state, opts...,
 	)
+	return iter, state.checkpointConsumed, err
 }
 
 type runnerSessionRunState[M MessageType] struct {
-	enabled         bool
-	sessionID       string
-	checkPointID    *string
-	latestState     *reconstructedSessionState[M]
-	sessionConfig   SessionConfig[M]
-	sessionStore    SessionEventStore[M]
-	sessionHandle   *sessionHandle[M]
-	checkPointStore CheckPointStore
-	turnID          string
-	initialTimeline []*SessionEvent[M]
-	// inputMessages are the caller-provided messages for this turn (before history prepend).
-	// Captured so the Runner can persist them as session events at turn start.
-	inputMessages []M
+	checkpointConsumed bool // set synchronously during resume admission
+	enabled            bool
+	sessionID          string
+	checkPointID       *string
+	latestState        *reconstructedSessionState[M]
+	sessionConfig      SessionConfig[M]
+	sessionStore       SessionEventStore[M]
+	sessionHandle      *sessionHandle[M]
+	checkPointStore    CheckPointStore
+	turnID             string
+	initialTimeline    []*SessionEvent[M]
 }
 
 func (state *runnerSessionRunState[M]) close(ctx context.Context) {
@@ -300,15 +310,12 @@ func (state *runnerSessionRunState[M]) prepareRun( //nolint:revive // argument-l
 	}
 	state.sessionHandle = handle
 
-	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, defaultLoadPageSize)
+	reconstructResult, err := reconstructSessionState[M](ctx, handle, defaultLoadPageSize, state.sessionConfig.MaxReplayLoadPages)
 	if err != nil {
 		return fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
 	}
 	if reconstructResult != nil && reconstructResult.state != nil {
 		state.latestState = reconstructResult.state
-	}
-	if err = appendRunnerSessionRunningEvent(ctx, state); err != nil {
-		return err
 	}
 
 	if isNilCheckPointStore(checkPointStore) {
@@ -319,18 +326,8 @@ func (state *runnerSessionRunState[M]) prepareRun( //nolint:revive // argument-l
 		checkPointID = *requestedCheckPointID
 	}
 	state.checkPointID = &checkPointID
-	_, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, checkPointID)
-	if err != nil {
-		return err
-	}
-	if !existed {
-		return nil
-	}
-	// Pending checkpoint exists but caller chose Run (fresh turn) instead of Resume.
-	// We intentionally do NOT delete the checkpoint here — it remains available for a
-	// future Resume call. Session correctness is guaranteed by event log replay regardless
-	// of checkpoint presence. If this fresh turn completes successfully, finalize() will
-	// clean up the stale checkpoint at that point.
+	// The ID is used to save a new checkpoint or clean up a stale one after a
+	// successful turn. A fresh turn restores its messages from the event log.
 	return nil
 }
 
@@ -341,138 +338,138 @@ func (state *runnerSessionRunState[M]) prepareResume( //nolint:revive // argumen
 	sessionStore SessionEventStore[M],
 	sessionConfig *SessionConfig[M],
 	checkPointID string,
-) (string, error) {
-	if isNilCheckPointStore(checkPointStore) {
-		checkPointStore = nil
-	}
-	// Non-session-mode resume: explicit checkpoint ID, no session boot needed.
-	if checkPointID != "" && (sessionID == "" || sessionStore == nil) {
-		return checkPointID, nil
-	}
-	// Implicit session-mode resume requires both sessionID and sessionStore.
-	if checkPointID == "" && (sessionID == "" || sessionStore == nil) {
-		return "", errors.New("failed to resume: checkpoint ID is empty")
+) (*runnerSessionCheckpoint, error) {
+	if sessionID == "" || sessionStore == nil {
+		if checkPointID == "" {
+			return nil, errors.New("failed to resume: checkpoint ID is empty")
+		}
+		return nil, nil
 	}
 	state.enabled = true
 	state.sessionID = sessionID
 	state.sessionStore = sessionStore
 	state.checkPointStore = checkPointStore
 	state.sessionConfig = normalizeSessionConfig(sessionConfig)
-	state.latestState = &reconstructedSessionState[M]{}
 	handle, err := openRunnerSession[M](ctx, sessionStore, sessionID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	state.sessionHandle = handle
 
-	reconstructResult, err := reconstructSessionState[M](ctx, state.sessionHandle, defaultLoadPageSize)
-	if err != nil {
-		return "", fmt.Errorf("failed to reconstruct session[%s]: %w", sessionID, err)
-	}
-	if reconstructResult != nil && reconstructResult.state != nil {
-		state.latestState = reconstructResult.state
-	}
-	state.latestState.Messages = nil
-	// Pick the checkpoint ID: caller-provided takes precedence over the implicit
-	// session-scoped one. The session-scoped key still drives existence checks
-	// when the caller did not supply a checkpoint.
 	effectiveCheckPointID := checkPointID
 	if effectiveCheckPointID == "" {
 		effectiveCheckPointID = sessionRunnerCheckpointID(sessionID)
 	}
 	state.checkPointID = &effectiveCheckPointID
 
-	// Existence check is only required for implicit session resume — the caller
-	// passing an explicit checkpoint ID has asserted the checkpoint should exist
-	// and any error will surface from the subsequent load. For implicit resume,
-	// the absence of a pending checkpoint is fatal and reported here.
 	cp, existed, err := loadRunnerSessionCheckpoint(ctx, checkPointStore, effectiveCheckPointID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if !existed {
 		if checkPointID == "" {
-			return "", fmt.Errorf("no pending session checkpoint for session %q", sessionID)
+			return nil, fmt.Errorf("no pending session checkpoint for session %q", sessionID)
 		}
-		return "", fmt.Errorf("checkpoint[%s] not exist", effectiveCheckPointID)
+		return nil, fmt.Errorf("checkpoint[%s] not exist", effectiveCheckPointID)
 	}
+	if err := state.validateResumeCheckpoint(ctx, cp); err != nil {
+		return nil, err
+	}
+	state.turnID = cp.TurnID
+	return cp, nil
+}
+
+func (state *runnerSessionRunState[M]) validateResumeCheckpoint(ctx context.Context, cp *runnerSessionCheckpoint) error {
+	handle := state.sessionHandle
+	if cp.SessionID == "" && cp.IdleEventID == "" {
+		return nil // The earliest session checkpoints recorded neither field.
+	}
+	// Even a checkpoint without a log position can identify its owning session.
+	if cp.SessionID != handle.sessionID {
+		return fmt.Errorf("%w: checkpoint belongs to session %q, requested session %q", ErrCheckpointStale, cp.SessionID, handle.sessionID)
+	}
+	if cp.IdleEventID == "" {
+		return nil
+	}
+	latest, err := handle.latestCheckpointEvent(ctx)
+	if err != nil {
+		return err
+	}
+	var latestEventID string
+	if latest != nil {
+		latestEventID = latest.EventID
+	}
+	if latestEventID != cp.IdleEventID {
+		// A different event in the owning session supersedes this checkpoint.
+		// A missing log or a session mismatch is insufficient evidence to retire it.
+		state.checkpointConsumed = latestEventID != ""
+		return fmt.Errorf("%w: session %q checkpoint idle event %q, latest relevant event %q",
+			ErrCheckpointStale, handle.sessionID, cp.IdleEventID, latestEventID)
+	}
+	return nil
+}
+
+func (state *runnerSessionRunState[M]) appendResumeStartedEvent(ctx context.Context) error {
 	resumeEvent := &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
-		Kind:      SessionEventKind(SessionEventExtensionPrefix + "resume.request_started"),
+		TurnID:    state.turnID,
+		Kind:      sessionEventResumeRequestStarted,
 		Extension: &SessionExtensionEvent{},
 	}
-	if cp.TurnID != "" {
-		state.turnID = cp.TurnID
-		resumeEvent.TurnID = state.turnID
-	}
 	if err := prepareSessionEventEnvelope(ctx, resumeEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
-		return "", err
+		return err
 	}
 	if state.turnID == "" {
 		state.turnID = resumeEvent.EventID
-		resumeEvent.TurnID = resumeEvent.EventID
+		resumeEvent.TurnID = state.turnID
 	}
-	if err := appendRunnerSessionControlEvent(ctx, state, resumeEvent); err != nil {
-		return "", err
+	if err := state.sessionHandle.appendEvents(ctx, []*SessionEvent[M]{resumeEvent}); err != nil {
+		return err
 	}
 	state.initialTimeline = append(state.initialTimeline, resumeEvent)
-	return effectiveCheckPointID, nil
+	return nil
 }
 
-func appendRunnerSessionRunningEvent[M MessageType](
-	ctx context.Context,
-	state *runnerSessionRunState[M],
-) error {
-	runningEvent := &SessionEvent[M]{
+func (state *runnerSessionRunState[M]) startResume(ctx context.Context) error {
+	if state.enabled {
+		if err := state.appendRunStart(ctx, nil); err != nil {
+			return err
+		}
+	}
+	// Without a session log the equivalent boundary is dispatch to the resumable agent.
+	state.checkpointConsumed = true
+	return nil
+}
+
+// appendRunStart writes running and all new inputs in one ordered batch before agent dispatch.
+func (state *runnerSessionRunState[M]) appendRunStart(ctx context.Context, inputMessages []M) error {
+	running := &SessionEvent[M]{
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventSessionStatusRunning,
 		Lifecycle: &LifecycleEvent{State: SessionRunStateRunning},
 	}
-	if err := prepareSessionEventEnvelope(ctx, runningEvent, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
+	if err := prepareSessionEventEnvelope(ctx, running, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
 		return err
 	}
-	if state.turnID == "" {
-		state.turnID = runningEvent.EventID
+	running.TurnID = state.turnID
+	if running.TurnID == "" {
+		running.TurnID = running.EventID
 	}
-	runningEvent.TurnID = state.turnID
-	if err := appendRunnerSessionControlEvent(ctx, state, runningEvent); err != nil {
-		return err
-	}
-	state.initialTimeline = append(state.initialTimeline, runningEvent)
-	return nil
-}
 
-func appendRunnerSessionControlEvent[M MessageType](
-	ctx context.Context,
-	state *runnerSessionRunState[M],
-	event *SessionEvent[M],
-) error {
-	if state == nil || !state.enabled || state.sessionHandle == nil || event == nil {
-		return nil
-	}
-	return state.sessionHandle.appendEvents(ctx, []*SessionEvent[M]{event})
-}
-
-func appendRunnerSessionInputEvents[M MessageType](
-	ctx context.Context,
-	state *runnerSessionRunState[M],
-	messages []M,
-) error {
-	if state == nil || !state.enabled || state.sessionHandle == nil || len(messages) == 0 {
-		return nil
-	}
-	events := make([]*SessionEvent[M], len(messages))
-	for i, msg := range messages {
-		se := makeInputSessionEvent[M](msg)
-		stampSessionEventTurnID(se, state.turnID)
-		if err := prepareSessionEventEnvelope(ctx, se, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
+	events := make([]*SessionEvent[M], 1+len(inputMessages))
+	events[0] = running
+	for i, msg := range inputMessages {
+		event := makeInputSessionEvent(msg)
+		event.TurnID = running.TurnID
+		if err := prepareSessionEventEnvelope(ctx, event, state.sessionConfig.EventIDGenerator, state.sessionConfig.EventExtraProvider, sessionEventEnvelopeOptions{}); err != nil {
 			return err
 		}
-		events[i] = se
+		events[i+1] = event
 	}
 	if err := state.sessionHandle.appendEvents(ctx, events); err != nil {
 		return err
 	}
+	state.turnID = running.TurnID
 	state.initialTimeline = append(state.initialTimeline, events...)
 	return nil
 }
@@ -492,36 +489,6 @@ func loadRunnerSessionCheckpoint(ctx context.Context, store CheckPointStore, che
 	return cp, true, nil
 }
 
-func runnerLoadCheckPointForSession(store CheckPointStore, ctx context.Context, checkPointID string, sessionMode bool) (
-	context.Context, *runContext, *ResumeInfo, error) {
-	if !sessionMode {
-		return runnerLoadCheckPointImpl(store, ctx, checkPointID)
-	}
-	cp, existed, err := loadRunnerSessionCheckpoint(ctx, store, checkPointID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if !existed {
-		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkPointID)
-	}
-	return runnerLoadCheckPointBytes(ctx, cp.Payload)
-}
-
-func runnerLoadCheckPointBytes(ctx context.Context, data []byte) (
-	context.Context, *runContext, *ResumeInfo, error) {
-	data = preprocessADKCheckpoint(data)
-	s := &serialization{}
-	err := gob.NewDecoder(bytes.NewReader(data)).Decode(s)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
-	}
-	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
-	return ctx, s.RunCtx, &ResumeInfo{
-		EnableStreaming: s.EnableStreaming,
-		InterruptInfo:   s.Info,
-	}, nil
-}
-
 func deleteCheckPointIfSupported(ctx context.Context, store CheckPointStore, checkPointID string) error {
 	if isNilCheckPointStore(store) {
 		return nil
@@ -530,42 +497,6 @@ func deleteCheckPointIfSupported(ctx context.Context, store CheckPointStore, che
 		return deleter.Delete(ctx, checkPointID)
 	}
 	return nil
-}
-
-func saveRunnerCheckpoint[M MessageType]( //nolint:revive // argument-limit
-	enableStreaming bool,
-	store CheckPointStore,
-	ctx context.Context,
-	checkPointID string,
-	info *InterruptInfo,
-	is *core.InterruptSignal,
-	sessionState *runnerSessionRunState[M],
-) error {
-	if sessionState == nil || !sessionState.enabled {
-		return runnerSaveCheckPointImpl(enableStreaming, store, ctx, checkPointID, info, is)
-	}
-	if isNilCheckPointStore(store) {
-		return nil
-	}
-	payload, err := encodeRunnerCheckPointWithRunCtx(
-		enableStreaming,
-		sanitizeRunContextForSessionCheckpoint[M](getRunCtx(ctx)),
-		info,
-		is,
-	)
-	if err != nil {
-		return err
-	}
-	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionID:    sessionState.sessionID,
-		CheckPointID: checkPointID,
-		TurnID:       sessionState.turnID,
-		Payload:      payload,
-	})
-	if err != nil {
-		return err
-	}
-	return store.Set(ctx, checkPointID, data)
 }
 
 func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, sessionID string, sessionStore SessionEventStore[M], sessionConfig *SessionConfig[M], ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] { //nolint:revive // argument-limit
@@ -584,20 +515,17 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 		return errorIterator[M](err)
 	}
 	if sessionState.enabled {
-		// Capture caller-provided messages BEFORE prepending history. These will be
-		// emitted as session events at turn start so they appear in the event log.
-		sessionState.inputMessages = append([]M{}, messages...)
-		messages = append(append([]M{}, sessionState.latestState.Messages...), sessionState.inputMessages...)
+		inputMessages := messages
+		messages = append(append([]M{}, sessionState.latestState.Messages...), inputMessages...)
 		sessionState.latestState.Messages = nil
 		// Assign IDs before messages can be both persisted and inspected by
 		// middleware, avoiding concurrent lazy ID mutation during event snapshotting.
 		for _, msg := range messages {
 			EnsureMessageID(msg)
 		}
-		if err := appendRunnerSessionInputEvents(ctx, sessionState, sessionState.inputMessages); err != nil {
+		if err := sessionState.appendRunStart(ctx, inputMessages); err != nil {
 			return errorIterator[M](err)
 		}
-		sessionState.inputMessages = nil
 		opts = append(opts, withEnableSessionEvents())
 		opts = append(opts, withEnableInternalTimelineEvents())
 	}
@@ -645,34 +573,48 @@ func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, st
 }
 
 func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPointStore, sessionID string, sessionStore SessionEventStore[M], sessionConfig *SessionConfig[M], ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
-	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
+	sessionState *runnerSessionRunState[M], opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if isNilCheckPointStore(store) {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
 	o := getCommonOptions(nil, opts...)
 	exposeTimelineEvents := o.enableTimelineEvents
-	sessionState := &runnerSessionRunState[M]{}
 	handedOff := false
 	defer func() {
 		if !handedOff {
 			sessionState.close(ctx)
 		}
 	}()
-	effectiveCheckPointID, err := sessionState.prepareResume(ctx, store, sessionID, sessionStore, sessionConfig, checkPointID)
+	cp, err := sessionState.prepareResume(ctx, store, sessionID, sessionStore, sessionConfig, checkPointID)
 	if err != nil {
 		return nil, err
 	}
-	checkPointID = effectiveCheckPointID
-	if sessionState.enabled {
-		opts = append(opts, withEnableSessionEvents())
-		opts = append(opts, withEnableInternalTimelineEvents())
+	var (
+		resumeCtx  context.Context
+		runCtx     *runContext
+		resumeInfo *ResumeInfo
+	)
+	if cp == nil {
+		resumeCtx, runCtx, resumeInfo, err = runnerLoadCheckPointImpl(store, ctx, checkPointID)
+	} else {
+		checkPointID = *sessionState.checkPointID
+		opts = append(opts, withEnableSessionEvents(), withEnableInternalTimelineEvents())
+		resumeCtx, runCtx, resumeInfo, err = runnerLoadCheckPointBytes(ctx, cp.Payload)
 	}
-
-	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointForSession(store, ctx, checkPointID, sessionState.enabled)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
+	if runCtx == nil || runCtx.Session == nil {
+		return nil, errors.New("failed to load from checkpoint: missing run session")
+	}
+	// Publish the resume request only after the checkpoint yields a usable session.
+	if sessionState.enabled {
+		if err := sessionState.appendResumeStartedEvent(ctx); err != nil {
+			return nil, err
+		}
+	}
+	ctx = resumeCtx
 
 	// Resume uses the streaming mode persisted in the checkpoint, not the value the
 	// caller passed when constructing the runner. This is the runner's own invariant:
@@ -714,10 +656,8 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 		if !ok {
 			return nil, fmt.Errorf("agent %T does not support resume", a)
 		}
-		if sessionState.enabled {
-			if err := appendRunnerSessionRunningEvent(ctx, sessionState); err != nil {
-				return nil, err
-			}
+		if err := sessionState.startResume(ctx); err != nil {
+			return nil, err
 		}
 		iter = any(ra.Resume(ctx, resumeInfo, opts...)).(*AsyncIterator[*TypedAgentEvent[M]])
 	} else {
@@ -726,10 +666,8 @@ func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], store CheckPo
 		if !ok {
 			return nil, fmt.Errorf("agent %T does not support resume", a)
 		}
-		if sessionState.enabled {
-			if err := appendRunnerSessionRunningEvent(ctx, sessionState); err != nil {
-				return nil, err
-			}
+		if err := sessionState.startResume(ctx); err != nil {
+			return nil, err
 		}
 		iter = ra.Resume(ctx, resumeInfo, opts...)
 	}
@@ -821,9 +759,9 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		}
 		return enqueueAsyncSessionEvent(se)
 	}
-	sendTimelineEvent := func(se *SessionEvent[M]) bool {
+	sendTimelineEvent := func(se *SessionEvent[M]) string {
 		if se == nil {
-			return false
+			return ""
 		}
 		stampOwnTurnID(se)
 		sc := sessionEventContextFromContext[M](ctx)
@@ -832,16 +770,16 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 		se, err = prepareReceivedSessionEvent(ctx, se, sc)
 		if err != nil {
 			setPersistErr(err)
-			return false
+			return ""
 		}
 		if err := persistSessionEvent(se); err != nil {
-			return false
+			return ""
 		}
-		event := &TypedAgentEvent[M]{SessionEventVariant: &SessionEventVariant[M]{SessionID: sessionState.sessionID, Event: se}}
+		eventID := se.EventID
 		if enableTimelineEvents {
-			gen.Send(event)
+			gen.Send(&TypedAgentEvent[M]{SessionEventVariant: &SessionEventVariant[M]{SessionID: sessionState.sessionID, Event: se}})
 		}
-		return true
+		return eventID
 	}
 	var receivedEventContext sessionEventContext[M]
 	if sessionState != nil && sessionState.enabled {
@@ -888,7 +826,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			pendingCheckpoint = &deferredRunnerCheckpoint{info: info, signal: sig, errLabel: errLabel}
 			return
 		}
-		if err := saveRunnerCheckpoint(enableStreaming, store, ctx, *checkPointID, info, sig, sessionState); err != nil {
+		if err := runnerSaveCheckPointImpl(enableStreaming, store, ctx, *checkPointID, info, sig); err != nil {
 			gen.Send(&TypedAgentEvent[M]{Err: newCheckpointSaveError(errLabel, err)})
 		}
 	}
@@ -1137,7 +1075,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 				Cancel:    &CancelEvent{Reason: "cancelled"},
 			})
 		}
-		sendTimelineEvent(&SessionEvent[M]{
+		idleEventID := sendTimelineEvent(&SessionEvent[M]{
 			Timestamp: newEventTimestamp(),
 			Kind:      SessionEventSessionStatusIdle,
 			Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: stopReason}},
@@ -1153,6 +1091,7 @@ func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckP
 			checkPointID:      checkPointID,
 			enableStreaming:   enableStreaming,
 			pendingCheckpoint: pendingCheckpoint,
+			idleEventID:       idleEventID,
 		}
 		finalErr = res.finalize(ctx)
 	}
@@ -1216,6 +1155,36 @@ type sessionTurnResult[M MessageType] struct {
 	checkPointID      *string
 	enableStreaming   bool
 	pendingCheckpoint *deferredRunnerCheckpoint
+	idleEventID       string
+}
+
+func (r *sessionTurnResult[M]) saveCheckpoint(ctx context.Context) error {
+	if isNilCheckPointStore(r.store) {
+		return nil
+	}
+	if r.idleEventID == "" {
+		return errors.New("adk: session checkpoint requires a persisted idle event")
+	}
+	payload, err := encodeRunnerCheckPointWithRunCtx(
+		r.enableStreaming,
+		sanitizeRunContextForSessionCheckpoint[M](getRunCtx(ctx)),
+		r.pendingCheckpoint.info,
+		r.pendingCheckpoint.signal,
+	)
+	if err != nil {
+		return err
+	}
+	data, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
+		SessionID:    r.sessionState.sessionID,
+		CheckPointID: *r.checkPointID,
+		TurnID:       r.sessionState.turnID,
+		IdleEventID:  r.idleEventID,
+		Payload:      payload,
+	})
+	if err != nil {
+		return err
+	}
+	return r.store.Set(ctx, *r.checkPointID, data)
 }
 
 func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
@@ -1234,7 +1203,7 @@ func (r *sessionTurnResult[M]) finalize(ctx context.Context) error {
 				r.persistErr,
 			)
 		}
-		if err := saveRunnerCheckpoint(r.enableStreaming, r.store, ctx, *r.checkPointID, r.pendingCheckpoint.info, r.pendingCheckpoint.signal, r.sessionState); err != nil {
+		if err := r.saveCheckpoint(ctx); err != nil {
 			return newCheckpointSaveError(r.pendingCheckpoint.errLabel, err)
 		}
 	}

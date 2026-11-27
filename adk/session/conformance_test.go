@@ -46,6 +46,7 @@ func runConformanceTests[M adk.MessageType](t *testing.T, factory func(testing.T
 	t.Run("AppendEvents rejects non-replay duplicate EventID", func(t *testing.T) { testRejectDuplicateEventID(t, factory, makeMessage) })
 	t.Run("AppendEvents rejects duplicate EventID within same batch", func(t *testing.T) { testRejectDuplicateEventIDWithinBatch(t, factory, makeMessage) })
 	t.Run("AppendEvents rejects empty EventID with ErrInvalidEventID", func(t *testing.T) { testRejectEmptyEventID(t, factory, makeMessage) })
+	t.Run("AppendEvents rejects empty message replacements", func(t *testing.T) { testRejectEmptyMessageReplacements(t, factory, makeMessage) })
 	t.Run("After resumes by EventID forward", func(t *testing.T) { testAfterForward(t, factory, makeMessage) })
 	t.Run("After resumes by EventID reverse", func(t *testing.T) { testAfterReverse(t, factory, makeMessage) })
 	t.Run("Unknown After returns ErrEventIDOutOfRange", func(t *testing.T) { testUnknownAfter(t, factory, makeMessage) })
@@ -95,6 +96,29 @@ func testAppendAndForwardLoad[M adk.MessageType](t *testing.T, factory func(test
 		t.Fatalf("LoadEvents returned nil result")
 	}
 	requireEventsEqual(t, []*adk.SessionEvent[M]{first, second, third}, res.Events)
+}
+
+func testRejectEmptyMessageReplacements[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionEventStore[M], makeMessage func(string) M) {
+	var nilMessages []M
+	for name, messages := range map[string]*[]M{"missing payload": nil, "nil slice": &nilMessages, "empty slice": &[]M{}} {
+		t.Run(name, func(t *testing.T) {
+			store := newStore(t, factory)
+			ctx := context.Background()
+			batch := []*adk.SessionEvent[M]{
+				messageEvent("msg-1", makeMessage("first")),
+				{EventID: "replace-2", Kind: adk.SessionEventMessagesReplaced, MessagesReplaced: messages},
+			}
+			if err := store.AppendEvents(ctx, "s", batch); err == nil {
+				t.Fatal("AppendEvents accepted an empty message replacement")
+			}
+			// Retry the entire batch with the same IDs after correcting the replacement.
+			batch[1].MessagesReplaced = &[]M{makeMessage("summary")}
+			appendEvents(t, ctx, store, "s", batch...)
+			res, err := store.LoadEvents(ctx, "s", &adk.LoadSessionEventsRequest{})
+			requireNoError(t, err)
+			requireEventsEqual(t, batch, res.Events)
+		})
+	}
 }
 
 func testExtensionKindFilter[M adk.MessageType](t *testing.T, factory func(testing.TB) adk.SessionEventStore[M]) {

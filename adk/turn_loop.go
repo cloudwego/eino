@@ -87,9 +87,11 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	//     normally via GenInput.
 	//   - If no checkpoint exists, the loop starts fresh.
 	//
-	// On exit, if the TurnLoop saved a new checkpoint, it is saved under this
-	// same CheckpointID. On clean exit (no checkpoint saved), the existing
-	// checkpoint under CheckpointID is deleted to prevent stale resumption.
+	// If resume preparation fails, the loop retains the runner checkpoint and
+	// pending items for retry. Once the session's running event is durable, or
+	// without a session log once resume starts, the old runner state is consumed.
+	// A later failure preserves remaining items for GenInput under the same ID.
+	// Another interrupt saves the new runner checkpoint instead.
 	CheckpointID string
 
 	// Session fields are passed through to the internal Runner used by TurnLoop.
@@ -153,7 +155,7 @@ type GenResumeResult[T any, M MessageType] struct {
 	Consumed []T
 
 	// Remaining are the items to keep in the buffer for a future turn.
-	// TurnLoop pushes Remaining back into the buffer before resuming the agent.
+	// TurnLoop queues Remaining once the runner checkpoint has been consumed.
 	//
 	// Items from (interruptedItems, unhandledItems, resume items) that are in neither Consumed
 	// nor Remaining are dropped by the loop.
@@ -187,7 +189,7 @@ type TurnLoopExitState[T any, M MessageType] struct {
 	// Non-nil values include context errors, callback errors, *CancelError, etc.
 	// When Stop(WithImmediate()) or Stop(WithGraceful()) cancels a running
 	// agent, ExitReason will be a *CancelError.
-	// This never contains checkpoint errors — see CheckpointErr for those.
+	// See CheckpointErr for errors from checkpoint storage during exit cleanup.
 	ExitReason error
 
 	// UnhandledItems contains items that were buffered but not processed.
@@ -205,14 +207,11 @@ type TurnLoopExitState[T any, M MessageType] struct {
 	// Empty if Stop was not called or no cause was provided.
 	StopCause string
 
-	// CheckpointAttempted indicates whether a checkpoint save was attempted when the loop exited.
-	// True when Store is configured, CheckpointID is set, the loop was not idle
-	// at exit time, WithSkipCheckpoint was not used, and the exit was caused by
-	// Stop() (clean or cancel) or a business interrupt (*InterruptError).
+	// CheckpointAttempted reports an attempt to save pending work when the loop exited.
+	// This includes saving pending resume inputs or remaining items after a failure.
 	CheckpointAttempted bool
 
-	// CheckpointErr is the error from checkpoint save, if any.
-	// nil when CheckpointAttempted is false (no attempt was made) or when the save succeeded.
+	// CheckpointErr reports a failure to save or retire a checkpoint during exit cleanup.
 	CheckpointErr error
 
 	// TakeLateItems returns items that were pushed after the loop stopped
@@ -303,7 +302,6 @@ type TurnLoop[T any, M MessageType] struct {
 	runErr error
 
 	pendingResume *turnLoopPendingResume[T]
-	resumeMu      sync.Mutex
 
 	loadCheckpointID string
 

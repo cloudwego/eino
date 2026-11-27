@@ -2002,6 +2002,186 @@ func TestTurnLoop_BusinessInterrupt_PersistAndResume(t *testing.T) {
 	assert.Equal(t, []string{"msg1"}, resumeInterruptedItems, "interruptedItems should contain the original items")
 }
 
+// Simulates a store that commits the running event but loses its acknowledgement.
+type turnLoopLostRunningAckStore struct {
+	*sessionHelperStore
+	ackErr error
+}
+
+func (s *turnLoopLostRunningAckStore) AppendEvents(ctx context.Context, sid string, events []*SessionEvent[Message]) error {
+	if err := s.sessionHelperStore.AppendEvents(ctx, sid, events); err != nil {
+		return err
+	}
+	for _, event := range events {
+		if event.Kind == SessionEventSessionStatusRunning {
+			return s.ackErr
+		}
+	}
+	return nil
+}
+
+func TestTurnLoopSessionResumeCheckpointConsumption(t *testing.T) {
+	for _, scenario := range []string{"version read", "running rejected", "running acknowledgement lost", "output rejected"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			log := &turnLoopLostRunningAckStore{sessionHelperStore: newSessionHelperStore()}
+			store := newSessionHelperStore()
+			agent := &runnerInterruptAgent{}
+			cfg := TurnLoopConfig[string, Message]{
+				SessionID: "s", CheckpointID: "cp", SessionStore: log, Store: store,
+				GenInput: genInputConsumeFirst, PrepareAgent: prepareAgent(agent),
+			}
+			run := func(items ...string) *TurnLoopExitState[string, Message] {
+				loop := NewTurnLoop(cfg)
+				for _, item := range items {
+					ok, _ := loop.Push(item)
+					require.True(t, ok)
+				}
+				loop.Run(ctx)
+				return loop.Wait()
+			}
+			load := func() *turnLoopCheckpoint[string] {
+				data, exists, err := store.Get(ctx, cfg.CheckpointID)
+				require.NoError(t, err)
+				require.True(t, exists)
+				cp, err := unmarshalTurnLoopCheckpoint[string](data)
+				require.NoError(t, err)
+				return cp
+			}
+			exit := run("original query", "queued")
+			require.ErrorAs(t, exit.ExitReason, new(*InterruptError))
+			require.NoError(t, exit.CheckpointErr)
+			original := load()
+			require.True(t, original.HasRunnerState)
+
+			cfg.GenResume = func(_ context.Context, _ *TurnLoop[string, Message], interrupted, queued, resume []string) (*GenResumeResult[string, Message], error) {
+				assert.Equal(t, []string{"original query"}, interrupted)
+				assert.Equal(t, []string{"queued"}, queued)
+				assert.Equal(t, []string{"approve"}, resume)
+				return &GenResumeResult[string, Message]{Consumed: append(interrupted, resume...), Remaining: queued}, nil
+			}
+			failure := errors.New(scenario)
+			switch scenario {
+			case "version read":
+				log.loadErr = failure
+			case "running rejected":
+				log.kindErr = map[SessionEventKind]error{SessionEventSessionStatusRunning: failure}
+			case "running acknowledgement lost":
+				log.ackErr = failure
+			case "output rejected":
+				log.kindErr = map[SessionEventKind]error{SessionEventMessage: failure}
+			}
+			exit = run("approve")
+			require.ErrorIs(t, exit.ExitReason, failure)
+			require.NoError(t, exit.CheckpointErr)
+			log.loadErr, log.kindErr, log.ackErr = nil, nil, nil
+
+			if scenario != "output rejected" {
+				retry := load()
+				require.Equal(t, original.RunnerCheckpoint, retry.RunnerCheckpoint)
+				require.Equal(t, original.CanceledItems, retry.CanceledItems)
+				require.Equal(t, original.UnhandledItems, retry.UnhandledItems)
+				require.Equal(t, []string{"approve"}, retry.ResumeItems)
+				require.Equal(t, int32(1), agent.callCount)
+			}
+			if scenario == "running acknowledgement lost" {
+				exit = run()
+				require.ErrorIs(t, exit.ExitReason, ErrCheckpointStale)
+				require.NoError(t, exit.CheckpointErr)
+				require.Equal(t, int32(1), agent.callCount)
+			}
+
+			var inputBatches [][]string
+			cfg.GenInput = func(ctx context.Context, l *TurnLoop[string, Message], items []string) (*GenInputResult[string, Message], error) {
+				inputBatches = append(inputBatches, append([]string{}, items...))
+				return genInputConsumeFirst(ctx, l, items)
+			}
+			cfg.OnAgentEvents = func(ctx context.Context, tc *TurnContext[string, Message], it *AsyncIterator[*AgentEvent]) error {
+				err := defaultTurnLoopOnAgentEvents(ctx, tc, it)
+				tc.Loop.Stop()
+				return err
+			}
+			if scenario == "version read" || scenario == "running rejected" {
+				// Resume again, then stop with the normal input still queued.
+				exit = run()
+				require.NoError(t, exit.ExitReason)
+				require.NoError(t, exit.CheckpointErr)
+				require.Equal(t, int32(2), agent.callCount)
+			}
+			require.Equal(t, &turnLoopCheckpoint[string]{UnhandledItems: []string{"queued"}}, load())
+			// A fresh Run receives only the remaining item. Replay brings back the query exactly once.
+			captured := &runnerSessionAgent{name: "followup"}
+			cfg.PrepareAgent = prepareAgent(captured)
+			cfg.GenResume = nil
+			exit = run()
+			require.NoError(t, exit.ExitReason)
+			require.Equal(t, [][]string{{"queued"}}, inputBatches)
+			require.Len(t, captured.inputs, 1)
+			var userMessages []string
+			for _, msg := range captured.inputs[0] {
+				if msg.Role == schema.User {
+					userMessages = append(userMessages, msg.Content)
+				}
+			}
+			require.Equal(t, []string{"original query", "queued"}, userMessages)
+		})
+	}
+}
+
+func TestTurnLoopSessionResumeWithoutQueuedItems(t *testing.T) {
+	for name, store := range map[string]CheckPointStore{"delete": newSessionHelperStore(), "set only": newTestStore()} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			log := newSessionHelperStore()
+			cfg := TurnLoopConfig[string, Message]{
+				SessionID: "owner", SessionStore: log, Store: store, CheckpointID: "cp",
+				GenInput: genInputConsumeFirst, PrepareAgent: prepareAgent(&runnerInterruptAgent{}),
+				GenResume: func(_ context.Context, _ *TurnLoop[string, Message], interrupted, _, _ []string) (*GenResumeResult[string, Message], error) {
+					return &GenResumeResult[string, Message]{Consumed: interrupted}, nil
+				},
+			}
+			first := NewTurnLoop(cfg)
+			first.Push("pause")
+			first.Run(ctx)
+			require.ErrorAs(t, first.Wait().ExitReason, new(*InterruptError))
+			original, exists, err := store.Get(ctx, cfg.CheckpointID)
+			require.NoError(t, err)
+			require.True(t, exists)
+
+			// A checkpoint looked up for the wrong session has not been consumed.
+			cfg.SessionID = "other"
+			wrong := NewTurnLoop(cfg)
+			wrong.Run(ctx)
+			require.ErrorIs(t, wrong.Wait().ExitReason, ErrCheckpointStale)
+			retained, exists, err := store.Get(ctx, cfg.CheckpointID)
+			require.NoError(t, err)
+			require.True(t, exists)
+			require.Equal(t, original, retained)
+
+			cfg.SessionID = "owner"
+			fail := errors.New("output write failed")
+			log.kindErr = map[SessionEventKind]error{SessionEventMessage: fail}
+			resume := NewTurnLoop(cfg)
+			resume.Run(ctx)
+			exit := resume.Wait()
+			require.ErrorIs(t, exit.ExitReason, fail)
+			require.NoError(t, exit.CheckpointErr)
+			retired, exists, err := store.Get(ctx, cfg.CheckpointID)
+			require.NoError(t, err)
+			if _, canDelete := store.(CheckPointDeleter); canDelete {
+				require.False(t, exists)
+			} else {
+				require.True(t, exists)
+				cp, decodeErr := unmarshalTurnLoopCheckpoint[string](retired)
+				require.NoError(t, decodeErr)
+				require.Equal(t, &turnLoopCheckpoint[string]{}, cp)
+			}
+		})
+	}
+}
+
 func TestTurnLoop_RestoredPendingResumeDistinguishesLegacyAndAcceptedResumeItems(t *testing.T) {
 	ctx := context.Background()
 
@@ -5189,7 +5369,7 @@ func TestTurnLoop_StopConcurrentWithCallbackError_NoCheckpoint(t *testing.T) {
 	// depending on idle state. The test is about the error path.
 }
 
-func TestTurnLoop_DeleteWithoutCheckPointDeleter_NoOp(t *testing.T) {
+func TestTurnLoop_ConsumedQueueWithoutDeleterIsCleared(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore()
 	cpID := "no-deleter"
@@ -5211,8 +5391,7 @@ func TestTurnLoop_DeleteWithoutCheckPointDeleter_NoOp(t *testing.T) {
 	store.mu.Unlock()
 	assert.True(t, exists, "checkpoint should be saved")
 
-	// Second loop: exit via context cancel — should try to delete but store
-	// doesn't implement CheckPointDeleter, so checkpoint persists (no-op)
+	// Second loop consumes the stored work and exits via context cancellation.
 	ctx2, cancel2 := context.WithCancel(ctx)
 	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		Store:        store,
@@ -5233,12 +5412,14 @@ func TestTurnLoop_DeleteWithoutCheckPointDeleter_NoOp(t *testing.T) {
 	loop2.Run(ctx2)
 	loop2.Wait()
 
-	// Without CheckPointDeleter, the stale checkpoint should NOT be deleted
+	// Retiring the queue through Set prevents the next loop from repeating it.
 	store.mu.Lock()
 	v, exists := store.m[cpID]
 	store.mu.Unlock()
-	assert.True(t, exists, "checkpoint should still exist without CheckPointDeleter")
-	assert.NotNil(t, v, "checkpoint should not be set to nil")
+	require.True(t, exists)
+	cleared, err := unmarshalTurnLoopCheckpoint[string](v)
+	require.NoError(t, err)
+	require.Equal(t, &turnLoopCheckpoint[string]{}, cleared)
 }
 
 func TestTurnLoop_StopWithSkipCheckpoint(t *testing.T) {

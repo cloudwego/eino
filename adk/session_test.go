@@ -50,6 +50,7 @@ type sessionHelperStore struct {
 	eventIDIdx    map[string]int
 	appendBatches [][]SessionEventKind
 	loadErr       error
+	getErr        error
 	appendErr     error
 	userMsgErr    error
 	kindErr       map[SessionEventKind]error
@@ -350,6 +351,9 @@ func (s *sessionHelperStore) Set(_ context.Context, key string, value []byte) er
 func (s *sessionHelperStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.getErr != nil {
+		return nil, false, s.getErr
+	}
 	v, ok := s.checkpoints[key]
 	return append([]byte{}, v...), ok, nil
 }
@@ -374,6 +378,14 @@ func (s *sessionHelperStore) AppendEventsForSession(_ context.Context, _ string,
 	if s.appendErr != nil {
 		return s.appendErr
 	}
+	// Inject a whole-batch rejection when an input message is present.
+	if s.userMsgErr != nil {
+		for _, event := range events {
+			if event != nil && event.Message != nil && event.Message.Role == schema.User {
+				return s.userMsgErr
+			}
+		}
+	}
 	batch := make([]SessionEventKind, 0, len(events))
 	for _, e := range events {
 		if e == nil || e.EventID == "" {
@@ -384,9 +396,6 @@ func (s *sessionHelperStore) AppendEventsForSession(_ context.Context, _ string,
 		}
 		if err := s.kindErr[e.Kind]; err != nil {
 			return err
-		}
-		if s.userMsgErr != nil && e.Message != nil && e.Message.Role == schema.User {
-			return s.userMsgErr
 		}
 		if _, dup := s.eventIDIdx[e.EventID]; dup {
 			continue
@@ -526,7 +535,7 @@ func reconstructTestSession(t testing.TB, ctx context.Context, store SessionEven
 	handle, err := openRunnerSession(ctx, store, sessionID)
 	require.NoError(t, err)
 	defer handle.close(ctx)
-	return reconstructSessionState(ctx, handle, pageSize)
+	return reconstructSessionState(ctx, handle, pageSize, 0)
 }
 
 func buildTestKindSet(kinds []SessionEventKind) map[SessionEventKind]struct{} {
@@ -968,13 +977,14 @@ func TestSessionEventIDGenerator_FailClosedOnError(t *testing.T) {
 	assert.Empty(t, userMsgs, "user input message must not be persisted on generator error")
 }
 
-func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
+func TestRunnerSessionModeRunsWithoutReadingPendingCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
 	sessionID := "runner-pending-session"
 	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{Payload: []byte("opaque")})
 	require.NoError(t, err)
 	require.NoError(t, store.Set(ctx, sessionRunnerCheckpointID(sessionID), cpBytes))
+	store.getErr = errors.New("checkpoint reads are unavailable")
 
 	agent := &runnerSessionAgent{name: "runner-session-agent"}
 	runner := NewRunner(ctx, RunnerConfig{
@@ -983,24 +993,16 @@ func TestRunnerSessionModeRejectsPendingCheckpoint(t *testing.T) {
 		SessionStore:    store,
 		CheckPointStore: store,
 	})
-	iter := runner.Query(ctx, "new input")
-	// Run should succeed — pending checkpoint is auto-abandoned.
-	var sawErr bool
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil {
-			sawErr = true
-		}
-	}
-	require.False(t, sawErr, "Run should not return any error when pending checkpoint exists")
+	drainSessionEvents(t, runner.Query(ctx, "new input"))
 
 	// Verify agent received the input messages (no prior history to reconstruct).
 	require.Len(t, agent.inputs, 1)
 	require.Len(t, agent.inputs[0], 1)
 	assert.Equal(t, "new input", agent.inputs[0][0].Content)
+	store.getErr = nil
+	_, exists, err := store.Get(ctx, sessionRunnerCheckpointID(sessionID))
+	require.NoError(t, err)
+	assert.False(t, exists, "a successful new turn cleans up the pending checkpoint")
 }
 
 func TestRunnerSessionCheckpointTurnIDRoundTrip(t *testing.T) {
@@ -1030,50 +1032,30 @@ func TestRunnerSessionCheckpointTurnIDRoundTrip(t *testing.T) {
 	legacy, err := decodeRunnerSessionCheckpoint(legacyPayload)
 	require.NoError(t, err)
 	assert.Empty(t, legacy.TurnID)
+	assert.Empty(t, legacy.IdleEventID)
 	assert.Equal(t, []byte("legacy"), legacy.Payload)
 }
 
-func TestAttack_RunClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
+func TestResumeClosesSessionHandleWhenCheckpointDecodeFails(t *testing.T) {
 	ctx := context.Background()
 	store := &publicSessionHelperStore{sessionHelperStore: newSessionHelperStore()}
-	service := store
 	sessionID := "checkpoint-decode-failure-closes-handle"
 	cpKey := sessionRunnerCheckpointID(sessionID)
 	require.NoError(t, store.Set(ctx, cpKey, []byte("not a runner checkpoint")))
+	store.loadErr = errors.New("event log reads are unavailable")
 
 	runner := NewRunner(ctx, RunnerConfig{
 		Agent:           &runnerSessionAgent{name: "checkpoint-decode-fail-agent"},
 		SessionID:       sessionID,
-		SessionStore:    service,
+		SessionStore:    store,
 		CheckPointStore: store,
 	})
-	iter := runner.Query(ctx, "first")
-	var firstErrs []error
-	for {
-		ev, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if ev.Err != nil {
-			firstErrs = append(firstErrs, ev.Err)
-		}
-	}
-	require.NotEmpty(t, firstErrs)
-	assert.ErrorContains(t, firstErrs[0], "failed to decode session checkpoint")
+	iter, err := runner.Resume(ctx, "")
+	require.ErrorContains(t, err, "failed to decode session checkpoint")
+	assert.Nil(t, iter)
 
-	require.NoError(t, store.Delete(ctx, cpKey))
-	iter = runner.Query(ctx, "second")
-	var secondErrs []error
-	for {
-		ev, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if ev.Err != nil {
-			secondErrs = append(secondErrs, ev.Err)
-		}
-	}
-	require.Empty(t, secondErrs, "session handle must be released after checkpoint decode failure")
+	store.loadErr = nil
+	drainSessionEvents(t, runner.Query(ctx, "new turn"))
 }
 
 func TestRunnerReleasesSessionAfterPanic(t *testing.T) {
@@ -1479,6 +1461,13 @@ func TestRunnerSessionModeResumeWithEmptyCheckpointID(t *testing.T) {
 	}
 	require.True(t, sawInterrupt)
 
+	before := len(store.events)
+	store.loadErr = errors.New("event log reads are unavailable")
+	_, err := runner.Resume(ctx, "")
+	require.ErrorIs(t, err, store.loadErr)
+	require.NotErrorIs(t, err, ErrCheckpointStale)
+	require.Len(t, store.events, before)
+	store.loadErr = nil
 	resumeIter, err := runner.Resume(ctx, "")
 	require.NoError(t, err)
 	var gotResumedOK bool
@@ -1495,6 +1484,185 @@ func TestRunnerSessionModeResumeWithEmptyCheckpointID(t *testing.T) {
 		}
 	}
 	assert.True(t, gotResumedOK)
+}
+
+func TestCheckpointOnlyResumeWithSessionID(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	store.loadErr = errors.New("event log unavailable")
+	agent := &runnerInterruptAgent{}
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: "standalone", CheckPointStore: store})
+	drainSessionEvents(t, runner.Query(ctx, "interrupt", WithCheckPointID("snapshot")))
+	iter, err := runner.Resume(ctx, "snapshot")
+	require.NoError(t, err)
+	drainSessionEvents(t, iter)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&agent.callCount))
+	assert.Empty(t, store.events)
+}
+
+func TestResumeRejectsStaleSessionCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	const sid = "owner"
+	for _, scenario := range []string{"failed new query", "message edit", "rollback", "empty log", "versioned checkpoint without session ID", "different session with same idle ID"} {
+		t.Run(scenario, func(t *testing.T) {
+			store := newSessionHelperStore()
+			agent := &runnerInterruptAgent{}
+			cfg := RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store, CheckPointStore: store}
+			appendCommittedTestTurn(t, ctx, store, sid, "base", "original")
+			drainSessionEvents(t, NewRunner(ctx, cfg).Query(ctx, "pause"))
+			key := sessionRunnerCheckpointID(sid)
+			checkpoint, exists, err := store.Get(ctx, key)
+			require.NoError(t, err)
+			require.True(t, exists)
+
+			log := store
+			switch scenario {
+			case "failed new query":
+				failure := errors.New("new turn failed")
+				freshCfg := cfg
+				freshCfg.Agent = &runnerSingleEventAgent{event: &AgentEvent{Err: failure}}
+				errs := drainResumeErrors(t, NewRunner(ctx, freshCfg).Query(ctx, "later input"))
+				require.NotEmpty(t, errs)
+				require.ErrorIs(t, errs[0], failure)
+			case "message edit":
+				summary := []Message{testMessageWithID("edited", schema.User)}
+				appendTestSessionEvent(t, ctx, log, sid, &SessionEvent[Message]{
+					Kind: SessionEventMessagesReplaced, MessagesReplaced: &summary,
+				})
+			case "rollback":
+				require.NoError(t, RollbackSession[Message](ctx, log, sid, "base"))
+			case "empty log":
+				log = newSessionHelperStore()
+				cfg.SessionStore = log
+			case "versioned checkpoint without session ID":
+				cp, decodeErr := decodeRunnerSessionCheckpoint(checkpoint)
+				require.NoError(t, decodeErr)
+				cp.SessionID = ""
+				checkpoint, err = encodeRunnerSessionCheckpoint(cp)
+				require.NoError(t, err)
+				require.NoError(t, store.Set(ctx, key, checkpoint))
+				log.loadErr = errors.New("checkpoint ownership must be validated before reading the log")
+			case "different session with same idle ID":
+				cfg.SessionID = "other"
+				log = newSessionHelperStore()
+				cfg.SessionStore = log
+				paused, err := decodeSessionEvent[Message](store.events[len(store.events)-1].Data)
+				require.NoError(t, err)
+				require.NoError(t, log.AppendEvents(ctx, cfg.SessionID, []*SessionEvent[Message]{paused}))
+			}
+
+			before := len(log.events)
+			iter, err := NewRunner(ctx, cfg).ResumeWithParams(ctx, key, &ResumeParams{})
+			require.ErrorIs(t, err, ErrCheckpointStale)
+			require.Nil(t, iter)
+			assert.Len(t, log.events, before)
+			assert.Equal(t, int32(1), atomic.LoadInt32(&agent.callCount))
+			retained, exists, err := store.Get(ctx, key)
+			require.NoError(t, err)
+			require.True(t, exists)
+			assert.Equal(t, checkpoint, retained)
+		})
+	}
+}
+
+func TestResumeLegacyCheckpointChecksSessionBeforeReadingLog(t *testing.T) {
+	ctx := context.Background()
+	const key = "shared-checkpoint"
+	store := newSessionHelperStore()
+	log := &sessionLoadRecorder{SessionEventStore: store}
+	agent := &runnerInterruptAgent{}
+	cfg := RunnerConfig{Agent: agent, SessionID: "owner", SessionStore: log, CheckPointStore: store}
+	owner := NewRunner(ctx, cfg)
+	drainSessionEvents(t, owner.Query(ctx, "pause", WithCheckPointID(key)))
+	cp, exists, err := loadRunnerSessionCheckpoint(ctx, store, key)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	// Encode the legacy wire format, which already recorded ownership.
+	type legacyCheckpoint struct {
+		SessionID, CheckPointID, TurnID string
+		Payload                         []byte
+	}
+	legacy, err := encodeGob(&legacyCheckpoint{
+		SessionID: cp.SessionID, CheckPointID: cp.CheckPointID, TurnID: cp.TurnID, Payload: cp.Payload,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Set(ctx, key, legacy))
+	before := len(store.events)
+	log.loadRequests = nil
+
+	cfg.SessionID = "other"
+	iter, err := NewRunner(ctx, cfg).Resume(ctx, key)
+	require.ErrorIs(t, err, ErrCheckpointStale)
+	require.Nil(t, iter)
+	require.Empty(t, log.loadRequests)
+	require.Len(t, store.events, before)
+	require.Equal(t, int32(1), atomic.LoadInt32(&agent.callCount))
+	retained, exists, err := store.Get(ctx, key)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, legacy, retained)
+
+	iter, err = owner.Resume(ctx, key)
+	require.NoError(t, err)
+	drainSessionEvents(t, iter)
+	require.Empty(t, log.loadRequests)
+	require.Equal(t, int32(2), atomic.LoadInt32(&agent.callCount))
+}
+
+func TestResumeCheckpointVersionAdvancesWhenRunningIsPersisted(t *testing.T) {
+	ctx := context.Background()
+	const sid = "resume-retry"
+	store := newRecordingHelperStore()
+	log := &sessionLoadRecorder{SessionEventStore: store}
+	agent := &runnerInterruptAgent{}
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: log, CheckPointStore: store})
+	drainSessionEvents(t, runner.Query(ctx, "interrupt"))
+	key := sessionRunnerCheckpointID(sid)
+	original := store.checkpoints[key]
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[Message]{Kind: "x.observation", Extension: &SessionExtensionEvent{}})
+
+	before := len(store.events)
+	failRunning := errors.New("running write failed")
+	store.kindErr = map[SessionEventKind]error{SessionEventSessionStatusRunning: failRunning}
+	_, err := runner.Resume(ctx, "")
+	require.ErrorIs(t, err, failRunning)
+	require.Len(t, store.events, before+1)
+	assert.Equal(t, sessionEventResumeRequestStarted, store.events[before].Kind)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&agent.callCount))
+
+	// The retry reaches running, then fails before it can persist a message or idle.
+	outputErr := errors.New("output write failed")
+	store.kindErr = map[SessionEventKind]error{SessionEventMessage: outputErr}
+	log.loadRequests = nil
+	calls := len(store.callsSnapshot())
+	iter, err := runner.Resume(ctx, "")
+	require.NoError(t, err)
+	errs := drainResumeErrors(t, iter)
+	require.Len(t, errs, 1)
+	require.ErrorIs(t, errs[0], outputErr)
+	require.Equal(t, SessionEventSessionStatusRunning, store.events[len(store.events)-1].Kind)
+	require.Equal(t, original, store.checkpoints[key])
+	reads := 0
+	for _, call := range store.callsSnapshot()[calls:] {
+		if call == "get:"+key {
+			reads++
+		}
+	}
+	assert.Equal(t, 1, reads)
+	require.Len(t, log.loadRequests, 1)
+	request := log.loadRequests[0]
+	assert.True(t, request.Reverse)
+	assert.Equal(t, 1, request.Limit)
+	assert.ElementsMatch(t, []SessionEventKind{SessionEventMessage, SessionEventMessagesReplaced, SessionEventMessageUpdated,
+		SessionEventMessageInserted, SessionEventMessagesDeleted, SessionEventRollback, SessionEventSessionStatusRunning,
+		SessionEventSessionStatusIdle, SessionEventInterrupt, SessionEventCancel}, request.Kinds)
+
+	before = len(store.events)
+	_, err = runner.Resume(ctx, "")
+	require.ErrorIs(t, err, ErrCheckpointStale)
+	assert.Len(t, store.events, before)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&agent.callCount))
 }
 
 func TestRunnerSessionModeFlushFailurePreventsCommit(t *testing.T) {
@@ -1750,33 +1918,61 @@ func TestRunnerSessionDurableBoundaryBatchShape(t *testing.T) {
 	}
 
 	assert.Equal(t, [][]SessionEventKind{
-		{SessionEventSessionStatusRunning},
-		{SessionEventMessage},
+		{SessionEventSessionStatusRunning, SessionEventMessage},
 		{SessionEventMessage},
 		{SessionEventSessionStatusIdle},
 	}, store.appendBatches)
 }
 
-func TestRunnerSessionInputMessageBoundaryFailureStopsBeforeAgent(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	store.userMsgErr = errors.New("input append failed")
-	agent := &runnerSessionAgent{name: "input-boundary-agent"}
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:        agent,
-		SessionID:    "input-boundary-session",
-		SessionStore: store,
-	})
+func TestRunnerSessionRunStartFailureAfterInterrupt(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persistRunning bool
+	}{
+		{name: "store rejects entire batch"},
+		{name: "store writes running before rejecting input", persistRunning: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			const sessionID = "input-boundary-session"
+			store := newSessionHelperStore()
+			agent := &runnerInterruptAgent{}
+			runner := NewRunner(ctx, RunnerConfig{
+				Agent: agent, SessionID: sessionID, SessionStore: store, CheckPointStore: store,
+			})
+			drainSessionEvents(t, runner.Query(ctx, "original"))
+			key := sessionRunnerCheckpointID(sessionID)
+			original := append([]byte(nil), store.checkpoints[key]...)
+			require.NotEmpty(t, original)
+			before := len(store.events)
 
-	iter := runner.Query(ctx, "hello")
-	event, ok := iter.Next()
-	require.True(t, ok)
-	require.Error(t, event.Err)
-	assert.Contains(t, event.Err.Error(), "input append failed")
-	_, ok = iter.Next()
-	assert.False(t, ok)
-	assert.Empty(t, agent.inputs, "agent must not execute when input message boundary append fails")
-	assert.Equal(t, [][]SessionEventKind{{SessionEventSessionStatusRunning}}, store.appendBatches)
+			writeErr := errors.New("input append failed")
+			if tc.persistRunning {
+				store.kindErr = map[SessionEventKind]error{SessionEventMessage: writeErr}
+			} else {
+				store.userMsgErr = writeErr
+			}
+			errs := drainResumeErrors(t, runner.Query(ctx, "new input"))
+			require.Len(t, errs, 1)
+			require.ErrorIs(t, errs[0], writeErr)
+			require.EqualValues(t, 1, atomic.LoadInt32(&agent.callCount))
+			require.Equal(t, original, store.checkpoints[key])
+
+			store.kindErr, store.userMsgErr = nil, nil
+			if tc.persistRunning {
+				require.Len(t, store.events, before+1)
+				require.Equal(t, SessionEventSessionStatusRunning, store.events[before].Kind)
+				_, err := runner.Resume(ctx, "")
+				require.ErrorIs(t, err, ErrCheckpointStale)
+				return
+			}
+			require.Len(t, store.events, before)
+			iter, err := runner.Resume(ctx, "")
+			require.NoError(t, err)
+			require.Empty(t, drainResumeErrors(t, iter))
+			require.EqualValues(t, 2, atomic.LoadInt32(&agent.callCount))
+		})
+	}
 }
 
 func TestSessionPersister_DirectAppendNoRetryAndLatch(t *testing.T) {
@@ -2641,7 +2837,7 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 		})
 	}
 
-	t.Run("empty replacement is a boundary", func(t *testing.T) {
+	t.Run("historical empty replacement is a boundary", func(t *testing.T) {
 		store := newSessionHelperStore()
 		sid := "empty-replacement"
 		empty := []*schema.Message{}
@@ -2697,14 +2893,12 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 
 		assert.Equal(t, []*schema.Message{updated, inserted, second}, result.state.Messages)
 
-		fullEvents, err := loadActiveSessionEventsReverse(ctx, mustOpenTestSession[Message](t, ctx, store, sid), 2)
-		require.NoError(t, err)
-		fullState, err := replayDurableContextEvents(fullEvents)
+		fullState, err := replayDurableContextEvents(decodeStoredSessionEvents(t, store.events))
 		require.NoError(t, err)
 		assert.Equal(t, fullState, result.state)
 	})
 
-	t.Run("rollback after replacement falls back to full history", func(t *testing.T) {
+	t.Run("rollback before the only replacement restores the original messages", func(t *testing.T) {
 		store := newSessionHelperStore()
 		sid := "rollback-after-replacement"
 		appendEvents(t, store, sid,
@@ -2735,6 +2929,25 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 		assert.Equal(t, "A1", result.state.Messages[1].Content)
 	})
 
+	t.Run("follow rollbacks to the effective replacement across pages", func(t *testing.T) {
+		store := newSessionHelperStore()
+		const sid = "rollback-replacement-boundary"
+		appendEvents(t, store, sid, messageEvent("older page"))
+		summary := testMessageWithID("summary at A", schema.User)
+		appendEvents(t, store, sid, replacementEvent([]Message{summary}), withTestCommittedIdle[Message]("A"))
+		appendEvents(t, store, sid, replacementEvent([]Message{}), withTestCommittedIdle[Message]("B"))
+		require.NoError(t, RollbackSession[Message](ctx, store, sid, "A"))
+		suffix := messageEvent("after first rollback")
+		appendEvents(t, store, sid, suffix, withTestCommittedIdle[Message]("C"))
+		require.NoError(t, RollbackSession[Message](ctx, store, sid, "B"))
+		require.NoError(t, RollbackSession[Message](ctx, store, sid, "C"))
+
+		result, recorder := reconstruct(t, store, sid, 1)
+		assert.Equal(t, []Message{summary, suffix.Message}, result.state.Messages)
+		// The older page preceding the effective replacement must never be requested.
+		require.Len(t, recorder.loadRequests, len(store.events)-1)
+	})
+
 	t.Run("session without replacement loads all pages unchanged", func(t *testing.T) {
 		store := newSessionHelperStore()
 		sid := "without-replacement"
@@ -2746,9 +2959,7 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 
 		require.Len(t, recorder.loadRequests, 3)
 		require.Len(t, result.state.Messages, 5)
-		fullEvents, err := loadActiveSessionEventsReverse(ctx, mustOpenTestSession[Message](t, ctx, store, sid), 2)
-		require.NoError(t, err)
-		fullState, err := replayDurableContextEvents(fullEvents)
+		fullState, err := replayDurableContextEvents(decodeStoredSessionEvents(t, store.events))
 		require.NoError(t, err)
 		assert.Equal(t, fullState, result.state)
 	})
@@ -2875,7 +3086,7 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 		sid,
 		"turn-1",
 		WithRollbackSessionCheckPointStore[*schema.Message](store),
-		WithRollbackSessionExpectedHeadEventID[*schema.Message]("turn-2"),
+		WithRollbackSessionFromEventID[*schema.Message]("turn-2"),
 	))
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
 
@@ -2899,29 +3110,138 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 	assert.NotContains(t, store.checkpoints, sessionRunnerCheckpointID(sid))
 }
 
-func TestRollbackSessionMultipleRollbacksProjectActiveBranch(t *testing.T) {
+func TestRollbackSessionCheckpointCleanupError(t *testing.T) {
+	ctx := context.Background()
+	const sid = "rollback-cleanup"
+	store := newSessionHelperStore()
+	appendCommittedTestTurn(t, ctx, store, sid, "idle-1")
+	appendCommittedTestTurn(t, ctx, store, sid, "idle-2")
+	key := sessionRunnerCheckpointID(sid)
+	require.NoError(t, store.Set(ctx, key, []byte("session checkpoint")))
+	require.NoError(t, store.Set(ctx, "custom-key", []byte("explicit checkpoint")))
+	storageErr := errors.New("storage unavailable")
+	rollback := func() error {
+		return RollbackSession[Message](ctx, store, sid, "idle-1", WithRollbackSessionFromEventID[Message]("idle-2"),
+			WithRollbackSessionCheckPointStore[Message](store))
+	}
+
+	store.appendErr = storageErr
+	var cleanupErr *RollbackCheckpointCleanupError
+	err := rollback()
+	require.ErrorIs(t, err, storageErr)
+	require.False(t, errors.As(err, &cleanupErr))
+	require.Len(t, store.events, 2)
+	require.Contains(t, store.checkpoints, key)
+
+	store.appendErr = nil
+	store.deleteErr = storageErr
+	err = rollback()
+	require.ErrorAs(t, err, &cleanupErr)
+	require.ErrorIs(t, err, storageErr)
+	require.Len(t, store.events, 3)
+	require.Equal(t, store.events[2].EventID, cleanupErr.RollbackEventID)
+	require.Equal(t, SessionEventRollback, store.events[2].Kind)
+	require.Contains(t, store.checkpoints, key)
+	require.ErrorIs(t, rollback(), ErrSessionHeadChanged)
+
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[Message]{Kind: "x.observation", Extension: &SessionExtensionEvent{}})
+	retry := func() error {
+		return RetryRollbackCheckpointCleanup[Message](ctx, store, sid, cleanupErr.RollbackEventID, store)
+	}
+	handle, err := openRunnerSession[Message](ctx, store, sid)
+	require.NoError(t, err)
+	require.ErrorIs(t, retry(), ErrSessionBusy)
+	require.NoError(t, handle.close(ctx))
+	require.ErrorIs(t, retry(), storageErr)
+
+	store.deleteErr = nil
+	store.loadErr = storageErr
+	require.ErrorIs(t, retry(), storageErr)
+	store.loadErr = nil
+	store.getErr = storageErr
+	require.ErrorIs(t, retry(), storageErr)
+	require.Contains(t, store.checkpoints, key)
+	store.getErr = nil
+	require.NoError(t, retry())
+	require.NotContains(t, store.checkpoints, key)
+	store.deleteErr = storageErr // A second deletion of the same key would fail.
+	require.NoError(t, retry())
+	require.Contains(t, store.checkpoints, "custom-key")
+	require.Len(t, store.events, 4)
+}
+
+func TestRetryRollbackCheckpointCleanupRequiresCurrentMarker(t *testing.T) {
+	ctx := context.Background()
+	const sid = "rollback-cleanup-superseded"
+	store := newSessionHelperStore()
+	appendCommittedTestTurn(t, ctx, store, sid, "idle-1", "first question")
+	appendCommittedTestTurn(t, ctx, store, sid, "idle-2", "second question")
+	key := sessionRunnerCheckpointID(sid)
+	require.NoError(t, store.Set(ctx, key, []byte("old checkpoint")))
+	store.deleteErr = errors.New("delete failed")
+	rollback := func() string {
+		t.Helper()
+		err := RollbackSession[Message](ctx, store, sid, "idle-1", WithRollbackSessionCheckPointStore[Message](store))
+		var cleanupErr *RollbackCheckpointCleanupError
+		require.ErrorAs(t, err, &cleanupErr)
+		return cleanupErr.RollbackEventID
+	}
+	first := rollback()
+	second := rollback() // Same destination, distinct rollback.
+	require.NotEqual(t, first, second)
+	store.deleteErr = nil
+	require.ErrorIs(t, RetryRollbackCheckpointCleanup[Message](ctx, store, sid, first, store), ErrSessionHeadChanged)
+	require.Contains(t, store.checkpoints, key)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: &runnerInterruptAgent{}, SessionID: sid, SessionStore: store, CheckPointStore: store})
+	drainSessionEvents(t, runner.Query(ctx, "interrupt here"))
+	newCheckpoint := store.checkpoints[key]
+	require.NotEmpty(t, newCheckpoint)
+	require.NotEqual(t, []byte("old checkpoint"), newCheckpoint)
+	eventCount := len(store.events)
+	require.ErrorIs(t, RetryRollbackCheckpointCleanup[Message](ctx, store, sid, second, store), ErrSessionHeadChanged)
+	require.Equal(t, newCheckpoint, store.checkpoints[key])
+	require.Len(t, store.events, eventCount)
+}
+
+func TestRollbackSessionRestoresEarlierCommitFromAnotherBranch(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	sid := "rollback-multiple"
+	const sid = "rollback-restore-branch"
 
-	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
-	appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
-	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
-	appendCommittedTestTurn(t, ctx, store, sid, "turn-3", "Q3", "A3")
-	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
+	appendCommittedTestTurn(t, ctx, store, sid, "commit-a", "A")
+	appendCommittedTestTurn(t, ctx, store, sid, "commit-b", "B")
+	require.NoError(t, RollbackSession[Message](ctx, store, sid, "commit-a"))
+	appendCommittedTestTurn(t, ctx, store, sid, "commit-c", "C")
 
-	result, err := reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.NotNil(t, result.state)
-	require.Len(t, result.state.Messages, 2)
-	assert.Equal(t, "Q1", result.state.Messages[0].Content)
-	assert.Equal(t, "A1", result.state.Messages[1].Content)
+	for _, step := range []struct {
+		target, head string
+		wantMessages []string
+	}{
+		{target: "commit-b", head: "commit-c", wantMessages: []string{"A", "B"}},
+		{target: "commit-c", head: "commit-b", wantMessages: []string{"A", "C"}},
+		{target: "commit-a", head: "commit-c", wantMessages: []string{"A"}},
+		{target: "commit-a", head: "commit-a", wantMessages: []string{"A"}},
+	} {
+		require.NoError(t, RollbackSession[Message](ctx, store, sid, step.target,
+			WithRollbackSessionFromEventID[Message](step.head),
+		))
+		marker := store.events[len(store.events)-1]
+		event, err := decodeSessionEvent[Message](marker.Data)
+		require.NoError(t, err)
+		require.NotNil(t, event.Rollback)
+		assert.Equal(t, step.target, event.Rollback.ToEventID)
+		assert.Equal(t, step.head, event.Rollback.FromEventID)
 
-	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
-		return se.Kind == SessionEventRollback
-	})
-	require.Len(t, rollbackEvents, 2)
+		result, err := reconstructTestSession(t, ctx, store, sid, 2)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		var messages []string
+		for _, message := range result.state.Messages {
+			messages = append(messages, message.Content)
+		}
+		assert.Equal(t, step.wantMessages, messages)
+	}
 }
 
 func TestRunnerQueryAfterRollbackUsesActiveProjection(t *testing.T) {
@@ -2998,15 +3318,18 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 	err := RollbackSession[*schema.Message](ctx, store, sid, "pending-event")
 	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
 
-	err = RollbackSession[*schema.Message](ctx, store, sid, "missing")
+	recorder := &sessionLoadRecorder{SessionEventStore: store}
+	err = RollbackSession[Message](ctx, recorder, sid, "missing")
 	require.ErrorIs(t, err, ErrRollbackTargetNotFound)
+	require.Len(t, recorder.loadRequests, 1)
+	assert.True(t, recorder.loadRequests[0].Reverse)
 
 	err = RollbackSession[*schema.Message](
 		ctx,
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionExpectedHeadEventID[*schema.Message]("stale-head"),
+		WithRollbackSessionFromEventID[*schema.Message]("stale-head"),
 	)
 	require.ErrorIs(t, err, ErrSessionHeadChanged)
 	rollbackEvents := filterStoredSessionEvents(t, store.events, func(se *SessionEvent[*schema.Message]) bool {
@@ -3019,16 +3342,213 @@ func TestRollbackSessionTargetResolutionErrors(t *testing.T) {
 		store,
 		sid,
 		"turn-1",
-		WithRollbackSessionExpectedHeadEventID[*schema.Message]("turn-2"),
+		WithRollbackSessionFromEventID[*schema.Message]("turn-2"),
 	))
+	recorder.loadRequests = nil
 	err = RollbackSession[*schema.Message](
 		ctx,
-		store,
+		recorder,
 		sid,
 		"turn-2",
-		WithRollbackSessionExpectedHeadEventID[*schema.Message]("turn-2"),
+		WithRollbackSessionFromEventID[*schema.Message]("turn-2"),
 	)
-	require.ErrorIs(t, err, ErrRollbackTargetInactive)
+	require.ErrorIs(t, err, ErrSessionHeadChanged)
+	require.Len(t, recorder.loadRequests, 1)
+	assert.True(t, recorder.loadRequests[0].Reverse)
+}
+
+func TestSessionScanPageLimit(t *testing.T) {
+	ctx := context.Background()
+	// A valid store may return short pages. The oldest page contains the target.
+	const lastPage = 301
+	for _, tc := range []struct {
+		name     string
+		rollback bool
+		limit    int
+	}{
+		{name: "Run default"},
+		{name: "Run extended", limit: lastPage},
+		{name: "RollbackSession default", rollback: true},
+		{name: "RollbackSession extended", rollback: true, limit: lastPage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &serviceContractStore{}
+			store.loadPage = func(req *LoadSessionEventsRequest) *LoadSessionEventsResult[Message] {
+				page := len(store.loadReqs)
+				if page == lastPage {
+					return &LoadSessionEventsResult[Message]{Events: []*SessionEvent[Message]{{
+						EventID: "target", Kind: SessionEventSessionStatusIdle,
+						Lifecycle: &LifecycleEvent{State: SessionRunStateIdle, StopReason: &StopReason{Type: StopReasonEndTurn}},
+					}}}
+				}
+				id := fmt.Sprintf("msg-%d", page)
+				require.Less(t, page, lastPage)
+				require.True(t, req.Reverse)
+				return &LoadSessionEventsResult[Message]{Next: id, Events: []*SessionEvent[Message]{{
+					EventID: id, Kind: SessionEventMessage, Message: testMessageWithID(id, schema.User),
+				}}}
+			}
+
+			var err error
+			agent := &runnerSessionAgent{name: "scan"}
+			if tc.rollback {
+				err = RollbackSession[Message](ctx, store, tc.name, "target", WithRollbackSessionMaxLoadPages[Message](tc.limit))
+			} else {
+				runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: tc.name, SessionStore: store,
+					SessionConfig: &SessionConfig[Message]{MaxReplayLoadPages: tc.limit},
+				})
+				errs := drainResumeErrors(t, runner.Query(ctx, "new input"))
+				if len(errs) > 0 {
+					require.Len(t, errs, 1)
+					err = errs[0]
+				}
+			}
+
+			if tc.limit == 0 {
+				require.ErrorIs(t, err, ErrSessionScanLimitExceeded)
+				require.Len(t, store.loadReqs, 300)
+				require.Empty(t, store.appendEvents)
+				require.Empty(t, agent.inputs)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, store.loadReqs, lastPage)
+			require.NotEmpty(t, store.appendEvents)
+			if !tc.rollback {
+				require.Len(t, agent.inputs, 1)
+				require.Len(t, agent.inputs[0], lastPage)
+				require.Equal(t, "msg-300", agent.inputs[0][0].Content)
+			}
+		})
+	}
+}
+
+func TestSessionScanCursorAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		cursors   []string
+		cancel    bool
+		emptyPage bool
+		wantError string
+	}{
+		{name: "same cursor", cursors: []string{"a", "a"}, wantError: "repeated session event cursor"},
+		{name: "cursor cycle", cursors: []string{"a", "b", "a"}, wantError: "repeated session event cursor"},
+		{name: "empty page with next cursor", cursors: []string{"a"}, emptyPage: true, wantError: "empty session event page"},
+		{name: "cancel before first page", cancel: true},
+		{name: "cancel between pages", cursors: []string{"a"}, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := &serviceContractStore{}
+			store.loadPage = func(req *LoadSessionEventsRequest) *LoadSessionEventsResult[Message] {
+				page := len(store.loadReqs)
+				require.LessOrEqual(t, page, len(tc.cursors))
+				if page > 1 {
+					require.Equal(t, tc.cursors[page-2], req.After)
+				}
+				next := tc.cursors[page-1]
+				result := &LoadSessionEventsResult[Message]{Next: next}
+				if !tc.emptyPage {
+					result.Events = []*SessionEvent[Message]{{EventID: next, Kind: SessionEventMessage}}
+				}
+				if tc.cancel {
+					cancel()
+				}
+				return result
+			}
+			if tc.cancel && len(tc.cursors) == 0 {
+				cancel()
+			}
+			_, err := reconstructTestSession(t, ctx, store, "scan", 1)
+			if tc.cancel {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorContains(t, err, tc.wantError)
+			}
+			require.Len(t, store.loadReqs, len(tc.cursors))
+		})
+	}
+}
+
+func TestRollbackSessionScanLimit(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionHelperStore()
+	const sid = "rollback-scan-limit"
+	target := appendCommittedTestTurn(t, ctx, store, sid, "target", "first")
+	for i := 0; i < defaultLoadPageSize; i++ {
+		appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[Message]{
+			Kind: SessionEventMessage, Message: schema.UserMessage("later"),
+		})
+	}
+	checkpointID := sessionRunnerCheckpointID(sid)
+	require.NoError(t, store.Set(ctx, checkpointID, []byte("checkpoint")))
+	before := len(store.events)
+	recorder := &sessionLoadRecorder{SessionEventStore: store}
+
+	err := RollbackSession[Message](ctx, recorder, sid, target.EventID,
+		WithRollbackSessionMaxLoadPages[Message](1),
+		WithRollbackSessionCheckPointStore[Message](store),
+	)
+	require.ErrorIs(t, err, ErrRollbackScanLimitExceeded)
+	require.Len(t, recorder.loadRequests, 1)
+	assert.Len(t, store.events, before)
+	_, exists, err := store.Get(ctx, checkpointID)
+	require.NoError(t, err)
+	assert.True(t, exists, "a failed rollback must preserve the checkpoint")
+
+	recorder.loadRequests = nil
+	require.NoError(t, RollbackSession[Message](ctx, recorder, sid, target.EventID,
+		WithRollbackSessionMaxLoadPages[Message](2),
+		WithRollbackSessionCheckPointStore[Message](store),
+	))
+	require.Len(t, recorder.loadRequests, 2)
+	assert.Len(t, store.events, before+1)
+	assert.True(t, recorder.loadRequests[0].Reverse)
+	assert.True(t, recorder.loadRequests[1].Reverse)
+	_, exists, err = store.Get(ctx, checkpointID)
+	require.NoError(t, err)
+	assert.False(t, exists, "a successful rollback cleans up the checkpoint")
+}
+
+func TestRollbackSessionStopsOnceBothEndpointsAreFound(t *testing.T) {
+	ctx := context.Background()
+	const sid = "rollback-endpoints"
+	store := newSessionHelperStore()
+	padding := func() {
+		for i := 0; i < defaultLoadPageSize; i++ {
+			appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[Message]{
+				Kind: SessionEventMessage, Message: schema.UserMessage("padding"),
+			})
+		}
+	}
+	padding()
+	appendCommittedTestTurn(t, ctx, store, sid, "A")
+	padding()
+	appendCommittedTestTurn(t, ctx, store, sid, "B")
+	recorder := &sessionLoadRecorder{SessionEventStore: store}
+	require.NoError(t, RollbackSession[Message](ctx, recorder, sid, "B", WithRollbackSessionMaxLoadPages[Message](1)))
+	require.Len(t, recorder.loadRequests, 1)
+
+	require.NoError(t, RollbackSession[Message](ctx, store, sid, "A"))
+	// B is on page one. The last rollback makes A (page two) the source.
+	recorder.loadRequests = nil
+	before := len(store.events)
+	err := RollbackSession[Message](ctx, recorder, sid, "B", WithRollbackSessionMaxLoadPages[Message](1))
+	require.ErrorIs(t, err, ErrRollbackScanLimitExceeded)
+	require.Len(t, store.events, before)
+	require.Len(t, recorder.loadRequests, 1)
+
+	recorder.loadRequests = nil
+	require.NoError(t, RollbackSession[Message](ctx, recorder, sid, "B",
+		WithRollbackSessionMaxLoadPages[Message](2),
+		WithRollbackEventIDGenerator(func(_ context.Context, event *SessionEvent[Message]) (string, error) {
+			assert.Equal(t, "A", event.Rollback.FromEventID)
+			assert.Equal(t, "B", event.Rollback.ToEventID)
+			return "back-to-B", nil
+		}),
+	))
+	require.Len(t, recorder.loadRequests, 2)
 }
 
 func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
@@ -3053,39 +3573,27 @@ func TestReconstructRollbackMalformedRecordsFailClosed(t *testing.T) {
 
 	store = newSessionHelperStore()
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
-	payloadEvent := &SessionEvent[*schema.Message]{
-		EventID: uuid.NewString(),
-		Kind:    SessionEventRollback,
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[Message]{
+		Kind: SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
-			ToEventID: "missing-turn-end-event",
+			ToEventID: "missing-commit",
 		},
-	}
-	data, encodeErr := encodeSessionEvent(payloadEvent)
-	require.NoError(t, encodeErr)
-	store.mu.Lock()
-	store.events = append(store.events, storedSessionEvent{
-		EventID: payloadEvent.EventID,
-		Kind:    payloadEvent.Kind,
-		Data:    append([]byte{}, data...),
 	})
-	store.eventIDs = append(store.eventIDs, payloadEvent.EventID)
-	store.eventIDIdx[payloadEvent.EventID] = len(store.events) - 1
-	store.mu.Unlock()
 	_, err = reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
-	require.ErrorIs(t, err, ErrRollbackTargetInactive)
+	require.ErrorIs(t, err, ErrRollbackTargetNotFound)
 
 	store = newSessionHelperStore()
 	appendCommittedTestTurn(t, ctx, store, sid, "turn-1", "Q1", "A1")
-	staleTarget := appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
-	require.NoError(t, RollbackSession[*schema.Message](ctx, store, sid, "turn-1"))
-	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[*schema.Message]{
+	appendTestSessionEvent(t, ctx, store, sid, &SessionEvent[Message]{
 		Kind: SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
-			ToEventID: staleTarget.EventID,
+			ToEventID: "turn-2",
 		},
 	})
+	appendCommittedTestTurn(t, ctx, store, sid, "turn-2", "Q2", "A2")
 	_, err = reconstructTestSession(t, ctx, store, sid, defaultLoadPageSize)
-	require.ErrorIs(t, err, ErrRollbackTargetInactive)
+	require.ErrorIs(t, err, ErrInvalidRollbackTarget)
+	require.ErrorContains(t, err, "must precede rollback")
 }
 
 // TestRunnerSessionReconstructsFromEventLog: Delete testTurnState from store,
@@ -3174,11 +3682,11 @@ func TestRunnerSessionInputEventsPersisted(t *testing.T) {
 }
 
 // recordingHelperStore wraps sessionHelperStore to record the order of
-// AppendEvents and Set calls so tests can assert durability ordering.
+// event appends and checkpoint accesses so tests can assert durability ordering.
 type recordingHelperStore struct {
 	*sessionHelperStore
 	mu       sync.Mutex
-	calls    []string // "append" or "set:<key>"
+	calls    []string
 	delaySet time.Duration
 }
 
@@ -3210,6 +3718,13 @@ func (s *recordingHelperStore) Set(ctx context.Context, key string, value []byte
 	s.calls = append(s.calls, "set:"+key)
 	s.mu.Unlock()
 	return s.sessionHelperStore.Set(ctx, key, value)
+}
+
+func (s *recordingHelperStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	s.calls = append(s.calls, "get:"+key)
+	s.mu.Unlock()
+	return s.sessionHelperStore.Get(ctx, key)
 }
 
 func (s *recordingHelperStore) callsSnapshot() []string {
@@ -3322,6 +3837,9 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 	tail := store.events[len(store.events)-1]
 	store.sessionHelperStore.mu.Unlock()
 	assert.Equal(t, SessionEventSessionStatusIdle, tail.Kind)
+	require.NotEmpty(t, cp.IdleEventID)
+	assert.Equal(t, tail.EventID, cp.IdleEventID)
+	assert.Equal(t, sid, cp.SessionID)
 
 	_, runCtx, _, err := runnerLoadCheckPointBytes(ctx, cp.Payload)
 	require.NoError(t, err)
@@ -3331,6 +3849,61 @@ func TestRunnerSessionInterruptCheckpointTailIsFinalIdle(t *testing.T) {
 		require.NotNil(t, event.AgentEvent)
 		assert.Nil(t, event.SessionEventVariant)
 	}
+}
+
+func TestSessionCheckpointVersionAfterCancelAndReinterrupt(t *testing.T) {
+	ctx := context.Background()
+	const sid = "cancel-and-reinterrupt"
+	store := newSessionHelperStore()
+	agent := &myAgent{
+		runFn: func(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Send(&AgentEvent{Err: &CancelError{
+				Info:            &AgentCancelInfo{Mode: CancelImmediate},
+				interruptSignal: Interrupt(ctx, "cancel").Action.internalInterrupted,
+			}})
+			gen.Close()
+			return iter
+		},
+		resumeFn: func(ctx context.Context, _ *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Send(Interrupt(ctx, "confirm again"))
+			gen.Close()
+			return iter
+		},
+	}
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store, CheckPointStore: store})
+	key := sessionRunnerCheckpointID(sid)
+	readVersion := func(reason StopReasonType) string {
+		t.Helper()
+		cp, err := decodeRunnerSessionCheckpoint(store.checkpoints[key])
+		require.NoError(t, err)
+		tail, err := decodeSessionEvent[Message](store.events[len(store.events)-1].Data)
+		require.NoError(t, err)
+		require.Equal(t, SessionEventSessionStatusIdle, tail.Kind)
+		require.Equal(t, reason, tail.Lifecycle.StopReason.Type)
+		require.Equal(t, tail.EventID, cp.IdleEventID)
+		return cp.IdleEventID
+	}
+	errs := drainResumeErrors(t, runner.Query(ctx, "go"))
+	require.Len(t, errs, 1)
+	var cancelErr *CancelError
+	require.ErrorAs(t, errs[0], &cancelErr)
+	firstID := readVersion(StopReasonCancelled)
+	require.NoError(t, store.Set(ctx, "first-snapshot", store.checkpoints[key]))
+
+	iter, err := runner.Resume(ctx, "")
+	require.NoError(t, err)
+	drainSessionEvents(t, iter)
+	secondID := readVersion(StopReasonInterrupted)
+	require.NotEqual(t, firstID, secondID)
+
+	_, err = runner.Resume(ctx, "first-snapshot")
+	require.ErrorIs(t, err, ErrCheckpointStale)
+	iter, err = runner.Resume(ctx, key)
+	require.NoError(t, err)
+	drainSessionEvents(t, iter)
+	require.NotEqual(t, secondID, readVersion(StopReasonInterrupted))
 }
 
 func TestRunnerSessionCheckpointPayloadStripsSessionEvents(t *testing.T) {
@@ -3743,32 +4316,50 @@ func TestAttack_ResumeAfterInterruptedRunWritesSessionEvents(t *testing.T) {
 	assert.NotEqual(t, resumeEvents[1].EventID, resumeEvents[1].TurnID)
 }
 
-func TestAttack_ResumeCheckpointDecodeFailureDoesNotMarkRunning(t *testing.T) {
+func TestResumeInvalidCheckpointLeavesSessionUnchanged(t *testing.T) {
 	ctx := context.Background()
-	store := newSessionHelperStore()
-	sessionID := "resume-corrupt-checkpoint"
-	checkpointID := sessionRunnerCheckpointID(sessionID)
-	checkpoint, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		TurnID:  "interrupted-turn",
-		Payload: []byte("corrupt"),
-	})
+	missingSession, err := encodeGob(&serialization{})
 	require.NoError(t, err)
-	require.NoError(t, store.Set(ctx, checkpointID, checkpoint))
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		wantErr string
+	}{
+		{"corrupt payload", []byte("corrupt"), "failed to decode checkpoint"},
+		{"missing run session", missingSession, "missing run session"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newSessionHelperStore()
+			const sid = "resume-invalid-checkpoint"
+			key := sessionRunnerCheckpointID(sid)
+			agent := &runnerInterruptAgent{}
+			runner := NewRunner(ctx, RunnerConfig{Agent: agent, SessionID: sid, SessionStore: store, CheckPointStore: store})
+			drainSessionEvents(t, runner.Query(ctx, "interrupt"))
+			cp, exists, err := loadRunnerSessionCheckpoint(ctx, store, key)
+			require.NoError(t, err)
+			require.True(t, exists)
+			before := len(store.events)
+			require.Equal(t, store.events[before-1].EventID, cp.IdleEventID)
+			cp.Payload = tc.payload
+			data, err := encodeRunnerSessionCheckpoint(cp)
+			require.NoError(t, err)
+			require.NoError(t, store.Set(ctx, key, data))
 
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:           &runnerInterruptAgent{},
-		SessionID:       sessionID,
-		SessionStore:    store,
-		CheckPointStore: store,
-	})
-	_, err = runner.Resume(ctx, "")
-	require.ErrorContains(t, err, "failed to decode checkpoint")
+			iter, err := runner.Resume(ctx, "")
+			require.ErrorContains(t, err, tc.wantErr)
+			require.Nil(t, iter)
+			iter, err = runner.ResumeWithParams(ctx, key, &ResumeParams{})
+			require.ErrorContains(t, err, tc.wantErr)
+			require.Nil(t, iter)
 
-	events := decodeStoredSessionEvents(t, store.events)
-	require.Len(t, events, 1)
-	assert.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), events[0].Kind)
-	assert.Equal(t, "interrupted-turn", events[0].TurnID)
-	t.Log("checkpoint decode failure persisted resume intent without a running transition")
+			assert.Equal(t, before, len(store.events))
+			assert.Equal(t, int32(1), atomic.LoadInt32(&agent.callCount))
+			got, exists, err := store.Get(ctx, key)
+			require.NoError(t, err)
+			require.True(t, exists)
+			assert.Equal(t, data, got)
+		})
+	}
 }
 
 func TestAttack_AgenticResumeMarksSessionRunning(t *testing.T) {
@@ -4383,7 +4974,7 @@ func TestStreamPersistence_IncompleteStreamExcludedFromReconstruction(t *testing
 		},
 	})
 
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -4499,8 +5090,7 @@ func TestStreamPersistence_PendingAnnotationFlushesBeforeMaterializedBoundary(t 
 	drainSessionEvents(t, runner.Query(ctx, "q"))
 
 	assert.Equal(t, [][]SessionEventKind{
-		{SessionEventSessionStatusRunning},
-		{SessionEventMessage},
+		{SessionEventSessionStatusRunning, SessionEventMessage},
 		{annotationKind},
 		{SessionEventMessage},
 		{SessionEventSessionStatusIdle},
@@ -4769,7 +5359,7 @@ func TestStreamPersistence_AgenticIncompleteStreamPrefixPersisted(t *testing.T) 
 	assert.Contains(t, incomplete[0].MessageStreamIncomplete.Error, streamErr.Error())
 	assert.Empty(t, normalToolMessages)
 
-	reconstructed, err := reconstructSessionState[*schema.AgenticMessage](ctx, mustOpenTestSession[*schema.AgenticMessage](t, ctx, store, sid), defaultLoadPageSize)
+	reconstructed, err := reconstructSessionState[*schema.AgenticMessage](ctx, mustOpenTestSession[*schema.AgenticMessage](t, ctx, store, sid), defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NotNil(t, reconstructed)
 	require.NotNil(t, reconstructed.state)
@@ -5341,8 +5931,7 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 	committedIdleSE := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleSE}))
 
-	// Seed an arbitrary checkpoint ID with a runner-session-checkpoint wrapper
-	// so runnerLoadCheckPointForSession can decode it.
+	// Store a legacy session checkpoint under the caller-selected key.
 	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
 		Payload: []byte("opaque"),
 	})
@@ -5352,77 +5941,42 @@ func TestExplicitCheckpointResume_WithSessionMode(t *testing.T) {
 
 	state := &runnerSessionRunState[Message]{}
 	defer state.close(ctx)
-	effective, err := state.prepareResume(ctx, store, sid, store, nil, explicitCheckpointID)
+	cp, err := state.prepareResume(ctx, store, sid, store, nil, explicitCheckpointID)
 	require.NoError(t, err)
 	require.True(t, state.enabled, "session mode must remain enabled when an explicit checkpoint ID is supplied")
-	require.NotNil(t, state.latestState)
-	assert.Nil(t, state.latestState.Messages)
-	assert.Equal(t, explicitCheckpointID, effective,
+	assert.Nil(t, state.latestState)
+	require.Equal(t, []byte("opaque"), cp.Payload)
+	assert.Equal(t, explicitCheckpointID, *state.checkPointID,
 		"caller-supplied checkpoint ID must be preserved")
 }
 
-func TestPrepareRunnerSessionResume_LegacyCheckpointUsesResumeEventTurnID(t *testing.T) {
+func TestRunnerSessionResume_LegacyCheckpointUsesResumeEventTurnID(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	sid := "legacy-turn-id-resume"
-	cpID := "legacy-turn-id-cp"
-	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		Payload: []byte("opaque"),
-	})
+	const sid = "legacy-turn-id-resume"
+	runner := NewRunner(ctx, RunnerConfig{Agent: &runnerInterruptAgent{}, SessionID: sid, SessionStore: store, CheckPointStore: store})
+	drainSessionEvents(t, runner.Query(ctx, "interrupt"))
+	cp, exists, err := loadRunnerSessionCheckpoint(ctx, store, sessionRunnerCheckpointID(sid))
 	require.NoError(t, err)
-	require.NoError(t, store.Set(ctx, cpID, cpBytes))
-
-	state := &runnerSessionRunState[Message]{}
-	defer state.close(ctx)
-	effective, err := state.prepareResume(ctx, store, sid, store, nil, cpID)
+	require.True(t, exists)
+	legacy, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{Payload: cp.Payload})
 	require.NoError(t, err)
-	require.True(t, state.enabled)
-	require.Equal(t, cpID, effective)
-	require.Len(t, state.initialTimeline, 1)
-	resumeEvent := state.initialTimeline[0]
-	require.Equal(t, SessionEventKind(SessionEventExtensionPrefix+"resume.request_started"), resumeEvent.Kind)
-	require.NotEmpty(t, resumeEvent.EventID)
-	assert.Equal(t, resumeEvent.EventID, state.turnID)
-	assert.Equal(t, resumeEvent.EventID, resumeEvent.TurnID)
-}
+	const cpID = "legacy-turn-id-cp"
+	require.NoError(t, store.Set(ctx, cpID, legacy))
+	store.loadErr = errors.New("legacy checkpoints must skip log validation")
 
-// TestResumePath_TailReplay verifies that resume does not retain the reconstructed
-// message history, including messages from the log tail.
-func TestResumePath_TailReplay(t *testing.T) {
-	ctx := context.Background()
-	store := newSessionHelperStore()
-	sid := "resume-tail"
-
-	q1 := schema.UserMessage("Q")
-	EnsureMessageID(q1)
-	r1 := schema.AssistantMessage("A", nil)
-	EnsureMessageID(r1)
-	for _, m := range []*schema.Message{q1, r1} {
-		se := withTestEventID(&SessionEvent[*schema.Message]{Message: m})
-		require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
+	before := len(store.events)
+	iter, err := runner.Resume(ctx, cpID)
+	require.NoError(t, err)
+	drainSessionEvents(t, iter)
+	events := decodeStoredSessionEvents(t, store.events[before:])
+	require.GreaterOrEqual(t, len(events), 2)
+	require.Equal(t, sessionEventResumeRequestStarted, events[0].Kind)
+	require.Equal(t, SessionEventSessionStatusRunning, events[1].Kind)
+	require.NotEmpty(t, events[0].EventID)
+	for _, event := range events {
+		assert.Equal(t, events[0].EventID, event.TurnID)
 	}
-	turnEndSE := withTestCommittedIdle[*schema.Message]("turn-1")
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{turnEndSE}))
-
-	// Append a tail event after the snapshot.
-	tailMsg := schema.UserMessage("post-snapshot")
-	EnsureMessageID(tailMsg)
-	se := withTestEventID(&SessionEvent[*schema.Message]{Message: tailMsg})
-	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{se}))
-
-	// Seed a runner session checkpoint so the resume path finds something to load.
-	cpStore := newSessionHelperStore()
-	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		Payload: []byte("opaque"),
-	})
-	require.NoError(t, err)
-	require.NoError(t, cpStore.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
-
-	state := &runnerSessionRunState[Message]{}
-	defer state.close(ctx)
-	_, err = state.prepareResume(ctx, cpStore, sid, store, nil, "")
-	require.NoError(t, err)
-	assert.Nil(t, state.latestState.Messages)
 }
 
 // Ensure the io package import is used (for compile when chunks are empty).
@@ -5580,7 +6134,7 @@ func TestRunnerPersists_MessageUpdated_BothMessages(t *testing.T) {
 	assert.Equal(t, 2, updates, "both MessageUpdated events must be persisted")
 
 	// Reconstruction must apply both updates correctly.
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -5675,7 +6229,7 @@ func TestRunnerPersists_MessageInserted_AnchorAndAppend(t *testing.T) {
 	assert.Equal(t, 2, inserts, "both MessageInserted events must be persisted")
 
 	// Verify reconstruction applies insertions correctly.
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, result.state)
@@ -5852,7 +6406,7 @@ func TestRunnerNoPersist_GeneratedLeadingSystemMessage(t *testing.T) {
 	assert.Equal(t, "system v1", model.inputs[0][0].Content)
 
 	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
-	result, err := reconstructSessionState[*schema.Message](ctx, handle, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NoError(t, handle.close(ctx))
 	for _, msg := range result.state.Messages {
@@ -5992,7 +6546,7 @@ func TestRunnerPreserves_CallerSuppliedLeadingSystemMessage(t *testing.T) {
 	assert.Equal(t, 1, systemEvents, "caller-supplied system message must be persisted")
 
 	handle := mustOpenTestSession[*schema.Message](t, ctx, store, sid)
-	result, err := reconstructSessionState[*schema.Message](ctx, handle, defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, handle, defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NoError(t, handle.close(ctx))
 	require.GreaterOrEqual(t, len(result.state.Messages), 2)
@@ -6144,7 +6698,7 @@ func TestRunnerPersists_MessagesDeleted_Reconstructs(t *testing.T) {
 	}
 	assert.True(t, foundDeleted, "MessagesDeleted must be persisted")
 
-	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
+	result, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize, 0)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Len(t, result.state.Messages, 2)
@@ -6170,7 +6724,7 @@ func TestReconstructSessionState_MessagesDeletedMissingTargetFails(t *testing.T)
 	committedIdleEvent := withTestCommittedIdle[*schema.Message]("turn-1")
 	require.NoError(t, store.AppendEventsForSession(ctx, sid, []*SessionEvent[*schema.Message]{committedIdleEvent}))
 
-	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize)
+	_, err := reconstructSessionState[*schema.Message](ctx, mustOpenTestSession[*schema.Message](t, ctx, store, sid), defaultLoadPageSize, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ghost-id")
 }
@@ -6498,7 +7052,7 @@ func TestAttack_NormalizeSessionEventKindMismatch(t *testing.T) {
 	t.Logf("correctly rejected kind mismatch: %v", err)
 }
 
-func TestAttack_NormalizeLoadedSessionEventKindUnknownKindTolerated(t *testing.T) {
+func TestReplayDurableContextIgnoresUnknownKindsWithoutPayload(t *testing.T) {
 	unknownKinds := []SessionEventKind{
 		"turn_end",
 		"session_started",
@@ -6509,7 +7063,7 @@ func TestAttack_NormalizeLoadedSessionEventKindUnknownKindTolerated(t *testing.T
 		ev := &SessionEvent[Message]{
 			Kind: k,
 		}
-		err := normalizeLoadedSessionEventKind(ev)
+		_, err := replayDurableContextEvents([]*SessionEvent[Message]{ev})
 		if err != nil {
 			t.Fatalf("unknown kind %q should be tolerated, got error: %v", k, err)
 		}
@@ -6519,23 +7073,23 @@ func TestAttack_NormalizeLoadedSessionEventKindUnknownKindTolerated(t *testing.T
 	}
 }
 
-func TestAttack_NormalizeLoadedSessionEventKindKnownKindMissingPayloadStillErrors(t *testing.T) {
+func TestReplayDurableContextRejectsMessageKindWithoutPayload(t *testing.T) {
 	ev := &SessionEvent[Message]{
 		Kind: SessionEventMessage,
 	}
-	err := normalizeLoadedSessionEventKind(ev)
+	_, err := replayDurableContextEvents([]*SessionEvent[Message]{ev})
 	if err == nil {
 		t.Fatal("expected error for known kind with missing payload, got nil")
 	}
 	t.Logf("correctly rejected known kind with missing payload: %v", err)
 }
 
-func TestAttack_NormalizeLoadedSessionEventKindUnknownKindWithPayloadStillErrors(t *testing.T) {
+func TestReplayDurableContextRejectsUnknownKindWithMessagePayload(t *testing.T) {
 	ev := &SessionEvent[Message]{
 		Kind:    "future.new_kind",
 		Message: schema.UserMessage("hello"),
 	}
-	err := normalizeLoadedSessionEventKind(ev)
+	_, err := replayDurableContextEvents([]*SessionEvent[Message]{ev})
 	if err == nil {
 		t.Fatal("expected error for unknown kind with recognized payload, got nil")
 	}
@@ -6717,6 +7271,39 @@ func TestAttack_ApplySessionEventMessageUpdatedIdentityMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "identity mismatch")
 	assert.Equal(t, []Message{msg}, messages)
 	t.Logf("correctly rejected MessageUpdated identity mismatch: %v", err)
+}
+
+func TestMessageUpdateInheritsTargetID(t *testing.T) {
+	t.Run("Message", func(t *testing.T) { testMessageUpdateInheritsTargetID(t, schema.UserMessage) })
+	t.Run("AgenticMessage", func(t *testing.T) { testMessageUpdateInheritsTargetID(t, schema.UserAgenticMessage) })
+}
+
+func testMessageUpdateInheritsTargetID[M MessageType](t *testing.T, newMessage func(string) M) {
+	t.Helper()
+	target := newMessage("original")
+	typedSetMessageID(target, "m1")
+	first, second := newMessage("first revision"), newMessage("second revision")
+	inserted := newMessage("before m1")
+	history := []*SessionEvent[M]{
+		{Kind: SessionEventMessage, Message: target},
+		{Kind: SessionEventMessageUpdated, MessageUpdated: &MessageUpdatedEvent[M]{MessageID: "m1", Message: first}},
+		{Kind: SessionEventMessageUpdated, MessageUpdated: &MessageUpdatedEvent[M]{MessageID: "m1", Message: second}},
+		{Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[M]{BeforeMessageID: "m1", Message: inserted}},
+	}
+	state, err := replayDurableContextEvents(history)
+	require.NoError(t, err)
+	expected := newMessage("second revision")
+	typedSetMessageID(expected, "m1")
+	require.Equal(t, []M{inserted, expected}, state.Messages)
+
+	deletion := &SessionEvent[M]{Kind: SessionEventMessagesDeleted, MessagesDeleted: &MessagesDeletedEvent{MessageIDs: []string{"m1"}}}
+	state, err = replayDurableContextEvents(append(history, deletion))
+	require.NoError(t, err)
+	require.Equal(t, []M{inserted}, state.Messages)
+	require.Empty(t, GetMessageID(first))
+	require.Empty(t, GetMessageID(second))
+	require.Same(t, first, history[1].MessageUpdated.Message)
+	require.Same(t, second, history[2].MessageUpdated.Message)
 }
 
 func TestAttack_MessageReplayMultipleInsertionsBeforeDeletedAnchor(t *testing.T) {
@@ -7215,60 +7802,60 @@ func TestSessionEventContextMergesGeneratorProviderAndTurnID(t *testing.T) {
 	assert.Equal(t, "event-1", event.EventID)
 }
 
-func TestAppendRunnerSessionInputEventsBatch(t *testing.T) {
+func TestAppendRunStart(t *testing.T) {
 	ctx := context.Background()
 	messages := []Message{schema.UserMessage("one"), schema.UserMessage("two"), schema.UserMessage("three")}
-	running := &SessionEvent[Message]{EventID: "turn", Kind: SessionEventSessionStatusRunning}
 	newState := func(store *serviceContractStore) *runnerSessionRunState[Message] {
 		return &runnerSessionRunState[Message]{
-			enabled: true, turnID: running.EventID,
-			sessionHandle:   &sessionHandle[Message]{store: store, sessionID: "session"},
-			sessionConfig:   SessionConfig[Message]{EventIDGenerator: testSequentialEventIDGenerator("input-")},
-			initialTimeline: []*SessionEvent[Message]{running},
+			sessionHandle: &sessionHandle[Message]{store: store, sessionID: "session"},
+			sessionConfig: SessionConfig[Message]{EventIDGenerator: testSequentialEventIDGenerator("event-")},
 		}
 	}
 
-	t.Run("one ordered batch", func(t *testing.T) {
-		store := &serviceContractStore{}
-		state := newState(store)
-		require.NoError(t, appendRunnerSessionInputEvents(ctx, state, nil))
-		require.Empty(t, store.appendEvents)
-		require.NoError(t, appendRunnerSessionInputEvents(ctx, state, messages))
-		require.Len(t, store.appendEvents, 1)
-		batch := store.appendEvents[0]
-		require.Len(t, batch, len(messages))
-		require.Len(t, state.initialTimeline, len(messages)+1)
-		require.Same(t, running, state.initialTimeline[0])
-		for i, event := range batch {
-			require.Equal(t, messages[i], event.Message)
-			require.Equal(t, fmt.Sprintf("input-%d", i+1), event.EventID)
-			require.Equal(t, running.EventID, event.TurnID)
-			require.Same(t, event, state.initialTimeline[i+1])
-		}
-	})
+	for _, inputs := range [][]Message{nil, messages} {
+		t.Run(fmt.Sprintf("ordered batch with %d inputs", len(inputs)), func(t *testing.T) {
+			store := &serviceContractStore{}
+			state := newState(store)
+			require.NoError(t, state.appendRunStart(ctx, inputs))
+			require.Len(t, store.appendEvents, 1)
+			batch := store.appendEvents[0]
+			require.Len(t, batch, 1+len(inputs))
+			require.Equal(t, SessionEventSessionStatusRunning, batch[0].Kind)
+			require.Equal(t, batch[0].EventID, state.turnID)
+			require.Equal(t, batch, state.initialTimeline)
+			for i, event := range batch {
+				require.Equal(t, fmt.Sprintf("event-%d", i+1), event.EventID)
+				require.Equal(t, state.turnID, event.TurnID)
+			}
+			for i, input := range inputs {
+				require.Equal(t, SessionEventMessage, batch[i+1].Kind)
+				require.Same(t, input, batch[i+1].Message)
+			}
+		})
+	}
 
 	t.Run("second message fails preparation", func(t *testing.T) {
 		store := &serviceContractStore{}
 		state := newState(store)
 		wantErr := errors.New("cannot generate event ID")
-		state.sessionConfig.EventIDGenerator = func(_ context.Context, e *SessionEvent[Message]) (string, error) {
+		state.sessionConfig.EventIDGenerator = func(ctx context.Context, e *SessionEvent[Message]) (string, error) {
 			if e.Message == messages[1] {
 				return "", wantErr
 			}
-			return e.Message.Content, nil
+			return DefaultSessionEventIDGenerator(ctx, e)
 		}
-		require.ErrorIs(t, appendRunnerSessionInputEvents(ctx, state, messages), wantErr)
+		require.ErrorIs(t, state.appendRunStart(ctx, messages), wantErr)
 		require.Empty(t, store.appendEvents)
-		require.Equal(t, []*SessionEvent[Message]{running}, state.initialTimeline)
+		require.Empty(t, state.initialTimeline)
 	})
 
 	t.Run("store rejects batch", func(t *testing.T) {
 		store := &serviceContractStore{appendErr: errors.New("append failed")}
 		state := newState(store)
-		require.ErrorIs(t, appendRunnerSessionInputEvents(ctx, state, messages), store.appendErr)
+		require.ErrorIs(t, state.appendRunStart(ctx, messages), store.appendErr)
 		require.Len(t, store.appendEvents, 1)
-		require.Len(t, store.appendEvents[0], len(messages))
-		require.Equal(t, []*SessionEvent[Message]{running}, state.initialTimeline)
+		require.Len(t, store.appendEvents[0], len(messages)+1)
+		require.Empty(t, state.initialTimeline)
 	})
 }
 
@@ -7338,20 +7925,18 @@ func TestRunnerSessionEventExtraProviderRunnerBranches(t *testing.T) {
 		}
 	}
 	errorCases := []struct {
-		name              string
-		err               error
-		errOnInput        bool
-		wantRunningStored bool
+		name       string
+		err        error
+		errOnInput bool
 	}{
 		{
 			name: "provider error fails before running append",
 			err:  errors.New("provider failed"),
 		},
 		{
-			name:              "provider error fails before input append",
-			err:               errors.New("input provider failed"),
-			errOnInput:        true,
-			wantRunningStored: true,
+			name:       "provider error fails before input append",
+			err:        errors.New("input provider failed"),
+			errOnInput: true,
 		},
 	}
 	for _, tc := range errorCases {
@@ -7377,13 +7962,7 @@ func TestRunnerSessionEventExtraProviderRunnerBranches(t *testing.T) {
 			events := drain(runner.Query(ctx, "hello"))
 			require.Len(t, events, 1)
 			require.ErrorIs(t, events[0].Err, tc.err)
-			if tc.wantRunningStored {
-				events := decodeStoredSessionEvents(t, store.events)
-				require.Len(t, events, 1)
-				assert.Equal(t, SessionEventSessionStatusRunning, events[0].Kind)
-			} else {
-				assert.Empty(t, store.events, "provider error on running event must fail before persistence")
-			}
+			assert.Empty(t, store.events, "preparation must finish before writing the opening batch")
 		})
 	}
 
@@ -7490,42 +8069,27 @@ func TestRunnerSessionEventExtraProviderRunnerBranches(t *testing.T) {
 func TestRunnerSessionEventExtraProviderDecoratesResumeRequest(t *testing.T) {
 	ctx := context.Background()
 	store := newSessionHelperStore()
-	sid := "provider-resume-session"
-	cpBytes, err := encodeRunnerSessionCheckpoint(&runnerSessionCheckpoint{
-		SessionID:    sid,
-		CheckPointID: sessionRunnerCheckpointID(sid),
-		Payload:      []byte("checkpoint-payload"),
-	})
-	require.NoError(t, err)
-	require.NoError(t, store.Set(ctx, sessionRunnerCheckpointID(sid), cpBytes))
-
-	state := &runnerSessionRunState[Message]{}
-	defer state.close(ctx)
-	_, err = state.prepareResume(ctx, store, sid, store, &SessionConfig[*schema.Message]{
-		EventExtraProvider: func(_ context.Context, event *SessionEvent[*schema.Message]) (map[string]any, error) {
+	cfg := RunnerConfig{Agent: &runnerInterruptAgent{}, SessionID: "provider-resume-session", SessionStore: store, CheckPointStore: store}
+	drainSessionEvents(t, NewRunner(ctx, cfg).Query(ctx, "interrupt"))
+	cfg.SessionConfig = &SessionConfig[Message]{
+		EventExtraProvider: func(_ context.Context, event *SessionEvent[Message]) (map[string]any, error) {
 			return map[string]any{"provider_kind": string(event.Kind)}, nil
 		},
-		EventIDGenerator: func(_ context.Context, event *SessionEvent[*schema.Message]) (string, error) {
+		EventIDGenerator: func(ctx context.Context, event *SessionEvent[Message]) (string, error) {
 			if event.Extra["provider_kind"] != string(event.Kind) {
 				return "", errors.New("generator did not see provider extra")
 			}
-			return DefaultSessionEventIDGenerator[*schema.Message](context.Background(), event)
+			return DefaultSessionEventIDGenerator(ctx, event)
 		},
-	}, "")
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.NotNil(t, state.sessionHandle)
-
-	events := decodeStoredSessionEvents(t, store.events)
-	resumeKind := SessionEventKind(SessionEventExtensionPrefix + "resume.request_started")
-	var sawResume bool
-	for _, event := range events {
-		if event.Kind == resumeKind {
-			sawResume = true
-			assert.Equal(t, string(resumeKind), event.Extra["provider_kind"])
-		}
 	}
-	assert.True(t, sawResume, "provider must decorate pre-injection resume request event")
+	before := len(store.events)
+	iter, err := NewRunner(ctx, cfg).Resume(ctx, "")
+	require.NoError(t, err)
+	drainSessionEvents(t, iter)
+	events := decodeStoredSessionEvents(t, store.events[before:])
+	require.NotEmpty(t, events)
+	require.Equal(t, sessionEventResumeRequestStarted, events[0].Kind)
+	assert.Equal(t, string(sessionEventResumeRequestStarted), events[0].Extra["provider_kind"])
 }
 
 func TestRunnerSessionEventExtraProviderDecoratesStreamingFinalMessage(t *testing.T) {

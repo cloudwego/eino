@@ -84,16 +84,7 @@ func (h *sessionHandle[M]) loadEvents(ctx context.Context, req *LoadSessionEvent
 	if req == nil {
 		req = &LoadSessionEventsRequest{}
 	}
-	result, err := h.store.LoadEvents(ctx, h.sessionID, req)
-	if err != nil || result == nil {
-		return result, err
-	}
-	for i, event := range result.Events {
-		if err := normalizeLoadedSessionEventKind(event); err != nil {
-			return nil, fmt.Errorf("adk: load session event at index %d: %w", i, err)
-		}
-	}
-	return result, nil
+	return h.store.LoadEvents(ctx, h.sessionID, req)
 }
 
 func (h *sessionHandle[M]) appendEvents(ctx context.Context, events []*SessionEvent[M]) error {

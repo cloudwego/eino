@@ -81,7 +81,10 @@ func (l *TurnLoop[T, M]) planTurn(
 	if l.config.GenResume == nil {
 		return nil, errors.New("GenResume is required for resume")
 	}
-	resumeResult, err := l.config.GenResume(ctx, l, pr.interrupted, pr.unhandled, pr.resumeItems)
+	// GenResume may reorder or reuse its input slices while planning. Keep the
+	// pending item groups intact until the runner checkpoint is consumed.
+	resumeResult, err := l.config.GenResume(ctx, l,
+		append([]T{}, pr.interrupted...), append([]T{}, pr.unhandled...), append([]T{}, pr.resumeItems...))
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +118,7 @@ func (l *TurnLoop[T, M]) planTurn(
 }
 
 type turnExecution[T any, M MessageType] struct {
+	resumeConsumed    bool
 	consumed          []T
 	capturedCancelErr *CancelError
 	interruptContexts []*InterruptCtx
@@ -127,31 +131,15 @@ type turnLoopNextItems[T any] struct {
 	isResume bool
 	pr       *turnLoopPendingResume[T]
 	items    []T
-	pushBack []T
 }
 
 func (l *TurnLoop[T, M]) collectNextTurnItems(ctx context.Context) (*turnLoopNextItems[T], bool) {
 	next := &turnLoopNextItems[T]{}
-	if l.pendingResume != nil {
+	if pending := l.pendingResume; pending != nil {
 		next.isResume = true
-		var ok bool
-		next.pr, ok = l.takePendingResume(ctx)
-		if !ok {
-			return nil, false
-		}
-
+		next.pr = pending
 		l.preemptCtrl.waitForPushes()
-		buffered := l.buffer.TakeAll()
-		if !next.pr.resumeSubmitted {
-			next.pr.resumeItems = append(next.pr.resumeItems, buffered...)
-		} else {
-			next.pr.unhandled = append(next.pr.unhandled, buffered...)
-		}
-
-		next.pushBack = make([]T, 0, len(next.pr.interrupted)+len(next.pr.unhandled)+len(next.pr.resumeItems))
-		next.pushBack = append(next.pushBack, next.pr.interrupted...)
-		next.pushBack = append(next.pushBack, next.pr.unhandled...)
-		next.pushBack = append(next.pushBack, next.pr.resumeItems...)
+		pending.addBufferedItems(l.buffer.TakeAll())
 		return next, true
 	}
 
@@ -174,7 +162,6 @@ func (l *TurnLoop[T, M]) collectNextTurnItems(ctx context.Context) (*turnLoopNex
 	l.preemptCtrl.waitForPushes()
 	rest := l.buffer.TakeAll()
 	next.items = append([]T{first}, rest...)
-	next.pushBack = next.items
 	return next, true
 }
 
@@ -231,15 +218,8 @@ func (l *TurnLoop[T, M]) abortPlanningTurn() {
 	l.preemptCtrl.abortPlanningTurn().ack()
 }
 
-func (l *TurnLoop[T, M]) pushBackAfterAbort(next *turnLoopNextItems[T]) {
-	if len(next.pushBack) > 0 {
-		l.buffer.PushFront(next.pushBack)
-	}
-}
-
 func (l *TurnLoop[T, M]) planTurnOrAbort(ctx context.Context, next *turnLoopNextItems[T]) (*turnPlan[T, M], bool) {
 	if next.isResume && l.stopCtrl.isCommitted() {
-		l.restorePendingResume(next.pr)
 		return nil, true
 	}
 
@@ -248,18 +228,14 @@ func (l *TurnLoop[T, M]) planTurnOrAbort(ctx context.Context, next *turnLoopNext
 	plan, err := l.planTurn(ctx, next.isResume, next.items, next.pr)
 	if err != nil {
 		l.abortPlanningTurn()
-		l.pushBackAfterAbort(next)
+		l.buffer.PushFront(next.items)
 		l.runErr = err
 		return nil, true
 	}
 
 	if l.stopCtrl.isCommitted() {
 		l.abortPlanningTurn()
-		if next.isResume {
-			l.restorePendingResume(next.pr)
-			return nil, true
-		}
-		l.pushBackAfterAbort(next)
+		l.buffer.PushFront(next.items)
 		return nil, true
 	}
 
@@ -274,18 +250,14 @@ func (l *TurnLoop[T, M]) prepareAgentOrAbort(
 	agent, err := l.config.PrepareAgent(plan.turnCtx, l, plan.spec.consumed)
 	if err != nil {
 		l.abortPlanningTurn()
-		l.pushBackAfterAbort(next)
+		l.buffer.PushFront(next.items)
 		l.runErr = err
 		return nil, true
 	}
 
 	if l.stopCtrl.isCommitted() {
 		l.abortPlanningTurn()
-		if next.isResume {
-			l.restorePendingResume(next.pr)
-			return nil, true
-		}
-		l.pushBackAfterAbort(next)
+		l.buffer.PushFront(next.items)
 		return nil, true
 	}
 
@@ -336,11 +308,9 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			return
 		}
 
-		l.buffer.PushFront(plan.remaining)
-
-		exec, runErr := l.runAgentAndHandleEvents(plan.turnCtx, agent, plan.spec)
+		exec, runErr := l.runAgentAndHandleEvents(plan.turnCtx, agent, plan)
 		lastExec = exec
-		runErr = l.deleteLoadedCheckpointAfterSuccessfulResume(ctx, runErr, plan.spec.isResume, exec.interruptContexts != nil)
+		runErr = l.retireCheckpointAfterSuccessfulResume(ctx, runErr, exec)
 
 		if runErr != nil {
 			// Set interruptedItems when a cancel or interrupt was captured from the
@@ -365,8 +335,9 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	ctx context.Context,
 	agent TypedAgent[M],
-	spec *turnRunSpec[T, M],
+	plan *turnPlan[T, M],
 ) (*turnExecution[T, M], error) {
+	spec := plan.spec
 	exec := &turnExecution[T, M]{
 		consumed: append([]T{}, spec.consumed...),
 	}
@@ -418,16 +389,16 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	}()
 
 	if spec.isResume {
-		var err error
-		if spec.resumeParams != nil {
-			iter, err = runner.ResumeWithParams(ctx, spec.resumeCheckpointID, spec.resumeParams, runOpts...)
-		} else {
-			iter, err = runner.Resume(ctx, spec.resumeCheckpointID, runOpts...)
+		iter, exec.resumeConsumed, err = runner.resumeInternal(ctx, spec.resumeCheckpointID, spec.resumeParams, runOpts...)
+		if exec.resumeConsumed {
+			l.pendingResume = nil
+			l.buffer.PushFront(plan.remaining)
 		}
 		if err != nil {
 			return exec, fmt.Errorf("failed to resume agent: %w", err)
 		}
 	} else {
+		l.buffer.PushFront(plan.remaining)
 		iter = runner.Run(ctx, spec.input.Messages, runOpts...)
 	}
 
