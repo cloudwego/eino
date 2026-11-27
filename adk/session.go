@@ -275,9 +275,12 @@ type LifecycleEvent struct {
 	StopReason *StopReason     `json:"stop_reason,omitempty"`
 }
 
+// SessionRollbackEvent moves the session between two idle(end_turn) events.
 type SessionRollbackEvent struct {
-	ToEventID                 string `json:"to_event_id"`
-	PreviousHeadCommitEventID string `json:"previous_head_commit_event_id,omitempty"`
+	// ToEventID identifies the end of the turn whose history is restored.
+	ToEventID string `json:"to_event_id"`
+	// FromEventID identifies the end of the effective turn before this rollback.
+	FromEventID string `json:"from_event_id,omitempty"`
 }
 
 type SessionRunState string
@@ -1543,8 +1546,8 @@ func RollbackSession[M MessageType](
 		Timestamp: newEventTimestamp(),
 		Kind:      SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
-			ToEventID:                 target.EventID,
-			PreviousHeadCommitEventID: head.EventID,
+			ToEventID:   target.EventID,
+			FromEventID: head.EventID,
 		},
 	}
 	if err := assignSessionEventID(ctx, rb, cfg.EventIDGenerator); err != nil {

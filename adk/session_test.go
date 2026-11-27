@@ -2722,8 +2722,8 @@ func TestReconstructSessionStateStopsAtMessagesReplaced(t *testing.T) {
 		appendEvents(t, store, sid, &SessionEvent[*schema.Message]{
 			Kind: SessionEventRollback,
 			Rollback: &SessionRollbackEvent{
-				ToEventID:                 firstIdle.EventID,
-				PreviousHeadCommitEventID: secondIdle.EventID,
+				ToEventID:   firstIdle.EventID,
+				FromEventID: secondIdle.EventID,
 			},
 		})
 
@@ -2821,8 +2821,8 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 		EventID: uuid.NewString(),
 		Kind:    SessionEventRollback,
 		Rollback: &SessionRollbackEvent{
-			ToEventID:                 "turn-end-1",
-			PreviousHeadCommitEventID: "turn-end-2",
+			ToEventID:   "turn-end-1",
+			FromEventID: "turn-end-2",
 		},
 	}
 	data, err := encodeSessionEvent(se)
@@ -2833,7 +2833,11 @@ func TestSessionRollbackEventRoundTrip(t *testing.T) {
 	require.NotNil(t, decoded.Rollback)
 	assert.Equal(t, SessionEventRollback, decoded.Kind)
 	assert.Equal(t, "turn-end-1", decoded.Rollback.ToEventID)
-	assert.Equal(t, "turn-end-2", decoded.Rollback.PreviousHeadCommitEventID)
+	assert.Equal(t, "turn-end-2", decoded.Rollback.FromEventID)
+
+	wire, err := json.Marshal(se.Rollback)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"to_event_id":"turn-end-1","from_event_id":"turn-end-2"}`, string(wire))
 }
 
 func TestAttack_RollbackSessionUsesConfiguredEventIDGenerator(t *testing.T) {
@@ -2891,7 +2895,7 @@ func TestRollbackSessionReconstructionHidesDeadBranchAndKeepsNewSuffix(t *testin
 	require.Len(t, rollbackEvents, 1)
 	require.NotNil(t, rollbackEvents[0].Rollback)
 	assert.Equal(t, t1.EventID, rollbackEvents[0].Rollback.ToEventID)
-	assert.Equal(t, t2.EventID, rollbackEvents[0].Rollback.PreviousHeadCommitEventID)
+	assert.Equal(t, t2.EventID, rollbackEvents[0].Rollback.FromEventID)
 	assert.NotContains(t, store.checkpoints, sessionRunnerCheckpointID(sid))
 }
 
