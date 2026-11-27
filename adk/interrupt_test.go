@@ -96,6 +96,27 @@ func TestRunnerCheckpointDoesNotDuplicateChatModelState(t *testing.T) {
 	}
 }
 
+func TestRunnerCheckpointRoundTripsSessionValues(t *testing.T) {
+	values := map[string]any{
+		"session_id": "abc",
+		"context":    map[string]interface{}{"active_host": "web", "doc_id": "d-1"},
+		"tags":       []interface{}{"alpha", float64(2)},
+	}
+	store := newMyStore()
+	runCtx := &runContext{Session: newRunSession()}
+	runCtx.Session.Values = values
+	ctx := setRunCtx(context.Background(), runCtx)
+
+	event := StatefulInterrupt(ctx, "interrupt", "payload")
+	require.NoError(t, runnerSaveCheckPointImpl(false, store, ctx, "checkpoint", &InterruptInfo{}, event.Action.internalInterrupted))
+
+	_, loaded, _, err := runnerLoadCheckPointImpl(store, context.Background(), "checkpoint")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.NotNil(t, loaded.Session)
+	assert.Equal(t, values, loaded.Session.Values)
+}
+
 func TestAttack_RunnerCheckpointCompactionPreservesCompatibility(t *testing.T) {
 	ctx := context.Background()
 	payload := bytes.Repeat([]byte{0xab}, 128<<10)
