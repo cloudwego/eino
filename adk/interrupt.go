@@ -203,6 +203,16 @@ func init() {
 	// serialization struct. Gob requires concrete types behind interface fields
 	// to be registered.
 	gob.Register([]byte{})
+	// Hosts commonly forward a decoded JSON body or metadata map through
+	// WithSessionValues, so the values they pass are map[string]interface{} and
+	// []interface{} rather than named types. Those values live in
+	// runSession.Values (map[string]any) and are gob-encoded with the rest of the
+	// checkpoint, so the concrete types behind that interface field must be
+	// registered too. Without this, any interrupt save fails with
+	// "gob: type not registered for interface: map[string]interface {}" and the
+	// turn aborts instead of only losing the interrupt bookkeeping.
+	gob.Register(map[string]any{})
+	gob.Register([]any{})
 }
 
 // serialization CheckpointSchema: root checkpoint payload (gob).
