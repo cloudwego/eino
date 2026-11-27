@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -85,15 +86,15 @@ func (s *InMemoryStore[M]) AppendEvents(_ context.Context, sessionID string, eve
 		if e == nil || e.EventID == "" {
 			return adk.ErrInvalidEventID
 		}
+		if err := internal.ValidateMessageReplacement(e.MessagesReplaced, e.Kind == adk.SessionEventMessagesReplaced); err != nil {
+			return err
+		}
 		if _, dup := seen[e.EventID]; dup {
 			return adk.ErrDuplicateEventID
 		}
 		seen[e.EventID] = struct{}{}
 		if _, dup := idx[e.EventID]; dup {
 			return adk.ErrDuplicateEventID
-		}
-		if err := adk.NormalizeSessionEventKind(e); err != nil {
-			return err
 		}
 		data, err := s.serializer.Marshal(e)
 		if err != nil {
@@ -229,9 +230,6 @@ func (s *InMemoryStore[M]) currentTailLocked(sessionID string) string {
 func (s *InMemoryStore[M]) decodeEvent(data []byte, eventID string, kind adk.SessionEventKind) (*adk.SessionEvent[M], error) {
 	var event adk.SessionEvent[M]
 	if err := s.serializer.Unmarshal(data, &event); err != nil {
-		return nil, err
-	}
-	if err := adk.NormalizeSessionEventKind(&event); err != nil {
 		return nil, err
 	}
 	if event.EventID != eventID || event.Kind != kind {

@@ -240,10 +240,15 @@ func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkp
 		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
 
+	return runnerLoadCheckPointBytes(ctx, data)
+}
+
+func runnerLoadCheckPointBytes(ctx context.Context, data []byte) (
+	context.Context, *runContext, *ResumeInfo, error) {
 	data = preprocessADKCheckpoint(data)
 
 	s := &serialization{}
-	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
+	err := gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
 	}

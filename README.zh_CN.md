@@ -172,6 +172,7 @@ Eino 框架包含：
 ## 文档
 
 - [Eino 用户手册](https://www.cloudwego.io/zh/docs/eino/)
+- [ADK 会话事件日志的数据模型与应用场景](adk/session_event_log.zh_CN.md)
 - [Eino: 快速开始](https://www.cloudwego.io/zh/docs/eino/quick_start/)
 
 ## 依赖

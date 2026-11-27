@@ -30,11 +30,13 @@ import (
 )
 
 type serviceContractStore struct {
+	loadPage         func(*LoadSessionEventsRequest) *LoadSessionEventsResult[Message]
 	loadSessionIDs   []string
 	loadReqs         []*LoadSessionEventsRequest
 	appendSessionIDs []string
 	appendEvents     [][]*SessionEvent[*schema.Message]
 	loadErr          error
+	loadResult       *LoadSessionEventsResult[*schema.Message]
 	appendErr        error
 }
 
@@ -43,6 +45,12 @@ func (s *serviceContractStore) LoadEvents(_ context.Context, sessionID string, r
 	s.loadReqs = append(s.loadReqs, req)
 	if s.loadErr != nil {
 		return nil, s.loadErr
+	}
+	if s.loadPage != nil {
+		return s.loadPage(req), nil
+	}
+	if s.loadResult != nil {
+		return s.loadResult, nil
 	}
 	return &LoadSessionEventsResult[*schema.Message]{}, nil
 }
@@ -69,16 +77,10 @@ func TestUsageHelpersExtractAssistantMetadata(t *testing.T) {
 
 	assert.Same(t, usage, assistantTokenUsage[*schema.Message](msg))
 	assert.Equal(t, "stop", assistantFinishReason[*schema.Message](msg))
-	got := modelUsageFromAssistant[*schema.Message](msg)
-	require.NotNil(t, got)
-	assert.Equal(t, 11, got.InputTokens)
-	assert.Equal(t, 7, got.OutputTokens)
-	assert.Equal(t, 5, got.CacheReadInputTokens)
-	assert.Same(t, usage, got.Raw)
 
 	assert.Nil(t, assistantTokenUsage[*schema.Message](schema.UserMessage("q")))
 	assert.Empty(t, assistantFinishReason[*schema.Message](schema.UserMessage("q")))
-	assert.Nil(t, modelUsageFromAssistant[*schema.Message](schema.AssistantMessage("no usage", nil)))
+	assert.Nil(t, assistantTokenUsage[*schema.Message](schema.AssistantMessage("no usage", nil)))
 	assert.Nil(t, assistantTokenUsage[*schema.Message](nil))
 
 	agenticUsage := &schema.TokenUsage{PromptTokens: 3, CompletionTokens: 4}
@@ -157,62 +159,183 @@ func TestCommonOptionsAndFilteringContracts(t *testing.T) {
 func TestLocalSessionStoreHandleContracts(t *testing.T) {
 	ctx := context.Background()
 	var nilStore SessionEventStore[*schema.Message]
-	_, err := openLocalSession[*schema.Message](ctx, nilStore, &openSessionRequest{sessionID: "sid"})
+	_, err := openLocalSession[*schema.Message](ctx, nilStore, "sid")
 	require.ErrorIs(t, err, ErrSessionBusy)
 
 	store := &serviceContractStore{}
 	require.NotNil(t, store)
 
-	_, err = openLocalSession[*schema.Message](ctx, store, nil)
+	_, err = openLocalSession[*schema.Message](ctx, (*serviceContractStore)(nil), "sid")
 	require.ErrorIs(t, err, ErrSessionBusy)
-	_, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{})
+	_, err = openLocalSession[*schema.Message](ctx, store, "")
 	require.ErrorIs(t, err, ErrSessionBusy)
 
-	opened, err := openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid"})
+	opened, err := openLocalSession[*schema.Message](ctx, store, "sid")
 	require.NoError(t, err)
 	require.NotNil(t, opened)
 
-	_, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid"})
+	_, err = openLocalSession[*schema.Message](ctx, store, "sid")
 	require.ErrorIs(t, err, ErrSessionBusy)
 
-	res, err := opened.handle.loadEvents(ctx, nil)
+	res, err := opened.loadEvents(ctx, nil)
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	require.Len(t, store.loadReqs, 1)
 	assert.Equal(t, "sid", store.loadSessionIDs[0])
 
 	event := validTestPayload()
-	err = opened.handle.appendEvents(ctx, []*SessionEvent[*schema.Message]{event})
+	err = opened.appendEvents(ctx, []*SessionEvent[*schema.Message]{event})
 	require.NoError(t, err)
 	require.Len(t, store.appendEvents, 1)
 	assert.Equal(t, "sid", store.appendSessionIDs[0])
 
-	err = opened.handle.appendEvents(ctx, nil)
+	err = opened.appendEvents(ctx, nil)
 	require.NoError(t, err)
 	require.Len(t, store.appendEvents, 2)
 	assert.Equal(t, "sid", store.appendSessionIDs[1])
 
-	require.NoError(t, opened.handle.close(ctx))
-	require.NoError(t, opened.handle.close(ctx))
-	err = opened.handle.appendEvents(ctx, nil)
+	require.NoError(t, opened.close(ctx))
+	require.NoError(t, opened.close(ctx))
+	err = opened.appendEvents(ctx, nil)
 	require.ErrorIs(t, err, ErrSessionBusy)
 
-	reopened, err := openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid"})
+	reopened, err := openLocalSession[*schema.Message](ctx, store, "sid")
 	require.NoError(t, err)
-	require.NoError(t, reopened.handle.close(ctx))
+	require.NoError(t, reopened.close(ctx))
 
 	store.loadErr = errors.New("load failed")
-	opened, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid-load-err"})
+	opened, err = openLocalSession[*schema.Message](ctx, store, "sid-load-err")
 	require.NoError(t, err)
-	_, err = opened.handle.loadEvents(ctx, &LoadSessionEventsRequest{})
+	_, err = opened.loadEvents(ctx, &LoadSessionEventsRequest{})
 	require.ErrorContains(t, err, "load failed")
-	require.NoError(t, opened.handle.close(ctx))
+	require.NoError(t, opened.close(ctx))
 
 	store.loadErr = nil
 	store.appendErr = errors.New("append failed")
-	opened, err = openLocalSession[*schema.Message](ctx, store, &openSessionRequest{sessionID: "sid-append-err"})
+	opened, err = openLocalSession[*schema.Message](ctx, store, "sid-append-err")
 	require.NoError(t, err)
-	err = opened.handle.appendEvents(ctx, []*SessionEvent[*schema.Message]{validTestPayload()})
+	err = opened.appendEvents(ctx, []*SessionEvent[*schema.Message]{validTestPayload()})
 	require.ErrorContains(t, err, "append failed")
-	require.NoError(t, opened.handle.close(ctx))
+	require.NoError(t, opened.close(ctx))
+}
+
+func TestReconstructSessionStateNormalizesHistoricalMessage(t *testing.T) {
+	ctx := context.Background()
+	message := &SessionEvent[*schema.Message]{EventID: "message", Message: schema.UserMessage("hello")}
+	span := &SessionEvent[*schema.Message]{EventID: "span", Kind: SessionEventSpanModelRequestEnd}
+	store := &serviceContractStore{loadResult: &LoadSessionEventsResult[*schema.Message]{
+		Events: []*SessionEvent[*schema.Message]{span, message},
+	}}
+	handle := &sessionHandle[*schema.Message]{store: store, sessionID: "sid"}
+	result, err := reconstructSessionState(ctx, handle, defaultLoadPageSize, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []Message{message.Message}, result.state.Messages)
+	assert.Equal(t, SessionEventMessage, message.Kind)
+}
+
+func TestReconstructSessionStateValidatesEffectiveHistory(t *testing.T) {
+	ctx := context.Background()
+	message := schema.UserMessage("retained")
+	badInsert := &SessionEvent[Message]{
+		EventID: "bad-insert", Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[Message]{},
+	}
+	replacement := &SessionEvent[Message]{
+		EventID: "replacement", Kind: SessionEventMessagesReplaced, MessagesReplaced: &[]Message{message},
+	}
+	reconstruct := func(events ...*SessionEvent[Message]) (*sessionReconstructResult[Message], error) {
+		store := &serviceContractStore{loadResult: &LoadSessionEventsResult[Message]{Events: events}}
+		handle := &sessionHandle[Message]{store: store, sessionID: "sid"}
+		return reconstructSessionState(ctx, handle, defaultLoadPageSize, 0)
+	}
+
+	t.Run("replacement supersedes invalid message in the same page", func(t *testing.T) {
+		result, err := reconstruct(replacement, badInsert)
+		require.NoError(t, err)
+		assert.Equal(t, []Message{message}, result.state.Messages)
+	})
+
+	t.Run("replacement itself is validated", func(t *testing.T) {
+		badReplacement := &SessionEvent[Message]{
+			EventID: "bad-replacement", Kind: SessionEventMessagesReplaced, MessagesReplaced: &[]Message{nil},
+		}
+		_, err := reconstruct(badReplacement, replacement)
+		require.ErrorContains(t, err, "invalid context event \"bad-replacement\"")
+		require.ErrorContains(t, err, "MessagesReplaced[0] must not be nil")
+	})
+
+	t.Run("live message mutation after replacement is validated", func(t *testing.T) {
+		_, err := reconstruct(badInsert, replacement)
+		require.ErrorContains(t, err, "invalid context event \"bad-insert\"")
+		require.ErrorContains(t, err, "MessageInserted.Message must not be nil")
+	})
+
+	t.Run("rollback can remove a malformed message", func(t *testing.T) {
+		commit := withTestCommittedIdle[Message]("commit")
+		events := []*SessionEvent[Message]{
+			badInsert, commit, {EventID: "message", Kind: SessionEventMessage, Message: message},
+		}
+		store := &serviceContractStore{loadResult: &LoadSessionEventsResult[Message]{Events: events}}
+		require.NoError(t, RollbackSession[Message](ctx, store, "sid", commit.EventID))
+		require.Len(t, store.appendEvents, 1)
+		require.Len(t, store.appendEvents[0], 1)
+		rollback := store.appendEvents[0][0]
+		require.Equal(t, commit.EventID, rollback.Rollback.ToEventID)
+
+		result, err := reconstruct(append([]*SessionEvent[Message]{rollback}, events...)...)
+		require.NoError(t, err)
+		assert.Equal(t, []Message{message}, result.state.Messages)
+	})
+
+	t.Run("rollback target is validated during projection", func(t *testing.T) {
+		commit := withTestCommittedIdle[Message]("commit")
+		commit.Message = message
+		rollback := &SessionEvent[Message]{
+			EventID: "rollback", Kind: SessionEventRollback, Rollback: &SessionRollbackEvent{ToEventID: commit.EventID},
+		}
+		_, err := reconstruct(rollback, commit)
+		require.ErrorContains(t, err, "invalid commit event")
+		require.ErrorContains(t, err, "exactly one active payload")
+	})
+}
+
+func TestLocalSessionHandleRejectsInvalidEventsOnAppend(t *testing.T) {
+	cases := map[string]*SessionEvent[*schema.Message]{
+		"nil event":               nil,
+		"empty event":             {EventID: "bad"},
+		"missing payload":         {EventID: "bad", Kind: SessionEventMessage},
+		"kind mismatch":           {EventID: "bad", Kind: SessionEventCancel, Message: schema.UserMessage("hello")},
+		"nil insertion":           {Kind: SessionEventMessageInserted, MessageInserted: &MessageInsertedEvent[Message]{}},
+		"nil update":              {Kind: SessionEventMessageUpdated, MessageUpdated: &MessageUpdatedEvent[Message]{MessageID: "target"}},
+		"missing update target":   {Kind: SessionEventMessageUpdated, MessageUpdated: &MessageUpdatedEvent[Message]{Message: schema.UserMessage("new")}},
+		"nil replacement element": {Kind: SessionEventMessagesReplaced, MessagesReplaced: &[]Message{schema.UserMessage("ok"), nil}},
+		"multiple payloads": {
+			EventID: "bad", Kind: SessionEventMessage, Message: schema.UserMessage("hello"),
+			Cancel: &CancelEvent{},
+		},
+	}
+	for name, event := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			events := []*SessionEvent[*schema.Message]{validTestPayload(), event}
+			store := &serviceContractStore{}
+			handle := &sessionHandle[*schema.Message]{store: store, sessionID: "sid"}
+			err := handle.appendEvents(ctx, events)
+			require.ErrorContains(t, err, "append session event at index 1")
+			assert.Empty(t, store.appendEvents, "invalid batches must not reach the store")
+		})
+	}
+}
+
+func TestLocalSessionHandleRejectsMissingAndUnknownKindOnAppend(t *testing.T) {
+	store := &serviceContractStore{}
+	handle := &sessionHandle[*schema.Message]{store: store, sessionID: "sid"}
+	event := &SessionEvent[*schema.Message]{EventID: "message", Message: schema.UserMessage("hello")}
+	err := handle.appendEvents(context.Background(), []*SessionEvent[*schema.Message]{event})
+	require.ErrorContains(t, err, "emitted session event must set non-empty Kind")
+	assert.Empty(t, store.appendEvents)
+
+	event = &SessionEvent[Message]{EventID: "typo", Kind: "future.typo"}
+	err = handle.appendEvents(context.Background(), []*SessionEvent[Message]{event})
+	require.ErrorContains(t, err, "exactly one active payload")
+	assert.Empty(t, store.appendEvents)
 }

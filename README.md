@@ -173,6 +173,7 @@ The Eino framework consists of:
 
 - [Eino User Manual](https://www.cloudwego.io/zh/docs/eino/)
 - [Eino: Quick Start](https://www.cloudwego.io/zh/docs/eino/quick_start/)
+- [ADK session event log model and usage](adk/session_event_log.md)
 
 ## Dependencies
 - Go 1.18 and above.

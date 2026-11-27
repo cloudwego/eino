@@ -17,6 +17,8 @@
 package internal
 
 import (
+	"errors"
+
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/internal/gmap"
@@ -27,6 +29,18 @@ import (
 const EinoMsgIDKey = "_eino_msg_id"
 
 const messageExtraKeySystemReminder = "_eino_adk_system_reminder"
+
+// ValidateMessageReplacement checks new event payloads before serialization.
+// Older events with an explicit empty list remain valid replay boundaries.
+func ValidateMessageReplacement[M any](messages *[]M, replacementKind bool) error {
+	if messages == nil && !replacementKind {
+		return nil
+	}
+	if messages == nil || len(*messages) == 0 {
+		return errors.New("messages_replaced must contain at least one message")
+	}
+	return nil
+}
 
 // GetMessageID returns the message ID from Extra, or "" if not set.
 // Works with any map[string]any (Message.Extra or AgenticMessage.Extra).
