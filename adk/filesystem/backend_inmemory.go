@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	vpath "path"
 	"regexp"
 	"sort"
 	"strings"
@@ -82,7 +82,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 				// The path itself is a file
 				if !seen[normalizedFilePath] {
 					result = append(result, FileInfo{
-						Path:       filepath.Base(normalizedFilePath),
+						Path:       vpath.Base(normalizedFilePath),
 						IsDir:      false,
 						Size:       int64(entry.content.Len()),
 						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
@@ -403,7 +403,7 @@ func (b *InMemoryBackend) filterByGlob(files []string, searchPath string, globPa
 				matchPath = strings.TrimPrefix(filePath, searchPath+"/")
 			}
 		} else {
-			matchPath = filepath.Base(filePath)
+			matchPath = vpath.Base(filePath)
 		}
 
 		matched, err := doublestar.Match(globPattern, matchPath)
@@ -422,7 +422,7 @@ func (b *InMemoryBackend) filterByFileType(files []string, fileType string) []st
 	var result []string
 
 	for _, filePath := range files {
-		ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
+		ext := strings.TrimPrefix(vpath.Ext(filePath), ".")
 		if matchFileType(ext, fileType) {
 			result = append(result, filePath)
 		}
@@ -799,17 +799,18 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 }
 
 // normalizePath normalizes a file path by ensuring it starts with "/" and removing trailing slashes.
-func normalizePath(path string) string {
-	if path == "" {
+func normalizePath(filePath string) string {
+	if filePath == "" {
 		return "/"
 	}
 
+	filePath = strings.ReplaceAll(filePath, "\\", "/")
 	// Ensure path starts with "/"
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	if !strings.HasPrefix(filePath, "/") {
+		filePath = "/" + filePath
 	}
 
-	return filepath.Clean(path)
+	return vpath.Clean(filePath)
 }
 
 type grepCollector struct {
