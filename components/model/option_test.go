@@ -38,6 +38,7 @@ func TestOptions(t *testing.T) {
 			tools                      = []*schema.ToolInfo{{Name: "asd"}, {Name: "qwe"}}
 			toolChoice                 = schema.ToolChoiceForced
 			allowedToolNames           = []string{"web_search"}
+			responseFormat             = &schema.ResponseFormat{Type: schema.ResponseFormatTypeJSONObject}
 		)
 
 		opts := GetCommonOptions(
@@ -54,6 +55,7 @@ func TestOptions(t *testing.T) {
 			WithStop([]string{"hello", "bye"}),
 			WithTools(tools),
 			WithToolChoice(toolChoice, allowedToolNames...),
+			WithResponseFormat(responseFormat),
 		)
 
 		convey.So(opts, convey.ShouldResemble, &Options{
@@ -65,6 +67,7 @@ func TestOptions(t *testing.T) {
 			Tools:            tools,
 			ToolChoice:       &toolChoice,
 			AllowedToolNames: allowedToolNames,
+			ResponseFormat:   responseFormat,
 		})
 	})
 

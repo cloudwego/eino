@@ -427,6 +427,254 @@ func (w *idCheckModelWrapper) Stream(ctx context.Context, input []*schema.Messag
 	return w.inner.Stream(ctx, input, opts...)
 }
 
+type syntheticAgenticStreamHandler struct {
+	*TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]
+	message *schema.AgenticMessage
+	release <-chan struct{}
+}
+
+func (h *syntheticAgenticStreamHandler) WrapModel(
+	_ context.Context,
+	_ model.BaseModel[*schema.AgenticMessage],
+	_ *TypedModelContext[*schema.AgenticMessage],
+) (model.BaseModel[*schema.AgenticMessage], error) {
+	return &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("unexpected Generate call")
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			reader, writer := schema.Pipe[*schema.AgenticMessage](1)
+			go func() {
+				defer writer.Close()
+				if writer.Send(h.message, nil) {
+					return
+				}
+				<-h.release
+			}()
+			return reader, nil
+		},
+	}, nil
+}
+
+func TestMessageID_WrapModelSyntheticAgenticStreamGetsIDBeforeFanOut(t *testing.T) {
+	ctx := context.Background()
+	release := make(chan struct{})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+
+	synthetic := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "synthetic"}),
+		},
+	}
+	inner := &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("inner model should not be called")
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			return nil, errors.New("inner model should not be called")
+		},
+	}
+	handler := &syntheticAgenticStreamHandler{
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]{},
+		message:                           synthetic,
+		release:                           release,
+	}
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:     "synthetic-stream-message-id",
+		Model:    inner,
+		Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{handler},
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+		Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
+		EnableStreaming: true,
+	})
+	event, ok := iter.Next()
+	require.True(t, ok)
+	require.NoError(t, event.Err)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+	require.True(t, event.Output.MessageOutput.IsStreaming)
+
+	chunk, err := event.Output.MessageOutput.MessageStream.Recv()
+	require.NoError(t, err)
+	assert.NotEmpty(t, GetMessageID(chunk), "synthetic stream output should have an ID before event fan-out")
+	// Reading the handler-owned message from this goroutine while the pipeline is
+	// still live is deliberate: it is the read the framework must not race with,
+	// so this assertion doubles as a race-detector canary under -race. Do not
+	// drop it as redundant.
+	assert.Empty(t, GetMessageID(synthetic), "assigning the framework ID should not mutate the handler-owned message")
+
+	close(release)
+	released = true
+	for {
+		_, ok = iter.Next()
+		if !ok {
+			break
+		}
+	}
+}
+
+// syntheticAgenticGenerateHandler short-circuits the inner model in non-streaming
+// mode and returns a message it keeps ownership of, mirroring
+// syntheticAgenticStreamHandler.
+type syntheticAgenticGenerateHandler struct {
+	*TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]
+	message *schema.AgenticMessage
+}
+
+func (h *syntheticAgenticGenerateHandler) WrapModel(
+	_ context.Context,
+	_ model.BaseModel[*schema.AgenticMessage],
+	_ *TypedModelContext[*schema.AgenticMessage],
+) (model.BaseModel[*schema.AgenticMessage], error) {
+	return &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return h.message, nil
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			return nil, errors.New("unexpected Stream call")
+		},
+	}, nil
+}
+
+// A handler that short-circuits Generate bypasses the innermost ID assignment
+// layer just as the streaming case does. Without a stamp at the event sender
+// boundary the live event and the session event each lazily assign their own ID
+// to their own copy, so one logical message ends up with several identities --
+// and the outer state wrapper writes a third one into the handler's message in
+// place, racing with the handler.
+func TestMessageID_WrapModelSyntheticAgenticGenerateGetsSingleID(t *testing.T) {
+	ctx := context.Background()
+
+	synthetic := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "synthetic"}),
+		},
+	}
+	inner := &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("inner model should not be called")
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			return nil, errors.New("inner model should not be called")
+		},
+	}
+	handler := &syntheticAgenticGenerateHandler{
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]{},
+		message:                           synthetic,
+	}
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:     "synthetic-generate-message-id",
+		Model:    inner,
+		Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{handler},
+	})
+	require.NoError(t, err)
+
+	input := &TypedAgentInput[*schema.AgenticMessage]{
+		Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
+		EnableStreaming: false,
+	}
+	iter := agent.Run(ctx, input, WithTimelineEvents())
+	event, ok := iter.Next()
+	for ok && event.Output == nil {
+		require.NoError(t, event.Err)
+		event, ok = iter.Next()
+	}
+	require.True(t, ok)
+	require.NoError(t, event.Err)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+
+	liveID := GetMessageID(event.Output.MessageOutput.Message)
+	assert.NotEmpty(t, liveID, "synthetic Generate output should have an ID on the live event")
+	require.NotNil(t, event.SessionEventVariant)
+	require.NotNil(t, event.SessionEventVariant.Event)
+	assert.Equal(t, liveID, GetMessageID(event.SessionEventVariant.Event.Message),
+		"live event and session event must agree on one message ID")
+	assert.Empty(t, GetMessageID(synthetic),
+		"assigning the framework ID should not mutate the handler-owned message")
+
+	for {
+		if _, ok = iter.Next(); !ok {
+			break
+		}
+	}
+}
+
+// The innermost ID assignment layer stamps the first chunk of the model's own
+// stream. That chunk belongs to the model implementation, which may retain it, so
+// the layer must copy before writing rather than stamping in place.
+func TestMessageID_StreamChunkIDDoesNotMutateModelOwnedChunk(t *testing.T) {
+	ctx := context.Background()
+
+	retained := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "chunk"}),
+		},
+	}
+	inner := &mockAgenticModel{
+		generateFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("unexpected Generate call")
+		},
+		streamFn: func(context.Context, []*schema.AgenticMessage, ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			reader, writer := schema.Pipe[*schema.AgenticMessage](1)
+			go func() {
+				defer writer.Close()
+				writer.Send(retained, nil)
+			}()
+			return reader, nil
+		},
+	}
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:  "model-owned-chunk-message-id",
+		Model: inner,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+		Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
+		EnableStreaming: true,
+	})
+
+	sawID := false
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		if !event.Output.MessageOutput.IsStreaming {
+			continue
+		}
+		for {
+			chunk, recvErr := event.Output.MessageOutput.MessageStream.Recv()
+			if recvErr != nil {
+				break
+			}
+			if GetMessageID(chunk) != "" {
+				sawID = true
+			}
+		}
+	}
+
+	assert.True(t, sawID, "framework should assign an ID to the streamed model output")
+	assert.Empty(t, GetMessageID(retained),
+		"the innermost ID layer must copy rather than stamp the model-owned chunk in place")
+}
+
 // Scenario 7: User input messages do NOT get automatic IDs (they are external, not framework-created).
 // Only framework-created messages (model output, tool results, TypedSendEvent) get auto-assigned IDs.
 func TestMessageID_UserInputNoAutoID(t *testing.T) {
@@ -470,11 +718,10 @@ func TestMessageID_UserInputNoAutoID(t *testing.T) {
 	}
 }
 
-// Scenario 8: Middleware must call EnsureMessageID before SendEvent; pointer identity ensures state consistency
-// TestMessageID_SendEvent_MiddlewareMustEnsureID verifies that TypedSendEvent is a pure
-// transport and does NOT auto-assign message IDs. Middleware authors must call
-// EnsureMessageID themselves before sending.
-func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
+// Scenario 8: SendEvent assigns message IDs before enqueue; pointer identity ensures state consistency.
+// TestMessageID_SendEvent_AutoEnsuresID verifies that middleware-created messages
+// receive IDs at the SendEvent boundary.
+func TestMessageID_SendEvent_AutoEnsuresID(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -498,21 +745,18 @@ func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 					// Middleware creates a new message and writes the SAME pointer to both state and event
 					middlewareMsg = schema.AssistantMessage("middleware injected", nil)
 
-					// Middleware is responsible for assigning the ID before sending
-					EnsureMessageID(middlewareMsg)
-
 					// Write to state
 					state.Messages = append(state.Messages, middlewareMsg)
 
-					// Send as event — TypedSendEvent does NOT auto-assign ID
+					// Send as event — TypedSendEvent assigns ID on the shared pointer.
 					event := EventFromMessage(middlewareMsg, nil, schema.Assistant, "")
 					err := SendEvent(ctx, event)
 					if err != nil {
 						return err
 					}
 
-					// Because we called EnsureMessageID on the shared pointer,
-					// the state copy also has the ID (pointer identity)
+					// Because SendEvent ensures ID on the shared pointer, the state
+					// copy also has the ID (pointer identity).
 					stateMsgIDAfterSendEvent = internal.GetMessageID(middlewareMsg.Extra)
 
 					return nil
@@ -538,10 +782,10 @@ func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 	// We expect at least 2 events: model response + middleware injected message
 	require.GreaterOrEqual(t, len(allEvents), 2)
 
-	// The middleware message pointer should have an ID (assigned by middleware via EnsureMessageID)
+	// The middleware message pointer should have an ID assigned at SendEvent time.
 	require.NotNil(t, middlewareMsg)
 	middlewareMsgID := GetMessageID(middlewareMsg)
-	assert.NotEmpty(t, middlewareMsgID, "middleware should have assigned an ID via EnsureMessageID")
+	assert.NotEmpty(t, middlewareMsgID, "SendEvent should assign an ID")
 	assert.True(t, isValidUUID(middlewareMsgID))
 
 	// The ID captured right after SendEvent (via pointer identity) should be the same
@@ -566,7 +810,7 @@ func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 		middlewareEventMsgID, middlewareMsgID)
 }
 
-func TestAttack_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
+func TestMessageID_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
 	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	msgs := []*schema.Message{
 		{Role: schema.Assistant, Content: "chunk1", Extra: map[string]any{internal.EinoMsgIDKey: id}},
@@ -583,7 +827,7 @@ func TestAttack_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
 	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
 }
 
-func TestAttack_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
+func TestMessageID_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
 	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	msgs := []*schema.Message{
 		{Role: schema.Assistant, Content: "chunk1", Extra: map[string]any{internal.EinoMsgIDKey: id}},
@@ -598,7 +842,7 @@ func TestAttack_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
 	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
 }
 
-func TestAttack_ConcurrentGenerate_NoSharedExtraMutation(t *testing.T) {
+func TestMessageID_ConcurrentGenerateNoSharedExtraMutation(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -651,7 +895,7 @@ func TestAttack_ConcurrentGenerate_NoSharedExtraMutation(t *testing.T) {
 	// The important thing is no panic and unique IDs
 }
 
-func TestAttack_GenerateCopyDoesNotAffectOriginal(t *testing.T) {
+func TestMessageID_GenerateCopyDoesNotAffectOriginal(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -870,7 +1114,7 @@ func TestMessageID_AgenticPublicAPIHelpers(t *testing.T) {
 
 // TestAttack_PopToolMsgID_DoublePop tests that calling popToolMsgID twice for the
 // same key returns "" on second call.
-func TestAttack_PopToolMsgID_DoublePop(t *testing.T) {
+func TestMessageID_PopToolMsgIDDoublePop(t *testing.T) {
 	st := &typedState[*schema.Message]{}
 	st.setToolMsgID("myTool", "call-1", "uuid-abc")
 
@@ -913,7 +1157,7 @@ func (t *namedFakeToolForTest) InvokableRun(_ context.Context, _ string, _ ...to
 // TestAttack_ToolMsgIDConsistency_MultipleTools is an integration test: when an agent
 // has multiple tools called in one turn, verify that EACH tool's event message ID
 // matches its corresponding state message ID.
-func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
+func TestMessageID_ToolMsgIDConsistencyMultipleTools(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -1008,7 +1252,7 @@ func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
 
 // TestAttack_ToolResultToBlocks_EdgeCases verifies toolResultToBlocks handles
 // nil ToolResult, empty Parts, and Parts with nil media fields.
-func TestAttack_ToolResultToBlocks_EdgeCases(t *testing.T) {
+func TestMessageID_ToolResultToBlocksEdgeCases(t *testing.T) {
 	t.Run("nil ToolResult", func(t *testing.T) {
 		blocks := toolResultToBlocks(nil)
 		assert.Nil(t, blocks, "nil ToolResult should produce nil blocks")

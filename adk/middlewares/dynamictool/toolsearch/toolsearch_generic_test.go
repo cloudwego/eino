@@ -95,6 +95,65 @@ func makeAssistantMsgWithToolCalls[M adk.MessageType](toolCalls []testToolCall) 
 	}
 }
 
+func makeAssistantGenMsg[M adk.MessageType](content string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(schema.AssistantMessage(content, nil)).(M)
+	case *schema.AgenticMessage:
+		return any(&schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: content}),
+			},
+		}).(M)
+	default:
+		panic("unreachable")
+	}
+}
+
+func makeReasoningAssistantMsg[M adk.MessageType](reasoning, content string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(&schema.Message{
+			Role:             schema.Assistant,
+			Content:          content,
+			ReasoningContent: reasoning,
+		}).(M)
+	case *schema.AgenticMessage:
+		return any(&schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.Reasoning{Text: reasoning}),
+				schema.NewContentBlock(&schema.AssistantGenText{Text: content}),
+			},
+		}).(M)
+	default:
+		panic("unreachable")
+	}
+}
+
+func makeReasoningOnlyAssistantMsg[M adk.MessageType](reasoning string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(&schema.Message{
+			Role:             schema.Assistant,
+			ReasoningContent: reasoning,
+		}).(M)
+	case *schema.AgenticMessage:
+		return any(&schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.Reasoning{Text: reasoning}),
+			},
+		}).(M)
+	default:
+		panic("unreachable")
+	}
+}
+
 func makeToolResultMsg[M adk.MessageType](content string, callID string, toolName string) M {
 	var zero M
 	switch any(zero).(type) {
@@ -204,71 +263,85 @@ func countRemindersGeneric[M adk.MessageType](msgs []M) int {
 
 // --- Generic test functions ---
 
-func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
+// testBeforeAgentReminderGeneric verifies BeforeModelRewriteState inserts the
+// tool-search reminder mid-conversation — right after the latest user message /
+// final assistant answer, never at the front and never inside pending tool-call
+// scaffolding — and does so exactly once (systemreminder.Has guards re-insertion). The
+// insertion-position logic itself lives in (and is unit-tested by) the shared
+// adk/middlewares/internal/systemreminder package; these cases exercise it end-to-end through
+// BeforeModelRewriteState for both *schema.Message and *schema.AgenticMessage.
+func testBeforeAgentReminderGeneric[M adk.MessageType](t *testing.T) {
 	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
 	m := newTestMiddlewareTyped[M](t, []tool.BaseTool{dynamicA})
+	ctx := context.Background()
 
-	t.Run("normal: system then user", func(t *testing.T) {
-		input := []M{
+	rewrite := func(msgs []M) []M {
+		state := &adk.TypedChatModelAgentState[M]{Messages: msgs}
+		_, out, err := m.BeforeModelRewriteState(ctx, state, nil)
+		require.NoError(t, err)
+		return out.Messages
+	}
+
+	t.Run("after the latest user message", func(t *testing.T) {
+		got := rewrite([]M{
 			makeSystemMsg[M]("sys"),
 			makeUserMsg[M]("hi"),
-		}
-		got := m.ensureReminder(input)
+		})
 		require.Len(t, got, 3)
-		assert.Equal(t, "system", getMsgRole(got[0]))
-		// Reminder inserted after system
-		extra := getMsgExtra(got[1])
-		require.NotNil(t, extra)
-		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
-		assert.Equal(t, "hi", getMsgContent(got[2]))
+		// Reminder follows the user message, not the leading system prompt.
+		assert.Equal(t, "user", getMsgRole(got[1]))
+		assert.Equal(t, "system", getMsgRole(got[2]))
+		require.NotNil(t, getMsgExtra(got[2]))
+		assert.Equal(t, true, getMsgExtra(got[2])[toolSearchReminderExtraKey])
 	})
 
-	t.Run("all system messages", func(t *testing.T) {
-		input := []M{
-			makeSystemMsg[M]("sys1"),
-			makeSystemMsg[M]("sys2"),
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 3)
-		assert.Equal(t, "system", getMsgRole(got[0]))
-		assert.Equal(t, "system", getMsgRole(got[1]))
-		// Reminder appended at end
-		extra := getMsgExtra(got[2])
-		require.NotNil(t, extra)
-		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
+	t.Run("after a settled assistant answer", func(t *testing.T) {
+		got := rewrite([]M{
+			makeSystemMsg[M]("sys"),
+			makeUserMsg[M]("hi"),
+			makeAssistantGenMsg[M]("hello"),
+		})
+		require.Len(t, got, 4)
+		assert.Equal(t, "assistant", getMsgRole(got[2]))
+		assert.Equal(t, "system", getMsgRole(got[3]))
+		assert.Equal(t, true, getMsgExtra(got[3])[toolSearchReminderExtraKey])
+	})
+
+	t.Run("not inside pending tool-call scaffolding", func(t *testing.T) {
+		toolCall := makeAssistantMsgWithToolCalls[M]([]testToolCall{{ID: "call-1", Name: "tool", Arguments: "{}"}})
+		adk.EnsureMessageID(toolCall)
+		got := rewrite([]M{
+			makeSystemMsg[M]("sys"),
+			makeUserMsg[M]("hi"),
+			toolCall,
+			makeToolResultMsg[M]("result", "call-1", "tool"),
+		})
+		require.Len(t, got, 5)
+		// Reminder lands right after the user message, ahead of the pending
+		// tool-call / tool-result pair (never in the middle of it).
+		assert.Equal(t, "user", getMsgRole(got[1]))
+		assert.Equal(t, "system", getMsgRole(got[2]))
+		assert.Equal(t, true, getMsgExtra(got[2])[toolSearchReminderExtraKey])
+		assert.Equal(t, 1, countRemindersGeneric(got))
+	})
+
+	t.Run("inserted exactly once across repeated calls", func(t *testing.T) {
+		first := rewrite([]M{
+			makeSystemMsg[M]("sys"),
+			makeUserMsg[M]("hi"),
+		})
+		assert.Equal(t, 1, countRemindersGeneric(first))
+		// State already carries the reminder: systemreminder.Has skips re-insertion.
+		second := rewrite(first)
+		assert.Len(t, second, len(first))
+		assert.Equal(t, 1, countRemindersGeneric(second))
 	})
 
 	t.Run("empty input", func(t *testing.T) {
-		got := m.ensureReminder(nil)
+		got := rewrite(nil)
 		require.Len(t, got, 1)
-		extra := getMsgExtra(got[0])
-		require.NotNil(t, extra)
-		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
-	})
-
-	t.Run("no system messages", func(t *testing.T) {
-		input := []M{
-			makeUserMsg[M]("hi"),
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 2)
-		// Reminder inserted at position 0
-		extra := getMsgExtra(got[0])
-		require.NotNil(t, extra)
-		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
-		assert.Equal(t, "hi", getMsgContent(got[1]))
-	})
-
-	t.Run("idempotent: does not insert twice", func(t *testing.T) {
-		reminder := makeUserMsg[M]("<reminder>")
-		setMsgExtra(reminder, toolSearchReminderExtraKey, true)
-		input := []M{
-			reminder,
-			makeUserMsg[M]("hi"),
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 2)
-		assert.Equal(t, "hi", getMsgContent(got[1]))
+		assert.Equal(t, "system", getMsgRole(got[0]))
+		assert.Equal(t, true, getMsgExtra(got[0])[toolSearchReminderExtraKey])
 	})
 }
 
@@ -300,9 +373,6 @@ func testMode1InitializationGeneric[M adk.MessageType](t *testing.T) {
 	names := toolNames(state.ToolInfos)
 	assert.Equal(t, []string{"static_tool", "tool_search"}, names)
 	assert.Nil(t, state.DeferredToolInfos, "Mode 1 should not populate DeferredToolInfos")
-
-	// Verify reminder was inserted.
-	assert.Equal(t, 1, countRemindersGeneric(state.Messages), "reminder should be inserted")
 }
 
 func testMode1ForwardSelectionGeneric[M adk.MessageType](t *testing.T) {
@@ -318,7 +388,7 @@ func testMode1ForwardSelectionGeneric[M adk.MessageType](t *testing.T) {
 	toolSearchResultJSON, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_a"}})
 
 	// Build the reminder message with the extra marker
-	reminderMsg := makeUserMsg[M]("hello")
+	reminderMsg := makeSystemMsg[M]("hello")
 	setMsgExtra(reminderMsg, toolSearchReminderExtraKey, true)
 
 	state := &adk.TypedChatModelAgentState[M]{
@@ -359,7 +429,7 @@ func testMalformedJSONGeneric[M adk.MessageType](t *testing.T) {
 	ctx := context.Background()
 
 	// Build the reminder message with the extra marker
-	reminderMsg := makeUserMsg[M]("reminder")
+	reminderMsg := makeSystemMsg[M]("reminder")
 	setMsgExtra(reminderMsg, toolSearchReminderExtraKey, true)
 
 	state := &adk.TypedChatModelAgentState[M]{
@@ -390,13 +460,13 @@ func testMalformedJSONGeneric[M adk.MessageType](t *testing.T) {
 
 func TestToolSearchGeneric(t *testing.T) {
 	t.Run("Message", func(t *testing.T) {
-		t.Run("EnsureReminder", testEnsureReminderGeneric[*schema.Message])
+		t.Run("BeforeAgentReminder", testBeforeAgentReminderGeneric[*schema.Message])
 		t.Run("Mode1Init", testMode1InitializationGeneric[*schema.Message])
 		t.Run("Mode1ForwardSelection", testMode1ForwardSelectionGeneric[*schema.Message])
 		t.Run("MalformedJSON", testMalformedJSONGeneric[*schema.Message])
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
-		t.Run("EnsureReminder", testEnsureReminderGeneric[*schema.AgenticMessage])
+		t.Run("BeforeAgentReminder", testBeforeAgentReminderGeneric[*schema.AgenticMessage])
 		t.Run("Mode1Init", testMode1InitializationGeneric[*schema.AgenticMessage])
 		t.Run("Mode1ForwardSelection", testMode1ForwardSelectionGeneric[*schema.AgenticMessage])
 		t.Run("MalformedJSON", testMalformedJSONGeneric[*schema.AgenticMessage])

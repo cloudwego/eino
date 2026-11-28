@@ -31,6 +31,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	internalschema "github.com/cloudwego/eino/internal/schema"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1085,7 +1086,7 @@ func TestCoverage_ConcatMessageStream_Agentic(t *testing.T) {
 			}, nil)
 		}()
 
-		result, err := concatMessageStream(r)
+		result, err := internalschema.ConcatMessageStream(r)
 		assert.NoError(t, err)
 		assert.NotNil(t, result)
 	})
@@ -1097,7 +1098,7 @@ func TestCoverage_ConcatMessageStream_Agentic(t *testing.T) {
 			w.Close()
 		}()
 
-		_, err := concatMessageStream(r)
+		_, err := internalschema.ConcatMessageStream(r)
 		assert.Error(t, err)
 	})
 }

@@ -369,15 +369,15 @@ func TestMiddlewareFlow(t *testing.T) {
 	assert.NotContains(t, toolsPerCall[2], "dynamic_tool_b")
 
 	// Verify reminder is present in messages (checked via tool list — the wrapper inserts it).
-	// The model received messages, and the reminder contains "<available-deferred-tools>".
 	// We indirectly verify this by checking that the middleware ran without error and the
 	// 3-turn flow completed successfully, which requires the tool_search tool to work.
 
-	// Additional: verify that the reminder contains the dynamic tool names.
+	// Additional: verify that the reminder lists the dynamic tool names and carries the
+	// tool_search usage preamble.
 	mwImpl := mw.(*typedMiddleware[*schema.Message])
-	assert.True(t, strings.Contains(mwImpl.sr, "dynamic_tool_a"))
-	assert.True(t, strings.Contains(mwImpl.sr, "dynamic_tool_b"))
-	assert.True(t, strings.Contains(mwImpl.sr, "<available-deferred-tools>"))
+	assert.True(t, strings.Contains(mwImpl.reminder, "dynamic_tool_a"))
+	assert.True(t, strings.Contains(mwImpl.reminder, "dynamic_tool_b"))
+	assert.True(t, strings.Contains(mwImpl.reminder, "tool_search"))
 }
 
 // ---------------------------------------------------------------------------
@@ -432,70 +432,6 @@ func TestSplitCamelCase(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-// ---------------------------------------------------------------------------
-// TestEnsureReminder
-// ---------------------------------------------------------------------------
-
-func TestEnsureReminder(t *testing.T) {
-	m := &typedMiddleware[*schema.Message]{sr: "<reminder>"}
-
-	t.Run("normal: system then user", func(t *testing.T) {
-		input := []*schema.Message{
-			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "hi"},
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 3)
-		assert.Equal(t, schema.System, got[0].Role)
-		assert.Equal(t, schema.User, got[1].Role)
-		assert.Equal(t, "<reminder>", got[1].Content)
-		assert.Equal(t, true, got[1].Extra[toolSearchReminderExtraKey])
-		assert.Equal(t, schema.User, got[2].Role)
-		assert.Equal(t, "hi", got[2].Content)
-	})
-
-	t.Run("all system messages", func(t *testing.T) {
-		input := []*schema.Message{
-			{Role: schema.System, Content: "sys1"},
-			{Role: schema.System, Content: "sys2"},
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 3)
-		assert.Equal(t, schema.System, got[0].Role)
-		assert.Equal(t, schema.System, got[1].Role)
-		assert.Equal(t, "<reminder>", got[2].Content)
-	})
-
-	t.Run("empty input", func(t *testing.T) {
-		got := m.ensureReminder(nil)
-		require.Len(t, got, 1)
-		assert.Equal(t, "<reminder>", got[0].Content)
-	})
-
-	t.Run("no system messages", func(t *testing.T) {
-		input := []*schema.Message{
-			{Role: schema.User, Content: "hi"},
-			{Role: schema.Assistant, Content: "hello"},
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 3)
-		assert.Equal(t, "<reminder>", got[0].Content)
-		assert.Equal(t, "hi", got[1].Content)
-		assert.Equal(t, "hello", got[2].Content)
-	})
-
-	t.Run("idempotent: does not insert twice", func(t *testing.T) {
-		input := []*schema.Message{
-			{Role: schema.User, Content: "<reminder>", Extra: map[string]any{toolSearchReminderExtraKey: true}},
-			{Role: schema.User, Content: "hi"},
-		}
-		got := m.ensureReminder(input)
-		require.Len(t, got, 2)
-		assert.Equal(t, "<reminder>", got[0].Content)
-		assert.Equal(t, "hi", got[1].Content)
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -590,9 +526,6 @@ func TestBeforeModelRewriteState_Mode1_Initialization(t *testing.T) {
 	names := toolNames(state.ToolInfos)
 	assert.Equal(t, []string{"static_tool", "tool_search"}, names)
 	assert.Nil(t, state.DeferredToolInfos, "Mode 1 should not populate DeferredToolInfos")
-
-	// Verify reminder was inserted.
-	assert.Equal(t, 1, countReminders(state.Messages), "reminder should be inserted")
 }
 
 func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
@@ -615,7 +548,7 @@ func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "hello", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "hello", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -680,73 +613,6 @@ func TestBeforeModelRewriteState_Mode2_DeferredToolInfos(t *testing.T) {
 	assert.Equal(t, []string{"dynamic_tool_a", "dynamic_tool_b"}, deferredNames, "DeferredToolInfos should have all dynamic tools")
 }
 
-func TestBeforeModelRewriteState_ReminderReinsertAfterRemoval(t *testing.T) {
-	ctx := context.Background()
-
-	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
-
-	mw, err := New(ctx, &Config{
-		DynamicTools:       []tool.BaseTool{dynamicA},
-		UseModelToolSearch: false,
-	})
-	require.NoError(t, err)
-
-	m := mw.(*typedMiddleware[*schema.Message])
-
-	state := &adk.ChatModelAgentState{
-		Messages: []*schema.Message{
-			{Role: schema.User, Content: "hello"},
-		},
-		ToolInfos: []*schema.ToolInfo{
-			ti("static_tool", "Static tool"),
-			getToolSearchToolInfo(),
-			ti("dynamic_tool_a", "Dynamic tool A"),
-		},
-	}
-
-	// First call: reminder inserted.
-	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
-	require.NoError(t, err)
-
-	reminderCount := countReminders(state.Messages)
-	assert.Equal(t, 1, reminderCount)
-
-	// Simulate summarization removing the reminder message.
-	var msgsWithoutReminder []*schema.Message
-	for _, msg := range state.Messages {
-		isReminder := false
-		if msg.Extra != nil {
-			if v, ok := msg.Extra[toolSearchReminderExtraKey].(bool); ok && v {
-				isReminder = true
-			}
-		}
-		if !isReminder {
-			msgsWithoutReminder = append(msgsWithoutReminder, msg)
-		}
-	}
-	state.Messages = msgsWithoutReminder
-	assert.Equal(t, 0, countReminders(state.Messages), "reminder should be gone")
-
-	// Next call: reminder should be re-inserted.
-	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
-	require.NoError(t, err)
-
-	reminderCount = countReminders(state.Messages)
-	assert.Equal(t, 1, reminderCount, "reminder should be re-inserted after removal")
-}
-
-func countReminders(msgs []*schema.Message) int {
-	count := 0
-	for _, msg := range msgs {
-		if msg.Extra != nil {
-			if v, _ := msg.Extra[toolSearchReminderExtraKey].(bool); v {
-				count++
-			}
-		}
-	}
-	return count
-}
-
 // ---------------------------------------------------------------------------
 // Edge-case tests for BeforeModelRewriteState
 // ---------------------------------------------------------------------------
@@ -773,7 +639,7 @@ func TestBeforeModelRewriteState_Mode1_MultipleToolSearchResultsAcrossTurns(t *t
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -816,7 +682,7 @@ func TestBeforeModelRewriteState_Mode1_MalformedJSONInToolSearchResult(t *testin
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -854,7 +720,7 @@ func TestBeforeModelRewriteState_Mode1_NonExistentToolInForwardSelection(t *test
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:nonexistent_tool,dynamic_tool_a"}`}},
 			}),
@@ -919,7 +785,7 @@ func TestBeforeModelRewriteState_Mode1_DoubleInitWithoutComposeContext(t *testin
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -975,7 +841,7 @@ func TestBeforeModelRewriteState_ToolInfosSliceMutation(t *testing.T) {
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
-			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			{Role: schema.System, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),

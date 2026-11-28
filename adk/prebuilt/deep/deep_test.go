@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,20 +20,64 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/backgroundtask"
+	backgroundshell "github.com/cloudwego/eino/adk/backgroundtask/shell"
+	durablesubagent "github.com/cloudwego/eino/adk/backgroundtask/subagent"
+	backgroundtool "github.com/cloudwego/eino/adk/backgroundtask/tool"
+	"github.com/cloudwego/eino/adk/filesystem"
+	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
+	adksession "github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+func mustNewBackgroundManager(
+	t testing.TB,
+	ctx context.Context,
+	config *backgroundtask.Config,
+) *backgroundtask.Manager {
+	t.Helper()
+	if config == nil {
+		config = &backgroundtask.Config{}
+	} else {
+		copy := *config
+		config = &copy
+	}
+	if config.SendTaskCreatedEvent == nil {
+		config.SendTaskCreatedEvent = func(context.Context, *backgroundtask.Task) error { return nil }
+	}
+	manager, err := backgroundtask.New(ctx, config)
+	require.NoError(t, err)
+	return manager
+}
+
+func mustDeepDurableExecutor(
+	t *testing.T,
+) *durablesubagent.Executor[*schema.Message] {
+	t.Helper()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	executor, err := durablesubagent.NewExecutor(
+		&durablesubagent.ExecutorConfig[*schema.Message]{
+			SessionStore: store, CheckPointStore: store,
+		},
+	)
+	require.NoError(t, err)
+	return executor
+}
 
 type sequentialAgenticModel struct {
 	responses []*schema.AgenticMessage
@@ -89,6 +133,56 @@ func readAgenticText(msg *schema.AgenticMessage) string {
 	return ""
 }
 
+func readAgenticInputText(msg *schema.AgenticMessage) string {
+	if msg == nil {
+		return ""
+	}
+	for _, block := range msg.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		if block.UserInputText != nil {
+			return block.UserInputText.Text
+		}
+	}
+	return ""
+}
+
+type recordingDeepModel struct {
+	mu       sync.Mutex
+	inputs   [][]*schema.Message
+	response *schema.Message
+}
+
+func (m *recordingDeepModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := append([]*schema.Message{}, input...)
+	m.inputs = append(m.inputs, copied)
+	if m.response != nil {
+		return m.response, nil
+	}
+	return schema.AssistantMessage("ok", nil), nil
+}
+
+func (m *recordingDeepModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *recordingDeepModel) snapshotInputs() [][]*schema.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]*schema.Message, len(m.inputs))
+	for i, input := range m.inputs {
+		out[i] = append([]*schema.Message{}, input...)
+	}
+	return out
+}
+
 type mockSearchTool struct{}
 
 func (m *mockSearchTool) Info(context.Context) (*schema.ToolInfo, error) {
@@ -100,6 +194,28 @@ func (m *mockSearchTool) Info(context.Context) (*schema.ToolInfo, error) {
 
 func (m *mockSearchTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
 	return "latest news search result", nil
+}
+
+type deepMockShell struct{}
+
+func (m *deepMockShell) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	return &filesystem.ExecuteResponse{Output: "ok"}, nil
+}
+
+type deepRecoverableShellStub struct{}
+
+func (*deepRecoverableShellStub) StartCommand(
+	context.Context,
+	*backgroundshell.StartCommandRequest,
+) (backgroundtool.Run, error) {
+	return nil, nil
+}
+
+func (*deepRecoverableShellStub) RecoverCommand(
+	context.Context,
+	*backgroundshell.RecoverCommandRequest,
+) (backgroundtool.Run, error) {
+	return nil, nil
 }
 
 func TestGenModelInput(t *testing.T) {
@@ -121,6 +237,56 @@ func TestGenModelInput(t *testing.T) {
 		assert.Equal(t, "hello", msgs[1].Content)
 	})
 
+	t.Run("WithInstructionPreservesLeadingSystemMessage", func(t *testing.T) {
+		input := &adk.AgentInput{
+			Messages: []*schema.Message{
+				schema.SystemMessage("old"),
+				schema.UserMessage("hello"),
+			},
+		}
+
+		msgs, err := typedGenModelInput(ctx, "new", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 3)
+		assert.Equal(t, schema.System, msgs[0].Role)
+		assert.Equal(t, "new", msgs[0].Content)
+		assert.Same(t, input.Messages[0], msgs[1])
+		assert.Same(t, input.Messages[1], msgs[2])
+
+		systemCount := 0
+		for _, msg := range msgs {
+			if msg.Role == schema.System {
+				systemCount++
+			}
+		}
+		assert.Equal(t, 2, systemCount)
+	})
+
+	t.Run("WithInstructionPreservesLeadingAgenticSystemMessage", func(t *testing.T) {
+		input := &adk.TypedAgentInput[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				schema.SystemAgenticMessage("old"),
+				schema.UserAgenticMessage("hello"),
+			},
+		}
+
+		msgs, err := typedGenModelInput(ctx, "new", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 3)
+		assert.Equal(t, schema.AgenticRoleTypeSystem, msgs[0].Role)
+		assert.Equal(t, "new", readAgenticInputText(msgs[0]))
+		assert.Same(t, input.Messages[0], msgs[1])
+		assert.Same(t, input.Messages[1], msgs[2])
+
+		systemCount := 0
+		for _, msg := range msgs {
+			if msg.Role == schema.AgenticRoleTypeSystem {
+				systemCount++
+			}
+		}
+		assert.Equal(t, 2, systemCount)
+	})
+
 	t.Run("WithoutInstruction", func(t *testing.T) {
 		input := &adk.AgentInput{
 			Messages: []*schema.Message{
@@ -134,10 +300,87 @@ func TestGenModelInput(t *testing.T) {
 		assert.Equal(t, schema.User, msgs[0].Role)
 		assert.Equal(t, "hello", msgs[0].Content)
 	})
+
+	t.Run("WithoutInstructionPreservesLeadingSystemMessage", func(t *testing.T) {
+		input := &adk.AgentInput{
+			Messages: []*schema.Message{
+				schema.SystemMessage("old"),
+				schema.UserMessage("hello"),
+			},
+		}
+
+		msgs, err := typedGenModelInput(ctx, "", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 2)
+		assert.Equal(t, schema.System, msgs[0].Role)
+		assert.Equal(t, "old", msgs[0].Content)
+		assert.Equal(t, schema.User, msgs[1].Role)
+		assert.Equal(t, "hello", msgs[1].Content)
+	})
+}
+
+func TestDeepAgentTurn2DeduplicatesPersistedLeadingSystemMessage(t *testing.T) {
+	ctx := context.Background()
+	store := adksession.NewInMemoryStore[*schema.Message](nil)
+	model := &recordingDeepModel{}
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              model,
+		Instruction:            "you are deep agent",
+		MaxIteration:           2,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+	})
+	assert.NoError(t, err)
+	if err != nil {
+		return
+	}
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    "deep-leading-system-dedup",
+		SessionStore: store,
+	})
+	for _, input := range [][]adk.Message{
+		{schema.UserMessage("turn one")},
+		{schema.UserMessage("turn two")},
+	} {
+		iter := runner.Run(ctx, input)
+		for {
+			if _, ok := iter.Next(); !ok {
+				break
+			}
+		}
+	}
+
+	inputs := model.snapshotInputs()
+	assert.Len(t, inputs, 2)
+	if len(inputs) < 2 {
+		return
+	}
+	secondTurnInput := inputs[1]
+	assert.NotEmpty(t, secondTurnInput)
+	if len(secondTurnInput) == 0 {
+		return
+	}
+	assert.Equal(t, schema.System, secondTurnInput[0].Role)
+	assert.Equal(t, "you are deep agent", secondTurnInput[0].Content)
+
+	systemCount := 0
+	for _, msg := range secondTurnInput {
+		if msg.Role == schema.System {
+			systemCount++
+		}
+	}
+	assert.Equal(t, 1, systemCount)
+	if len(secondTurnInput) > 1 {
+		assert.NotEqual(t, schema.System, secondTurnInput[1].Role, "reconstructed system message must not remain after fresh system message")
+	}
 }
 
 func TestWriteTodos(t *testing.T) {
-	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false})
+	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false}, nil)
 	assert.NoError(t, err)
 
 	wt := m[0].(*typedAppendPromptTool[*schema.Message]).t.(tool.InvokableTool)
@@ -148,6 +391,291 @@ func TestWriteTodos(t *testing.T) {
 	result, err := wt.InvokableRun(context.Background(), args)
 	assert.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
+}
+
+func TestDeepAgentFilesystemExecuteDefaults(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+
+	tests := []struct {
+		name        string
+		cfg         *Config
+		wantToolLen int
+	}{
+		{
+			name: "backend and shell",
+			cfg: &Config{
+				WithoutWriteTodos: true,
+				Backend:           backend,
+				Shell:             &deepMockShell{},
+			},
+			wantToolLen: 7,
+		},
+		{
+			name: "shell only",
+			cfg: &Config{
+				WithoutWriteTodos: true,
+				Shell:             &deepMockShell{},
+			},
+			wantToolLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, tt.cfg, nil)
+			assert.NoError(t, err)
+			assert.Len(t, handlers, 1)
+
+			_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
+			assert.NoError(t, err)
+			assert.NotNil(t, runCtx)
+			assert.Len(t, runCtx.Tools, tt.wantToolLen)
+
+			toolNames := make(map[string]bool)
+			var executeTool tool.BaseTool
+			for _, tl := range runCtx.Tools {
+				info, infoErr := tl.Info(ctx)
+				assert.NoError(t, infoErr)
+				toolNames[info.Name] = true
+				if info.Name == filesystem2.ToolNameExecute {
+					executeTool = tl
+				}
+			}
+
+			assert.NotNil(t, executeTool)
+			assert.False(t, toolNames["execute_output"])
+			assert.False(t, toolNames["execute_wait"])
+			assert.False(t, toolNames["execute_stop"])
+			assert.False(t, toolNames["execute_list"])
+
+			info, err := executeTool.Info(ctx)
+			assert.NoError(t, err)
+			js, err := info.ParamsOneOf.ToJSONSchema()
+			assert.NoError(t, err)
+			_, ok := js.Properties.Get("command")
+			assert.True(t, ok)
+			_, ok = js.Properties.Get("mode")
+			assert.False(t, ok)
+			_, ok = js.Properties.Get("wait_ms")
+			assert.False(t, ok)
+		})
+	}
+}
+
+func TestDeepAgentManagerWiring(t *testing.T) {
+	ctx := context.Background()
+
+	// With a Manager, the top-level built-in handlers route execute through it, so
+	// the execute tool gains a run_in_background field.
+	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
+	defer func() { _ = mgr.Close(ctx) }()
+
+	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
+		WithoutWriteTodos: true,
+	}, &BackgroundConfig{
+		Manager:    mgr,
+		Executors:  backgroundtask.NewExecutorRegistry(),
+		LocalShell: &LocalShellConfig{Shell: &deepMockShell{}},
+	})
+	assert.NoError(t, err)
+	assert.Len(t, handlers, 1)
+
+	_, runCtx, err := handlers[0].BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
+	assert.NoError(t, err)
+	assert.NotNil(t, runCtx)
+	assert.Len(t, runCtx.Tools, 1)
+
+	info, err := runCtx.Tools[0].Info(ctx)
+	assert.NoError(t, err)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	_, ok := js.Properties.Get("run_in_background")
+	assert.True(t, ok, "managed execute must expose run_in_background")
+
+	// Without a Manager, the same handlers produce a command-only execute tool.
+	plain, err := buildTypedBuiltinAgentMiddlewares(ctx, &Config{
+		WithoutWriteTodos: true,
+		Shell:             &deepMockShell{},
+	}, nil)
+	assert.NoError(t, err)
+	_, plainCtx, err := plain[0].BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
+	assert.NoError(t, err)
+	plainInfo, err := plainCtx.Tools[0].Info(ctx)
+	assert.NoError(t, err)
+	plainJS, err := plainInfo.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	_, ok = plainJS.Properties.Get("run_in_background")
+	assert.False(t, ok, "unmanaged execute must not expose run_in_background")
+}
+
+func TestDeepRecoverableShellDoesNotCreateLocalRunner(t *testing.T) {
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer manager.Close(context.Background())
+	shell := &deepRecoverableShellStub{}
+	background := &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+		RecoverableShell: &RecoverableShellConfig{
+			Shell: shell,
+		},
+	}
+
+	require.Same(t, shell, deepRecoverableShell(background))
+	require.Empty(t, deepShellOutputDir(background))
+	runner, err := deepLocalShellRunner(background)
+	require.NoError(t, err)
+	require.Nil(t, runner)
+
+	handlers, err := buildTypedBuiltinAgentMiddlewares(
+		context.Background(),
+		&Config{WithoutWriteTodos: true},
+		background,
+	)
+	require.NoError(t, err)
+	require.Len(t, handlers, 1)
+}
+
+func TestDeepBackgroundConfigRequiresExplicitCapabilities(t *testing.T) {
+	backgroundType := reflect.TypeOf(BackgroundConfig{})
+	for _, field := range []string{
+		"Manager", "SubAgents", "RecoverableShell", "LocalShell",
+		"ForegroundTimeoutMs", "ShouldAutoBackground",
+	} {
+		_, ok := backgroundType.FieldByName(field)
+		require.True(t, ok, "BackgroundConfig.%s must exist", field)
+	}
+	for _, field := range []string{"Local", "Durable"} {
+		_, ok := backgroundType.FieldByName(field)
+		require.False(t, ok, "BackgroundConfig.%s must stay removed", field)
+	}
+	_, hasLegacyRecoverableShell := reflect.TypeOf(Config{}).FieldByName("RecoverableShell")
+	require.False(t, hasLegacyRecoverableShell)
+
+	_, err := New(context.Background(), &Config{Background: &BackgroundConfig{}})
+	require.ErrorContains(t, err, "Manager is required")
+
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+	}})
+	require.ErrorContains(t, err, "at least one background capability is required")
+
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Manager:    manager,
+		Executors:  backgroundtask.NewExecutorRegistry(),
+		LocalShell: &LocalShellConfig{},
+	}})
+	require.ErrorContains(t, err, "requires Shell or StreamingShell")
+
+	_, err = New(context.Background(), &Config{Background: &BackgroundConfig{
+		Manager:   manager,
+		Executors: backgroundtask.NewExecutorRegistry(),
+		SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{},
+	}})
+	require.ErrorContains(t, err, "Executor is required")
+
+}
+
+func TestDeepSubAgentBackgroundForwardsRunOptionsFactories(t *testing.T) {
+	factory := func() ([]adk.AgentRunOption, error) {
+		return []adk.AgentRunOption{adk.WithTimelineEvents()}, nil
+	}
+	format := func(
+		_ context.Context,
+		agentName string,
+		message *schema.Message,
+	) (string, error) {
+		return agentName + ": " + message.Content, nil
+	}
+	manager := mustNewBackgroundManager(t, context.Background(), nil)
+	defer manager.Close(context.Background())
+	background := deepSubagentBackground(&TypedConfig[*schema.Message]{
+		Background: &TypedBackgroundConfig[*schema.Message]{
+			Manager:          manager,
+			Executors:        backgroundtask.NewExecutorRegistry(),
+			TranscriptFormat: format,
+			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+				Executor: mustDeepDurableExecutor(t),
+				RunOptionsFactories: map[string]durablesubagent.RunOptionsFactory{
+					"worker": factory,
+				},
+			},
+		},
+	})
+	require.NotNil(t, background.Durable)
+	require.NotNil(t, background.Durable.RunOptionsFactories["worker"])
+	options, err := background.Durable.RunOptionsFactories["worker"]()
+	require.NoError(t, err)
+	assert.Len(t, options, 1)
+	formatted, err := background.TranscriptFormat(
+		context.Background(), "worker", schema.AssistantMessage("done", nil),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "worker: done", formatted)
+}
+
+// NewTyped with a Manager injects the task_output/task_stop control tools and a
+// background-capable subagent tool exactly once at the top level.
+func TestDeepAgentNewTypedWithManager(t *testing.T) {
+	ctx := context.Background()
+	mgr := mustNewBackgroundManager(t, ctx, &backgroundtask.Config{})
+	defer func() { _ = mgr.Close(ctx) }()
+
+	cm := mockModel.NewMockToolCallingChatModel(gomock.NewController(t))
+	agent, err := New(ctx, &Config{
+		Name:        "deep",
+		Description: "deep agent",
+		ChatModel:   cm,
+		Shell:       &deepMockShell{},
+		Background: &BackgroundConfig{
+			Manager:   mgr,
+			Executors: backgroundtask.NewExecutorRegistry(),
+			SubAgents: &TypedDurableSubAgentConfig[*schema.Message]{
+				Executor: mustDeepDurableExecutor(t),
+			},
+		},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, agent)
+}
+
+func TestDeepAgentManualFilesystemMiddlewarePath(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	fsMW, err := filesystem2.New(ctx, &filesystem2.MiddlewareConfig{
+		Shell:             &deepMockShell{},
+		ExecuteToolConfig: &filesystem2.ExecuteToolConfig{},
+	})
+	assert.NoError(t, err)
+
+	_, runCtx, err := fsMW.BeforeAgent(ctx, &adk.TypedChatModelAgentContext[*schema.Message]{})
+	assert.NoError(t, err)
+	assert.Len(t, runCtx.Tools, 1)
+	info, err := runCtx.Tools[0].Info(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, filesystem2.ToolNameExecute, info.Name)
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	_, ok := js.Properties.Get("command")
+	assert.True(t, ok)
+
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              cm,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+		Handlers:               []adk.ChatModelAgentMiddleware{fsMW},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, agent)
 }
 
 func TestDeepSubAgentSharesSessionValues(t *testing.T) {

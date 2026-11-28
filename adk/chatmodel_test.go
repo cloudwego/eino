@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -2413,5 +2414,160 @@ func TestToolAliasesPropagation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "BUG", args["pattern"], "alias 'grep_content' should be remapped to 'pattern' for handler-added tool")
 		assert.NotContains(t, args, "grep_content")
+	})
+}
+
+func TestMarkRuntimeGeneratedLeadingSystem(t *testing.T) {
+	t.Run("no system messages in generated output", func(t *testing.T) {
+		input := []*schema.Message{schema.UserMessage("hi")}
+		generated := []*schema.Message{schema.UserMessage("hi"), schema.AssistantMessage("hello", nil)}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		for _, msg := range generated {
+			_, ok := msg.Extra[extraKeyRuntimeGeneratedSystemMessage]
+			assert.False(t, ok, "no system messages should be marked")
+		}
+	})
+
+	t.Run("single generated system message with empty input", func(t *testing.T) {
+		input := []*schema.Message{}
+		sys := schema.SystemMessage("gen-sys")
+		EnsureMessageID(sys)
+		generated := []*schema.Message{sys, schema.UserMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		val, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok, "generated system message should be marked")
+		assert.Equal(t, true, val)
+		_, ok = generated[1].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.False(t, ok, "non-system message should not be marked")
+	})
+
+	t.Run("multiple generated system messages", func(t *testing.T) {
+		input := []*schema.Message{}
+		sys1 := schema.SystemMessage("sys1")
+		EnsureMessageID(sys1)
+		sys2 := schema.SystemMessage("sys2")
+		EnsureMessageID(sys2)
+		generated := []*schema.Message{sys1, sys2, schema.UserMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		val1, ok1 := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok1)
+		assert.Equal(t, true, val1)
+		val2, ok2 := generated[1].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok2)
+		assert.Equal(t, true, val2)
+	})
+
+	t.Run("caller-supplied system message passed through unchanged", func(t *testing.T) {
+		callerSys := schema.SystemMessage("caller-sys")
+		EnsureMessageID(callerSys)
+		input := []*schema.Message{callerSys, schema.UserMessage("hi")}
+		generated := []*schema.Message{callerSys, schema.UserMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		_, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.False(t, ok, "caller-supplied system message should not be marked")
+	})
+
+	t.Run("new system prepended before caller-supplied system", func(t *testing.T) {
+		callerSys := schema.SystemMessage("caller-sys")
+		EnsureMessageID(callerSys)
+		input := []*schema.Message{callerSys, schema.UserMessage("hi")}
+		newSys := schema.SystemMessage("new-sys")
+		EnsureMessageID(newSys)
+		generated := []*schema.Message{newSys, callerSys, schema.UserMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		val, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok, "newly prepended system message should be marked")
+		assert.Equal(t, true, val)
+		_, ok = generated[1].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.False(t, ok, "caller-supplied passthrough system should not be marked")
+	})
+
+	t.Run("input has system but generated has different one", func(t *testing.T) {
+		callerSys := schema.SystemMessage("old")
+		EnsureMessageID(callerSys)
+		input := []*schema.Message{callerSys, schema.UserMessage("hi")}
+		newSys := schema.SystemMessage("new")
+		EnsureMessageID(newSys)
+		generated := []*schema.Message{newSys, schema.UserMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		val, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok, "different system message should be marked as runtime-generated")
+		assert.Equal(t, true, val)
+	})
+
+	t.Run("agentic messages - generated system marked", func(t *testing.T) {
+		input := []*schema.AgenticMessage{}
+		sys := schema.SystemAgenticMessage("gen-sys")
+		EnsureMessageID(sys)
+		generated := []*schema.AgenticMessage{sys, schema.UserAgenticMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		val, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok)
+		assert.Equal(t, true, val)
+	})
+
+	t.Run("agentic messages - passthrough not marked", func(t *testing.T) {
+		callerSys := schema.SystemAgenticMessage("caller-sys")
+		EnsureMessageID(callerSys)
+		input := []*schema.AgenticMessage{callerSys}
+		generated := []*schema.AgenticMessage{callerSys, schema.UserAgenticMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		_, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.False(t, ok)
+	})
+
+	t.Run("generated messages have no IDs - all leading systems marked", func(t *testing.T) {
+		callerSys := schema.SystemMessage("caller")
+		EnsureMessageID(callerSys)
+		input := []*schema.Message{callerSys}
+		genSys := schema.SystemMessage("gen")
+		generated := []*schema.Message{genSys, schema.UserMessage("hi")}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		val, ok := generated[0].Extra[extraKeyRuntimeGeneratedSystemMessage]
+		assert.True(t, ok, "system with no ID should be marked (no durable identity match)")
+		assert.Equal(t, true, val)
+	})
+
+	t.Run("empty generated messages", func(t *testing.T) {
+		input := []*schema.Message{schema.SystemMessage("sys")}
+		generated := []*schema.Message{}
+		markRuntimeGeneratedLeadingSystem(input, generated)
+		assert.Empty(t, generated)
+	})
+}
+
+func TestDefaultGenModelInput_PreservesLeadingSystem(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("preserves caller system message", func(t *testing.T) {
+		got, err := defaultGenModelInput(ctx, "fresh instruction", &AgentInput{
+			Messages: []*schema.Message{
+				schema.SystemMessage("caller instruction"),
+				schema.UserMessage("hi"),
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, got, 3)
+		assert.Equal(t, "fresh instruction", got[0].Content)
+		assert.Equal(t, schema.System, got[1].Role)
+		assert.Equal(t, "caller instruction", got[1].Content)
+		assert.Equal(t, schema.User, got[2].Role)
+		assert.Equal(t, "hi", got[2].Content)
+	})
+
+	t.Run("preserves leading system reminder", func(t *testing.T) {
+		reminder := schema.SystemMessage("<reminder>")
+		internal.MarkSystemReminder(reminder)
+		got, err := defaultGenModelInput(ctx, "fresh instruction", &AgentInput{
+			Messages: []*schema.Message{
+				reminder,
+				schema.UserMessage("hi"),
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, got, 3)
+		assert.Equal(t, "fresh instruction", got[0].Content)
+		assert.Equal(t, "<reminder>", got[1].Content)
+		assert.Equal(t, schema.User, got[2].Role)
 	})
 }

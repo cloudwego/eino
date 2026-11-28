@@ -539,6 +539,7 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 		return MessageInputPart{
 			Type:             ChatMessagePartTypeToolSearchResult,
 			ToolSearchResult: toolPart.ToolSearchResult,
+			Extra:            toolPart.Extra,
 		}, nil
 	default:
 		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
@@ -577,4 +578,24 @@ func (tr *ToolResult) ToMessageInputParts() ([]MessageInputPart, error) {
 		}
 	}
 	return result, nil
+}
+
+// TextContent returns the text parts of the result joined by newlines, for callers that need a plain string: a model
+// adapter whose request format has no place for parts in a tool message, a log line, a test. It is empty when the
+// result carries only non-text parts.
+func (tr *ToolResult) TextContent() string {
+	if tr == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range tr.Parts {
+		if part.Type != ToolPartTypeText || part.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(part.Text)
+	}
+	return b.String()
 }

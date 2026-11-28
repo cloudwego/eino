@@ -25,6 +25,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -68,7 +69,7 @@ type FinalizerBuilder = TypedFinalizerBuilder[*schema.Message]
 // as DefaultFinalize does after all handlers have run. For example, with
 // PreserveSkills and a system message in originalMessages, the final output is:
 //
-//	[system message, preserved skill message, processed summary]
+//	[system message, processed summary, preserved skill message]
 //
 // Example:
 //
@@ -95,7 +96,7 @@ func NewFinalizer() *FinalizerBuilder {
 // For example, with PreserveSkills and a system message in
 // originalMessages, the final output is:
 //
-//	[system message, preserved skill message, processed summary]
+//	[system message, processed summary, preserved skill message]
 func (b *TypedFinalizerBuilder[M]) Build() (TypedFinalizeFunc[M], error) {
 	if len(b.errs) > 0 {
 		msgs := make([]string, len(b.errs))
@@ -136,10 +137,10 @@ func (b *TypedFinalizerBuilder[M]) Build() (TypedFinalizeFunc[M], error) {
 			return nil, err
 		}
 
-		result := make([]M, 0, len(systemMsgs)+len(extraMessages)+1)
+		result := make([]M, 0, len(systemMsgs)+1+len(extraMessages))
 		result = append(result, systemMsgs...)
-		result = append(result, extraMessages...)
 		result = append(result, processed)
+		result = append(result, extraMessages...)
 		return result, nil
 	}, nil
 }
@@ -173,7 +174,8 @@ type PreserveSkillsConfig struct {
 
 // PreserveSkills preserves skill contents loaded by the ADK skill middleware.
 // It scans the conversation for matching skill tool calls and returns the preserved
-// skill content as a user message before the summary.
+// skill content as a user message placed after the summary, marked as read-only
+// historical context (invoked earlier in the session, before compaction).
 //
 // Example:
 //
@@ -182,7 +184,7 @@ type PreserveSkillsConfig struct {
 //
 // When skill content is found, PreserveSkills returns:
 //
-//	[]M{user("<preserved foo: bar>"), S}
+//	[]M{S, user("<preserved foo: bar>")}
 func (b *TypedFinalizerBuilder[M]) PreserveSkills(config *PreserveSkillsConfig) *TypedFinalizerBuilder[M] {
 	if err := config.check(); err != nil {
 		b.errs = append(b.errs, fmt.Errorf("PreserveSkills: %w", err))
@@ -210,7 +212,7 @@ func (b *TypedFinalizerBuilder[M]) PreserveSkills(config *PreserveSkillsConfig) 
 		}
 
 		preserved := makeUserMsg[M](skillText)
-		setMsgExtra(preserved, extraKeyContentType, string(contentTypeSkills))
+		internal.SetMessageExtra(preserved, extraKeyContentType, string(contentTypeSkills))
 		return []M{preserved, summary}, nil
 	})
 	return b

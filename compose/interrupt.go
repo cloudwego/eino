@@ -277,6 +277,8 @@ const (
 	AddressSegmentNode AddressSegmentType = "node"
 	// AddressSegmentTool represents a segment of an address that corresponds to a specific tool call within a ToolsNode.
 	AddressSegmentTool AddressSegmentType = "tool"
+	// AddressSegmentMiddleware represents a segment of an address that corresponds to a named middleware frame.
+	AddressSegmentMiddleware AddressSegmentType = "middleware"
 	// AddressSegmentRunnable represents a segment of an address that corresponds to an instance of the Runnable interface.
 	// Currently the possible Runnable types are: Graph, Workflow and Chain.
 	// Note that for sub-graphs added through AddGraphNode to another graph is not a Runnable.
