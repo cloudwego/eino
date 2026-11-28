@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -937,6 +938,44 @@ func TestAgentTool_InvokableRun_StreamingVariant(t *testing.T) {
 	}
 }
 
+func TestStampAgentToolSessionEvent(t *testing.T) {
+	msg := schema.AssistantMessage("child", nil)
+	event := &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{Message: msg, Role: schema.Assistant},
+		},
+	}
+
+	stampAgentToolSessionEvent(event, "agent_tool:child")
+
+	require.NotNil(t, event.SessionEventVariant.Event)
+	assert.Equal(t, "agent_tool:child", event.SessionEventVariant.SessionID)
+	assert.Empty(t, event.SessionEventVariant.Event.EventID)
+	assert.False(t, event.SessionEventVariant.Event.Timestamp.IsZero())
+	assert.Equal(t, SessionEventMessage, event.SessionEventVariant.Event.Kind)
+}
+
+func TestStampAgentToolSessionEvent_Streaming(t *testing.T) {
+	event := &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				IsStreaming:   true,
+				MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("child", nil)}),
+				Role:          schema.Assistant,
+			},
+		},
+	}
+
+	stampAgentToolSessionEvent(event, "agent_tool:child")
+
+	ref := event.SessionEventVariant.MessageStreamRef
+	require.NotNil(t, ref)
+	assert.Equal(t, "agent_tool:child", event.SessionEventVariant.SessionID)
+	assert.Empty(t, ref.EventID)
+	assert.False(t, ref.Timestamp.IsZero())
+	assert.Equal(t, SessionEventMessage, ref.Kind)
+}
+
 func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *testing.T) {
 	ctx := context.Background()
 
@@ -1238,4 +1277,194 @@ func TestCrossTypeAgentToolGracefulError(t *testing.T) {
 		assert.Contains(t, capturedErr.Error(), "cross-message-type",
 			"Error should mention cross-message-type incompatibility")
 	}
+}
+
+// --- Event receivers ---
+
+// collectForwarded drains a parent generator's iterator and returns the content of
+// every non-streaming message event forwarded to it. Runs in a goroutine; the
+// caller closes the generator to end the drain.
+func collectForwarded(iter *AsyncIterator[*AgentEvent], out *[]string, done chan<- struct{}) {
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			close(done)
+			return
+		}
+		if e.Output != nil && e.Output.MessageOutput != nil && !e.Output.MessageOutput.IsStreaming &&
+			e.Output.MessageOutput.Message != nil {
+			*out = append(*out, e.Output.MessageOutput.Message.Content)
+		}
+	}
+}
+
+func TestAgentToolEventReceiver_ParentReceives(t *testing.T) {
+	ctx := context.Background()
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	var got []string
+	done := make(chan struct{})
+	go collectForwarded(iter, &got, done)
+
+	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
+		withParentEventReceiver(gen))
+	require.NoError(t, err)
+
+	gen.Close()
+	<-done
+	assert.Contains(t, got, "child output")
+}
+
+func TestAgentToolEventReceiver_PreservesChildSessionEnvelope(t *testing.T) {
+	ctx := context.Background()
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	var got *AgentEvent
+	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
+		agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+			return append(current, func(event *AgentEvent) { got = event })
+		}))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.SessionEventVariant)
+	assert.Contains(t, got.SessionEventVariant.SessionID, "agent_tool:")
+	require.NotNil(t, got.SessionEventVariant.Event)
+	assert.Equal(t, SessionEventMessage, got.SessionEventVariant.Event.Kind)
+}
+
+func TestAttack_AgentToolForeignSessionEventsDoNotInheritParentTurnID(t *testing.T) {
+	tests := []struct {
+		name            string
+		enableStreaming bool
+		wantRef         bool
+	}{
+		{name: "materialized event"},
+		{name: "stream ref", enableStreaming: true, wantRef: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			inner, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "turn-id-child-" + strings.ReplaceAll(tt.name, " ", "-"),
+				Description: "child",
+				Model:       &emitOnceModel{},
+			})
+			require.NoError(t, err)
+			at := NewAgentTool(ctx, inner).(tool.InvokableTool)
+
+			ctx = contextWithSessionEventContext[*schema.Message](ctx, nil, nil, "parent-turn-id")
+			var got *AgentEvent
+			opts := []tool.Option{
+				withAgentToolOptions(inner.Name(ctx), []AgentRunOption{withEnableSessionEvents()}),
+				agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+					return append(current, func(event *AgentEvent) {
+						if event.SessionEventVariant == nil {
+							return
+						}
+						if !tt.wantRef && event.SessionEventVariant.Event != nil {
+							got = event
+						}
+						if tt.wantRef && event.SessionEventVariant.MessageStreamRef != nil {
+							got = event
+						}
+					})
+				}),
+			}
+			if tt.enableStreaming {
+				opts = append([]tool.Option{withAgentToolEnableStreaming(true)}, opts...)
+			}
+			_, err = at.InvokableRun(ctx, `{"request":"q"}`, opts...)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			require.NotNil(t, got.SessionEventVariant)
+			require.Contains(t, got.SessionEventVariant.SessionID, "agent_tool:")
+			if tt.wantRef {
+				require.NotNil(t, got.SessionEventVariant.MessageStreamRef)
+				assert.Empty(t, got.SessionEventVariant.MessageStreamRef.TurnID)
+				return
+			}
+			require.NotNil(t, got.SessionEventVariant.Event)
+			assert.Empty(t, got.SessionEventVariant.Event.TurnID)
+		})
+	}
+}
+
+func TestAgentToolEventReceiver_LaterTransformCanSuppressParent(t *testing.T) {
+	ctx := context.Background()
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	var got []string
+	done := make(chan struct{})
+	go collectForwarded(iter, &got, done)
+
+	_, err := at.InvokableRun(ctx, `{"request":"q"}`,
+		withParentEventReceiver(gen),
+		agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+			require.Len(t, current, 1)
+			return current[:0]
+		}))
+	require.NoError(t, err)
+
+	gen.Close()
+	<-done
+	assert.Empty(t, got)
+}
+
+// EventReceiver delivery is best-effort: a parent generator that has already
+// stopped drops the event instead of panicking.
+func TestAgentToolEventReceiver_ClosedParentGeneratorNoPanic(t *testing.T) {
+	ctx := context.Background()
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(schema.AssistantMessage("child output", nil), nil, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	_, gen := NewAsyncIteratorPair[*AgentEvent]()
+	gen.Close()
+
+	require.NotPanics(t, func() {
+		_, err := at.InvokableRun(ctx, `{"request":"q"}`,
+			withParentEventReceiver(gen))
+		require.NoError(t, err)
+	})
+}
+
+func TestAgentToolEventReceiver_StreamingFanoutCopiesPerReceiver(t *testing.T) {
+	ctx := context.Background()
+	stream := schema.StreamReaderFromArray([]*schema.Message{
+		schema.AssistantMessage("first ", nil),
+		schema.AssistantMessage("second", nil),
+	})
+	sub := &emitEventsAgent{events: []*AgentEvent{
+		EventFromMessage(nil, stream, schema.Assistant, ""),
+	}}
+	at := NewAgentTool(ctx, sub).(tool.InvokableTool)
+
+	var got []string
+	addReceiver := func(current []agenttool.EventReceiver[*AgentEvent]) []agenttool.EventReceiver[*AgentEvent] {
+		return append(current, func(event *AgentEvent) {
+			msg, err := event.Output.MessageOutput.GetMessage()
+			require.NoError(t, err)
+			got = append(got, msg.Content)
+		})
+	}
+
+	result, err := at.InvokableRun(ctx, `{"request":"q"}`,
+		agenttool.WithEventReceiverTransform(addReceiver),
+		agenttool.WithEventReceiverTransform(addReceiver))
+	require.NoError(t, err)
+	assert.Equal(t, "first second", result)
+	assert.Equal(t, []string{"first second", "first second"}, got)
 }

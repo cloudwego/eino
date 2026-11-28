@@ -275,13 +275,13 @@ func TestPreserveSkillsViaBuilder(t *testing.T) {
 	assert.Equal(t, "system prompt", result[0].Content)
 
 	assert.Equal(t, schema.User, result[1].Role)
-	assert.Equal(t, contentTypeSkills, typedGetContentType(result[1]))
-	assert.Contains(t, result[1].Content, "test-skill")
-	assert.Contains(t, result[1].Content, "skill content 1")
+	assert.Equal(t, contentTypeSummary, typedGetContentType(result[1]))
+	assert.Contains(t, result[1].Content, "test summary")
 
 	assert.Equal(t, schema.User, result[2].Role)
-	assert.Equal(t, contentTypeSummary, typedGetContentType(result[2]))
-	assert.Contains(t, result[2].Content, "test summary")
+	assert.Equal(t, contentTypeSkills, typedGetContentType(result[2]))
+	assert.Contains(t, result[2].Content, "test-skill")
+	assert.Contains(t, result[2].Content, "skill content 1")
 }
 
 func TestBuildPreservedSkillsText(t *testing.T) {

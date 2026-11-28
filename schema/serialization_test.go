@@ -153,7 +153,6 @@ func TestRegister(t *testing.T) {
 		}()
 
 		Register[[]int]()
-		Register[map[string]any]()
 		Register[[]*testStruct1]()
 		Register[[]testStruct1]()
 

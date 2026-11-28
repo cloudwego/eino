@@ -19,11 +19,14 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/bytedance/sonic"
+	"github.com/google/uuid"
 
+	"github.com/cloudwego/eino/adk/internal/agenttool"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -61,9 +64,7 @@ func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
 }
 
 func withAgentToolEnableStreaming(enabled bool) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
-		opt.enableStreaming = enabled
-	})
+	return agenttool.WithInvocationStreaming[AgentRunOption](enabled)
 }
 
 // NewAgentTool creates a tool that wraps an agent for invocation.
@@ -74,8 +75,8 @@ func withAgentToolEnableStreaming(enabled bool) tool.Option {
 //
 // Event Streaming:
 // When EmitInternalEvents is enabled in ToolsConfig, the agent tool will emit AgentEvent
-// from the inner agent to the parent agent's AsyncGenerator, allowing real-time streaming
-// of the inner agent's output to the end-user via Runner.
+// from the inner agent to a receiver backed by the parent agent's AsyncGenerator, allowing
+// real-time streaming of the inner agent's output to the end-user via Runner.
 //
 // Note that these forwarded events are NOT recorded in the parent agent's runSession.
 // They are only emitted to the end-user and have no effect on the parent agent's state
@@ -151,17 +152,54 @@ func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error)
 	}, nil
 }
 
+// agentToolInterruptState is the JSON-encoded state captured when an AgentTool
+// invocation is interrupted. It wraps the bridge checkpoint bytes alongside
+// the synthetic child session ID so resume preserves SessionID-based event
+// filtering across interrupt/resume.
+type agentToolInterruptState struct {
+	ChildSessionID   string `json:"child_session_id"`
+	BridgeCheckpoint []byte `json:"bridge_checkpoint"`
+}
+
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
 		cancelCtx.markCheckpointAwareDescendant()
 	}
 
-	gen, enableStreaming := getEmitGeneratorAndEnableStreaming[M](opts)
+	receivers, enableStreaming := getEventReceiversAndEnableStreaming[M](opts)
 	var ms *bridgeStore
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
 
-	wasInterrupted, hasState, state := tool.GetInterruptState[[]byte](ctx)
+	wasInterrupted, hasState, rawState := tool.GetInterruptState[[]byte](ctx)
+
+	var childSessionID string
+	var bridgeCheckpoint []byte
+
+	if !wasInterrupted {
+		// First invocation — generate a globally-unique child session ID.
+		// Synthetic UUID avoids collisions with model-assigned tool call IDs
+		// (which may be reused across turns) and with user-assigned session IDs.
+		childSessionID = "agent_tool:" + uuid.NewString()
+	} else if !hasState {
+		return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
+	} else {
+		// Resume — try the JSON envelope (introduced when SessionID-based event
+		// filtering landed). If the envelope does not parse or carries no bridge
+		// checkpoint, the rawState is from a pre-envelope version: treat the
+		// raw bytes as the bridge checkpoint and synthesize a fresh
+		// childSessionID. Pre-envelope checkpoints predate session persistence,
+		// so the synthesized ID has no parent-session filter to coordinate with.
+		var wrapped agentToolInterruptState
+		if json.Unmarshal(rawState, &wrapped) == nil && len(wrapped.BridgeCheckpoint) > 0 {
+			childSessionID = wrapped.ChildSessionID
+			bridgeCheckpoint = wrapped.BridgeCheckpoint
+		} else {
+			childSessionID = "agent_tool:" + uuid.NewString()
+			bridgeCheckpoint = rawState
+		}
+	}
+
 	if !wasInterrupted {
 		ms = newBridgeStore()
 
@@ -169,11 +207,6 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		if at.fullChatHistoryAsInput {
 			var zero M
 			if _, ok := any(zero).(*schema.Message); !ok {
-				// fullChatHistoryAsInput is only supported for *schema.Message agents and will not
-				// be extended to *schema.AgenticMessage. The chat history format and role semantics
-				// differ fundamentally between Message and AgenticMessage, and the history rewriting
-				// logic (role attribution, system message filtering, transfer messages) is specific
-				// to the Message model.
 				return "", fmt.Errorf("fullChatHistoryAsInput is only supported for *schema.Message agents")
 			}
 			msgInput, histErr := getReactChatHistory(ctx, at.agent.Name(ctx))
@@ -197,11 +230,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		iter = runner.Run(ctx, input,
 			append(extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
-		if !hasState {
-			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
-		}
-
-		ms = newResumeBridgeStore(bridgeCheckpointID, state)
+		ms = newResumeBridgeStore(bridgeCheckpointID, bridgeCheckpoint)
 
 		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
@@ -231,7 +260,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			return "", event.Err
 		}
 
-		if gen != nil {
+		if len(receivers) > 0 {
 			if event.Action == nil || event.Action.Interrupted == nil {
 				if parentRunCtx := getRunCtx(ctx); parentRunCtx != nil && len(parentRunCtx.RunPath) > 0 {
 					rp := make([]RunStep, 0, len(parentRunCtx.RunPath)+len(event.RunPath))
@@ -239,9 +268,17 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					rp = append(rp, event.RunPath...)
 					event.RunPath = rp
 				}
-				tmp := copyTypedAgentEvent(event)
-				gen.Send(event)
-				event = tmp
+				// Tag forwarded events with the child session ID so live consumers
+				// can distinguish child timeline events and the parent's persistence
+				// loop can skip them.
+				stampAgentToolSessionEvent(event, childSessionID)
+				// Each receiver gets an independent copy. In particular, streaming
+				// MessageStreams are read-once, so sharing one event across the parent
+				// generator, an output-file receiver, and AgentTool's own final-result
+				// extraction would race or consume another recipient's stream.
+				for _, receiver := range receivers {
+					receiver(copyTypedAgentEvent(event))
+				}
 			}
 		}
 
@@ -257,7 +294,17 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
 
-		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", data,
+		// Wrap bridge checkpoint with childSessionID so resume can recover it.
+		wrapped := agentToolInterruptState{
+			ChildSessionID:   childSessionID,
+			BridgeCheckpoint: data,
+		}
+		wrappedBytes, mErr := json.Marshal(wrapped)
+		if mErr != nil {
+			return "", fmt.Errorf("agent_tool: failed to encode interrupt state: %w", mErr)
+		}
+
+		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", wrappedBytes,
 			lastEvent.Action.internalInterrupted)
 	}
 
@@ -279,47 +326,27 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 	return ret, nil
 }
 
-// agentToolOptions is a wrapper structure used to convert AgentRunOption slices to tool.Option.
-// It stores the agent name and corresponding run options for tool-specific processing.
-type agentToolOptions struct {
-	agentName       string
-	opts            []AgentRunOption
-	enableStreaming bool
-}
-
-// typedAgentToolEventOptions carries the parent runner's event generator for a
-// specific message type. This keeps forwarded internal events type-compatible
-// with the parent event stream.
-type typedAgentToolEventOptions[M MessageType] struct {
-	generator *AsyncGenerator[*TypedAgentEvent[M]]
-}
-
 func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
-		opt.agentName = agentName
-		opt.opts = opts
-	})
+	return agenttool.WithInvocationOptions(agentName, opts)
 }
 
-func withAgentToolEventGenerator(gen *AsyncGenerator[*AgentEvent]) tool.Option {
-	return withTypedAgentToolEventGenerator(gen)
-}
-
-func withTypedAgentToolEventGenerator[M MessageType](gen *AsyncGenerator[*TypedAgentEvent[M]]) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(o *typedAgentToolEventOptions[M]) {
-		o.generator = gen
+func withParentEventReceiver[M MessageType](gen *AsyncGenerator[*TypedAgentEvent[M]]) tool.Option {
+	return agenttool.WithEventReceiverTransform(func(current []agenttool.EventReceiver[*TypedAgentEvent[M]]) []agenttool.EventReceiver[*TypedAgentEvent[M]] {
+		return append(current, func(event *TypedAgentEvent[M]) {
+			// A parent turn may close its generator while a background-capable
+			// AgentTool invocation is still finishing. EventReceiver is best-effort,
+			// so a stopped downstream consumer drops the event rather than panicking.
+			gen.trySend(event)
+		})
 	})
 }
 
 func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
-	var ret []AgentRunOption
-	for _, opt := range opts {
-		o := tool.GetImplSpecificOptions[agentToolOptions](nil, opt)
-		if o != nil && o.agentName == agentName {
-			ret = append(ret, o.opts...)
-		}
-	}
-	return ret
+	_, _, resolved := agenttool.ResolveInvocationOptions[
+		*TypedAgentEvent[Message],
+		AgentRunOption,
+	](agentName, opts...)
+	return resolved
 }
 
 func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, opts []tool.Option) []AgentRunOption {
@@ -328,24 +355,12 @@ func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, o
 	return appendCancelContextOption(agentOpts, childCancelCtx)
 }
 
-func getEmitGeneratorAndEnableStreaming[M MessageType](opts []tool.Option) (*AsyncGenerator[*TypedAgentEvent[M]], bool) {
-	o := tool.GetImplSpecificOptions[agentToolOptions](nil, opts...)
-	eventOptions := tool.GetImplSpecificOptions[typedAgentToolEventOptions[M]](nil, opts...)
-	if o == nil && eventOptions == nil {
-		return nil, false
-	}
-
-	var gen *AsyncGenerator[*TypedAgentEvent[M]]
-	if eventOptions != nil {
-		gen = eventOptions.generator
-	}
-
-	var enableStreaming bool
-	if o != nil {
-		enableStreaming = o.enableStreaming
-	}
-
-	return gen, enableStreaming
+func getEventReceiversAndEnableStreaming[M MessageType](opts []tool.Option) ([]agenttool.EventReceiver[*TypedAgentEvent[M]], bool) {
+	receivers, enableStreaming, _ := agenttool.ResolveInvocationOptions[
+		*TypedAgentEvent[M],
+		AgentRunOption,
+	]("", opts...)
+	return receivers, enableStreaming
 }
 
 func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {
@@ -397,6 +412,41 @@ func newTypedUserMessages[M MessageType](text string) []M {
 	}
 }
 
+func stampAgentToolSessionEvent[M MessageType](event *TypedAgentEvent[M], childSessionID string) {
+	if event == nil || childSessionID == "" {
+		return
+	}
+	if event.SessionEventVariant == nil && event.Output != nil && event.Output.MessageOutput != nil {
+		ts := newEventTimestamp()
+		if event.Output.MessageOutput.IsStreaming {
+			event.SessionEventVariant = &SessionEventVariant[M]{
+				MessageStreamRef: &MessageStreamRef{
+					Timestamp: ts,
+					Kind:      SessionEventMessage,
+				},
+			}
+		} else if !isNilMessage(event.Output.MessageOutput.Message) {
+			event.SessionEventVariant = &SessionEventVariant[M]{
+				Event: &SessionEvent[M]{
+					Timestamp: ts,
+					Kind:      SessionEventMessage,
+					Message:   event.Output.MessageOutput.Message,
+				},
+			}
+		}
+	}
+	if event.SessionEventVariant != nil {
+		event.SessionEventVariant.SessionID = childSessionID
+	}
+}
+
+// newTypedInvokableAgentToolRunner creates a runner for the inner agent without
+// SessionEventStore. The child's events are forwarded to the parent's live stream
+// (tagged with childSessionID on SessionEventVariant) and filtered out of the parent's persistence.
+// The child's durability relies solely on the bridge checkpoint stored inside
+// agentToolInterruptState — there is no independent child session log.
+// This may change in the future if AgentTool needs cross-turn context
+// continuation or audit-level event logging for the child session.
 func newTypedInvokableAgentToolRunner[M MessageType](agent TypedAgent[M], store compose.CheckPointStore, enableStreaming bool) *TypedRunner[M] {
 	return &TypedRunner[M]{
 		a:               agent,

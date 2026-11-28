@@ -19,6 +19,8 @@ package filesystem
 
 import (
 	"context"
+	"io"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -158,6 +160,12 @@ type WriteRequest struct {
 	Content string
 }
 
+// OpenAppendRequest contains parameters for opening an append stream.
+type OpenAppendRequest struct {
+	// FilePath is the path of the file to append to; it is created if absent.
+	FilePath string
+}
+
 // EditRequest contains parameters for editing file content.
 type EditRequest struct {
 	// FilePath is the path of the file to edit.
@@ -181,25 +189,33 @@ type EditRequest struct {
 type FileContentPartType string
 
 const (
-	// FileContentPartTypeImage represents an image part (e.g. PNG, JPG).
+	// FileContentPartTypeText represents a plain-text part.
+	FileContentPartTypeText FileContentPartType = "text"
+	// FileContentPartTypeImage represents an image part.
 	FileContentPartTypeImage FileContentPartType = "image"
-	// FileContentPartTypePDF represents a file part (e.g. PDF).
+	// FileContentPartTypePDF represents a PDF file part.
 	FileContentPartTypePDF FileContentPartType = "pdf"
 )
 
 // FileContentPart represents a multimodal part of file content.
-// Data holds raw bytes; encoding (e.g. base64) is handled by the consumer.
+//
+// The payload is selected by Type:
+//   - FileContentPartTypeText  → Data holds UTF-8 text bytes; MIMEType unused.
+//   - FileContentPartTypeImage → Data holds raw image bytes; MIMEType required.
+//   - FileContentPartTypePDF   → Data holds raw pdf bytes; MIMEType required.
+//
+// For binary parts, further encoding (e.g. base64) is handled by the consumer.
 type FileContentPart struct {
 	// Type is the kind of content this part represents.
 	// Required.
 	Type FileContentPartType
 
 	// MIMEType is the MIME type of the content (e.g. "image/png", "application/pdf").
-	// Required.
+	// Required for inline binary parts (image, pdf); unused for text parts.
 	MIMEType string
 
-	// Data is the raw binary content.
-	// Required.
+	// Data holds the inline payload: UTF-8 text bytes for text parts, raw binary
+	// for image/pdf parts.
 	Data []byte
 }
 
@@ -211,15 +227,18 @@ type FileContent struct {
 
 // MultiFileContent holds the result of a MultiModalRead operation.
 //
-// FileContent and Parts are mutually exclusive (one-of):
-//   - Set FileContent for plain text results (same as a normal Read).
-//   - Set Parts for multimodal results (images, PDFs, etc.).
+// Exactly one of FileContent / Parts is set:
+//   - Set FileContent for a plain-text result (same as a normal Read).
+//   - Set Parts for a multimodal result. Parts is an ordered list that MAY
+//     interleave text, image, and pdf parts in reading order — e.g. a parsed
+//     document returning per-page markdown followed by that page's images.
 //
 // When Parts is non-empty, FileContent is ignored.
 type MultiFileContent struct {
 	*FileContent
 
-	// Parts holds multimodal output parts (e.g. image, PDF).
+	// Parts holds ordered multimodal output parts (text, image, pdf) produced by
+	// the backend itself.
 	Parts []FileContentPart
 }
 
@@ -234,6 +253,52 @@ type MultiFileContent struct {
 //     or use the built-in reduction middleware with configurable policies.
 type MultiModalReader interface {
 	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
+}
+
+// AppendOpener opens a write-only, tail-appending session to a file, letting
+// callers stream content to the end of the file incrementally without rewriting
+// the whole file — e.g. teeing a long-running background task's output to its
+// output file as chunks arrive.
+//
+// It is an optional Backend extension (like MultiModalReader): a Backend that can
+// keep a file handle or RPC stream open implements it directly, so per-chunk backend
+// latency can be amortized over the session.
+//
+// The io.WriteCloser returned by OpenAppend has the following contract:
+//
+//   - Write appends bytes to the end of the file. It MAY buffer: a nil error does
+//     NOT guarantee the bytes are durable or yet visible to a concurrent Read. If a
+//     prior buffered write already failed, the stream is permanently broken and
+//     Write returns that sticky error; callers should stop writing.
+//   - Close flushes any buffered content, finalizes the session, and returns the
+//     first error observed over the stream's lifetime (nil if all writes landed).
+//     Closing a session in which nothing was written yields an empty file (the file
+//     is created on open). Close is idempotent, and a Write after Close is rejected
+//     (it returns an error, e.g. io.ErrClosedPipe, and does not modify the file).
+//
+// A handle is single-consumer: it is not safe for concurrent use.
+//
+// Two obligations fall on a backend that holds OS or network resources (an fd, an
+// RPC stream), because callers may abandon a session without a clean Close:
+//
+//   - The ctx passed to OpenAppend bounds the whole session. Callers guarantee Close
+//     on normal completion and on a stream error, but NOT on every abandonment
+//     (a canceled or timed-out run may just drop the handle). So the implementation
+//     MUST release its resources when that ctx is canceled — not only in Close, or
+//     it leaks a handle on those paths. Canceling the ctx aborts pending writes.
+//   - When Write buffers, the implementation SHOULD flush on its own cadence (time or
+//     size based) so a concurrent Read of a still-running task sees recent interim
+//     output; the caller does not drive flushing, since a per-write flush would
+//     reintroduce the per-write latency this abstraction exists to amortize.
+//
+// Implementations SHOULD additionally implement io.StringWriter so text callers can
+// append without a []byte copy (use io.WriteString, which detects it). They MAY
+// implement interface{ Flush() error } to expose a mid-stream durability/visibility
+// checkpoint without ending the session.
+type AppendOpener interface {
+	// OpenAppend opens an append stream to req.FilePath, creating the file if it
+	// does not exist.
+	OpenAppend(ctx context.Context, req *OpenAppendRequest) (io.WriteCloser, error)
 }
 
 // Backend is a pluggable, unified file backend protocol interface.
@@ -283,9 +348,23 @@ type Backend interface {
 }
 
 // ExecuteRequest contains parameters for executing a command.
+//
+// Foreground/background switching is the caller's concern (e.g. the
+// backgroundtask Manager). Timeout limits command execution in the backend and
+// is independent from how long the caller waits in the foreground.
 type ExecuteRequest struct {
-	Command            string // The command to execute
-	RunInBackendGround bool
+	Command string // The command to execute
+	// Timeout optionally limits how long the command itself may run. It excludes
+	// transport and environment setup time, which is why the limit is enforced by
+	// the backend rather than derived from a caller-side deadline: only the backend
+	// knows when the command actually started.
+	//
+	// Nil delegates the limit to the backend. When non-nil, the backend must
+	// enforce it for both foreground and background runs, stop the command on
+	// expiry, and report the outcome via ExecuteResponse.TimedOut. A caller may
+	// rely on this as the only bound on command execution, so a backend that
+	// ignores Timeout will block its caller until ctx is canceled.
+	Timeout *time.Duration
 }
 
 // ExecuteResponse contains the response result of command execution.
@@ -293,12 +372,25 @@ type ExecuteResponse struct {
 	Output    string // Command output content
 	ExitCode  *int   // Command exit code
 	Truncated bool   // Whether the output was truncated
+	// TimedOut reports that ExecuteRequest.Timeout expired and the backend stopped
+	// the command. It describes the command's own budget only: transport and RPC
+	// deadlines, ctx cancellation and environment setup failures are not timeouts
+	// in this sense and must be reported as errors instead. Output should still
+	// carry whatever the command produced before it was stopped.
+	TimedOut bool
 }
 
+// Shell executes shell commands. A command is stopped by one of two paths, and an
+// implementation must honor both: canceling ctx (how the caller abandons or cancels
+// a run — an implementation that ignores it will leak the process and its goroutine
+// after the run is reported stopped) and, when ExecuteRequest.Timeout is set,
+// expiry of that command budget (see ExecuteRequest.Timeout).
 type Shell interface {
 	Execute(ctx context.Context, input *ExecuteRequest) (result *ExecuteResponse, err error)
 }
 
+// StreamingShell is the streaming counterpart of Shell. ExecuteStreaming must honor
+// both stop paths described on Shell.
 type StreamingShell interface {
 	ExecuteStreaming(ctx context.Context, input *ExecuteRequest) (result *schema.StreamReader[*ExecuteResponse], err error)
 }

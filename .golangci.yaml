@@ -33,6 +33,11 @@ linters:
       - text: "exported: type name will be used as agent.AgentOption by other packages"
         linters:
           - revive
+      # The inline analyzer recommends reflect.Pointer, which is unavailable
+      # under the repository's supported Go 1.18 toolchain.
+      - text: "inline: Constant reflect.Ptr should be inlined"
+        linters:
+          - govet
       - path: "adk/prebuilt/deep/task_tool.go"
         text: "argument-limit: maximum number of arguments per function exceeded"
         linters:

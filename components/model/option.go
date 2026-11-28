@@ -42,6 +42,8 @@ type Options struct {
 	MaxTokens *int
 	// Stop is the stop words for the model, which controls the stopping condition of the model.
 	Stop []string
+	// ResponseFormat controls the structured output format of the model response.
+	ResponseFormat *schema.ResponseFormat
 
 	// Options only available for chat model.
 
@@ -169,6 +171,15 @@ func WithAgenticToolChoice(toolChoice *schema.AgenticToolChoice) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.AgenticToolChoice = toolChoice
+		},
+	}
+}
+
+// WithResponseFormat sets the structured output format for the model response.
+func WithResponseFormat(responseFormat *schema.ResponseFormat) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.ResponseFormat = responseFormat
 		},
 	}
 }

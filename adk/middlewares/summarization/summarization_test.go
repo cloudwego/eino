@@ -29,6 +29,8 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/adk/session"
 	"github.com/cloudwego/eino/components/model"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -36,6 +38,18 @@ import (
 
 func intPtr(v int) *int {
 	return &v
+}
+
+type fixedSummaryTestModel struct {
+	content string
+}
+
+func (m *fixedSummaryTestModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage(m.content, nil), nil
+}
+
+func (m *fixedSummaryTestModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage(m.content, nil)}), nil
 }
 
 func TestNew(t *testing.T) {
@@ -65,6 +79,61 @@ func TestNew(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, mw)
 	})
+}
+
+func TestAttack_SummarizationMessagesReplacedUsesReasonOnly(t *testing.T) {
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{
+		Model:   &fixedSummaryTestModel{content: "summary"},
+		Trigger: &TriggerCondition{ContextMessages: 1},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "summary-extra-agent",
+		Description: "summary extra test",
+		Instruction: "test",
+		Model:       &fixedSummaryTestModel{content: "ok"},
+		Handlers:    []adk.ChatModelAgentMiddleware{mw},
+	})
+	require.NoError(t, err)
+
+	store := session.NewInMemoryStore[*schema.Message](nil)
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:        agent,
+		SessionID:    "summary-extra-session",
+		SessionStore: store,
+		SessionConfig: &adk.SessionConfig[*schema.Message]{
+			EventExtraProvider: func(_ context.Context, event *adk.SessionEvent[*schema.Message]) (map[string]any, error) {
+				if event.Kind == adk.SessionEventMessagesReplaced && event.Extra["_eino_reason"] == "context_summarized" {
+					return map[string]any{"reason": "business_summary"}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+
+	iter := runner.Run(ctx, []*schema.Message{
+		schema.UserMessage("first"),
+		schema.UserMessage("second"),
+	})
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, event.Err)
+	}
+
+	res, err := store.LoadEvents(ctx, "summary-extra-session", &adk.LoadSessionEventsRequest{
+		Kinds: []adk.SessionEventKind{adk.SessionEventMessagesReplaced},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Events, 1)
+	extra := res.Events[0].Extra
+	assert.NotContains(t, extra, "_eino_source")
+	assert.Equal(t, "context_summarized", extra["_eino_reason"])
+	assert.Equal(t, "business_summary", extra["reason"])
 }
 
 func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
@@ -166,6 +235,90 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		assert.Equal(t, schema.System, newState.Messages[0].Role)
 		assert.Equal(t, "You are a helpful assistant", newState.Messages[0].Content)
 		assert.Equal(t, schema.User, newState.Messages[1].Role)
+	})
+
+	t.Run("marked runtime system messages stripped from MessagesReplaced event payload", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				assert.Equal(t, schema.System, msgs[0].Role)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:   cm,
+				Trigger: &TriggerCondition{ContextTokens: 10},
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		runtimeSys := schema.SystemMessage("runtime generated system")
+		internal.SetMessageExtra(runtimeSys, extraKeyRuntimeGeneratedSystemMessage, true)
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				runtimeSys,
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+		}
+
+		_, newState, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+		assert.Len(t, newState.Messages, 2)
+		assert.Equal(t, schema.System, newState.Messages[0].Role)
+		assert.Equal(t, "runtime generated system", newState.Messages[0].Content)
+
+		eventPayload := stripRuntimeGeneratedLeadingSystemMessages(newState.Messages)
+		assert.Len(t, eventPayload, 1)
+		assert.Equal(t, schema.User, eventPayload[0].Role)
+	})
+
+	t.Run("unmarked caller system messages preserved in both runtime and event payload", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				assert.Equal(t, schema.System, msgs[0].Role)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:   cm,
+				Trigger: &TriggerCondition{ContextTokens: 10},
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		callerSys := schema.SystemMessage("caller supplied system")
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				callerSys,
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+		}
+
+		_, newState, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+		assert.Len(t, newState.Messages, 2)
+		assert.Equal(t, schema.System, newState.Messages[0].Role)
+		assert.Equal(t, "caller supplied system", newState.Messages[0].Content)
+
+		eventPayload := stripRuntimeGeneratedLeadingSystemMessages(newState.Messages)
+		assert.Len(t, eventPayload, 2)
+		assert.Equal(t, schema.System, eventPayload[0].Role)
+		assert.Equal(t, "caller supplied system", eventPayload[0].Content)
 	})
 
 	t.Run("preserves multiple system messages", func(t *testing.T) {
@@ -523,6 +676,188 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 			Messages: []adk.Message{
 				schema.UserMessage(strings.Repeat("a", 100)),
 			},
+		}
+
+		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ReusePromptCaching appends user instruction to original messages without rebuilding", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		sysMsg := schema.SystemMessage("caller supplied system")
+		userMsg := schema.UserMessage(strings.Repeat("a", 100))
+		assistantMsg := schema.AssistantMessage(strings.Repeat("b", 100), nil)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				require.Len(t, msgs, 4)
+				assert.Same(t, sysMsg, msgs[0])
+				assert.Same(t, userMsg, msgs[1])
+				assert.Same(t, assistantMsg, msgs[2])
+				assert.Equal(t, schema.User, msgs[3].Role)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              cm,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{sysMsg, userMsg, assistantMsg},
+		}
+
+		_, newState, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+		assert.Len(t, newState.Messages, 2)
+		assert.Equal(t, schema.System, newState.Messages[0].Role)
+		assert.Equal(t, "caller supplied system", newState.Messages[0].Content)
+		assert.Equal(t, schema.User, newState.Messages[1].Role)
+	})
+
+	t.Run("ReusePromptCaching injects state tool infos as model.WithTools", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		stateTools := []*schema.ToolInfo{
+			{Name: "state_tool_a"},
+			{Name: "state_tool_b"},
+		}
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				common := model.GetCommonOptions(&model.Options{}, opts...)
+				require.Len(t, common.Tools, 2)
+				assert.Equal(t, "state_tool_a", common.Tools[0].Name)
+				assert.Equal(t, "state_tool_b", common.Tools[1].Name)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              cm,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+			ToolInfos: stateTools,
+		}
+
+		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ReusePromptCaching injects state deferred tool infos as model.WithDeferredTools", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		stateTools := []*schema.ToolInfo{
+			{Name: "state_tool_a"},
+		}
+		deferredTools := []*schema.ToolInfo{
+			{Name: "deferred_tool_a"},
+			{Name: "deferred_tool_b"},
+		}
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				common := model.GetCommonOptions(&model.Options{}, opts...)
+				require.Len(t, common.Tools, 1)
+				assert.Equal(t, "state_tool_a", common.Tools[0].Name)
+				require.Len(t, common.DeferredTools, 2)
+				assert.Equal(t, "deferred_tool_a", common.DeferredTools[0].Name)
+				assert.Equal(t, "deferred_tool_b", common.DeferredTools[1].Name)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary content",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              cm,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
+			ToolInfos:         stateTools,
+			DeferredToolInfos: deferredTools,
+		}
+
+		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
+		assert.NoError(t, err)
+	})
+
+	t.Run("ReusePromptCaching with failover injects state tool infos into failover model call", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		primary := mockModel.NewMockBaseChatModel(ctrl)
+		failover := mockModel.NewMockBaseChatModel(ctrl)
+
+		stateTools := []*schema.ToolInfo{
+			{Name: "state_tool_a"},
+		}
+
+		primary.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "partial output",
+			}, fmt.Errorf("primary error")).Times(1)
+		failover.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				common := model.GetCommonOptions(&model.Options{}, opts...)
+				require.Len(t, common.Tools, 1)
+				assert.Equal(t, "state_tool_a", common.Tools[0].Name)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary from failover",
+				}, nil
+			}).Times(1)
+
+		mw := &TypedMiddleware[*schema.Message]{
+			cfg: &Config{
+				Model:              primary,
+				Trigger:            &TriggerCondition{ContextTokens: 10},
+				ReusePromptCaching: true,
+				Failover: &FailoverConfig{
+					GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+						return failover, []*schema.Message{schema.UserMessage("failover input")}, nil
+					},
+				},
+			},
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage(strings.Repeat("a", 100)),
+			},
+			ToolInfos: stateTools,
 		}
 
 		_, _, err := mw.BeforeModelRewriteState(ctx, state, mtx)
@@ -953,7 +1288,7 @@ func TestSetGetContentType(t *testing.T) {
 		Content: "test",
 	}
 
-	setMsgExtra(msg, extraKeyContentType, string(contentTypeSummary))
+	internal.SetMessageExtra(msg, extraKeyContentType, string(contentTypeSummary))
 
 	ct := typedGetContentType(msg)
 	assert.Equal(t, contentTypeSummary, ct)
@@ -966,9 +1301,9 @@ func TestSetGetExtra(t *testing.T) {
 			Content: "test",
 		}
 
-		setMsgExtra(msg, "key", "value")
+		internal.SetMessageExtra(msg, "key", "value")
 
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		v, ok := extra["key"].(string)
 		assert.True(t, ok)
 		assert.Equal(t, "value", v)
@@ -980,7 +1315,7 @@ func TestSetGetExtra(t *testing.T) {
 			Content: "test",
 		}
 
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		assert.Nil(t, extra)
 	})
 }
@@ -1204,7 +1539,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 			Role:    schema.User,
 			Content: "summary",
 		}
-		setMsgExtra(summaryMsg, extraKeyContentType, string(contentTypeSummary))
+		internal.SetMessageExtra(summaryMsg, extraKeyContentType, string(contentTypeSummary))
 
 		msgs := []adk.Message{
 			summaryMsg,
@@ -1425,11 +1760,10 @@ func TestPostProcessSummary(t *testing.T) {
 func TestEventHelpers(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("emitEvent returns wrapped error outside execution context", func(t *testing.T) {
+	t.Run("emitEvent is no-op outside execution context", func(t *testing.T) {
 		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{}}
 		err := mw.emitEvent(ctx, &CustomizedAction{Type: ActionTypeBeforeSummarize})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to send internal event")
+		assert.NoError(t, err)
 	})
 
 	t.Run("emitGenerateSummaryEvent is skipped when internal events are disabled", func(t *testing.T) {
@@ -1438,11 +1772,10 @@ func TestEventHelpers(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("emitGenerateSummaryEvent returns wrapped error when enabled outside execution context", func(t *testing.T) {
+	t.Run("emitGenerateSummaryEvent is no-op when enabled outside execution context", func(t *testing.T) {
 		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{EmitInternalEvents: true}}
 		err := mw.emitGenerateSummaryEvent(ctx, 1, GenerateSummaryPhasePrimary, schema.AssistantMessage("ok", nil), nil)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to send internal event")
+		assert.NoError(t, err)
 	})
 }
 
@@ -1937,7 +2270,7 @@ func TestSummarizationGeneric(t *testing.T) {
 	})
 }
 
-func TestEmitInternalEvents_AgenticMessage_RequiresExecContext(t *testing.T) {
+func TestEmitInternalEvents_AgenticMessage_NoopOutsideExecContext(t *testing.T) {
 	ctx := context.Background()
 
 	longContent := strings.Repeat("x", 800000)
@@ -1967,9 +2300,12 @@ func TestEmitInternalEvents_AgenticMessage_RequiresExecContext(t *testing.T) {
 	require.NoError(t, err)
 
 	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: msgs}
-	_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
-	assert.Error(t, err, "should error without exec context when EmitInternalEvents is true")
-	assert.Contains(t, err.Error(), "send internal event")
+	_, gotState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotState)
+	require.Len(t, gotState.Messages, 2)
+	assert.Equal(t, schema.AgenticRoleTypeSystem, gotState.Messages[0].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, gotState.Messages[1].Role)
 }
 
 func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
@@ -1994,11 +2330,11 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 
 	t.Run("getMsgExtra_setMsgExtra", func(t *testing.T) {
 		msg := smakeUserMsg[M]("test")
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		assert.Nil(t, extra)
 
-		setMsgExtra(msg, "key1", "value1")
-		extra = getMsgExtra(msg)
+		internal.SetMessageExtra(msg, "key1", "value1")
+		extra = internal.GetMessageExtra(msg)
 		assert.Equal(t, "value1", extra["key1"])
 	})
 
@@ -2042,7 +2378,7 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 		assert.False(t, isPreservedMessage(summaryMsg))
 
 		skillsMsg := makeUserMsg[M]("skills content")
-		setMsgExtra(skillsMsg, extraKeyContentType, string(contentTypeSkills))
+		internal.SetMessageExtra(skillsMsg, extraKeyContentType, string(contentTypeSkills))
 		assert.True(t, isInternalUserMessage(skillsMsg))
 		assert.True(t, isPreservedMessage(skillsMsg))
 
@@ -2100,7 +2436,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 
 	foundSummary := false
 	for _, msg := range newState.Messages {
-		extra := getMsgExtra(msg)
+		extra := internal.GetMessageExtra(msg)
 		if extra != nil {
 			if ct, ok := extra[extraKeyContentType]; ok && ct == string(contentTypeSummary) {
 				foundSummary = true
@@ -2241,5 +2577,164 @@ func TestGetAssistantTextContent(t *testing.T) {
 		}
 		got := getAssistantTextContent(msg)
 		assert.Equal(t, "", got)
+	})
+}
+
+func TestStripRuntimeGeneratedLeadingSystemMessages(t *testing.T) {
+	t.Run("no system messages", func(t *testing.T) {
+		msgs := []*schema.Message{
+			schema.UserMessage("hello"),
+			schema.AssistantMessage("hi", nil),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, "hello", result[0].Content)
+	})
+
+	t.Run("unmarked system message preserved", func(t *testing.T) {
+		sys := schema.SystemMessage("durable system")
+		msgs := []*schema.Message{
+			sys,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.System, result[0].Role)
+		assert.Equal(t, "durable system", result[0].Content)
+	})
+
+	t.Run("single marked system message stripped", func(t *testing.T) {
+		sys := schema.SystemMessage("runtime system")
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{
+			sys,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 1)
+		assert.Equal(t, schema.User, result[0].Role)
+		assert.Equal(t, "hello", result[0].Content)
+	})
+
+	t.Run("multiple marked system messages stripped", func(t *testing.T) {
+		sys1 := schema.SystemMessage("runtime 1")
+		internal.SetMessageExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
+		sys2 := schema.SystemMessage("runtime 2")
+		internal.SetMessageExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{
+			sys1,
+			sys2,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 1)
+		assert.Equal(t, schema.User, result[0].Role)
+	})
+
+	t.Run("mixed marked and unmarked - only prefix stripped", func(t *testing.T) {
+		marked := schema.SystemMessage("runtime")
+		internal.SetMessageExtra(marked, extraKeyRuntimeGeneratedSystemMessage, true)
+		unmarked := schema.SystemMessage("durable")
+		msgs := []*schema.Message{
+			marked,
+			unmarked,
+			schema.UserMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.System, result[0].Role)
+		assert.Equal(t, "durable", result[0].Content)
+	})
+
+	t.Run("non-leading system message preserved", func(t *testing.T) {
+		sys := schema.SystemMessage("mid-system")
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{
+			schema.UserMessage("first"),
+			sys,
+			schema.AssistantMessage("resp", nil),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 3)
+		assert.Equal(t, schema.User, result[0].Role)
+		assert.Equal(t, schema.System, result[1].Role)
+	})
+
+	t.Run("only marked system messages - empty result", func(t *testing.T) {
+		sys1 := schema.SystemMessage("runtime 1")
+		internal.SetMessageExtra(sys1, extraKeyRuntimeGeneratedSystemMessage, true)
+		sys2 := schema.SystemMessage("runtime 2")
+		internal.SetMessageExtra(sys2, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.Message{sys1, sys2}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 0)
+	})
+
+	t.Run("agentic messages - marked stripped", func(t *testing.T) {
+		sys := schema.SystemAgenticMessage("runtime system")
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		msgs := []*schema.AgenticMessage{
+			sys,
+			schema.UserAgenticMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 1)
+		assert.Equal(t, schema.AgenticRoleTypeUser, result[0].Role)
+	})
+
+	t.Run("agentic messages - unmarked preserved", func(t *testing.T) {
+		sys := schema.SystemAgenticMessage("durable system")
+		msgs := []*schema.AgenticMessage{
+			sys,
+			schema.UserAgenticMessage("hello"),
+		}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.AgenticRoleTypeSystem, result[0].Role)
+	})
+
+	t.Run("returns a new slice, not the original slice", func(t *testing.T) {
+		sys := schema.SystemMessage("runtime")
+		internal.SetMessageExtra(sys, extraKeyRuntimeGeneratedSystemMessage, true)
+		user := schema.UserMessage("hello")
+		assistant := schema.AssistantMessage("resp", nil)
+		msgs := []*schema.Message{sys, user, assistant}
+		result := stripRuntimeGeneratedLeadingSystemMessages(msgs)
+		assert.Len(t, result, 2)
+		originalLen := len(result)
+		result = append(result, schema.UserMessage("extra"))
+		assert.Len(t, msgs, 3, "appending to result must not affect original slice")
+		assert.Len(t, result, originalLen+1)
+	})
+}
+
+func TestIsMarkedRuntimeGeneratedSystemMessage(t *testing.T) {
+	t.Run("marked system message", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		assert.True(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("unmarked system message", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("non-system message with marker", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, true)
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("nil extra", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		msg.Extra = nil
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
+	})
+
+	t.Run("marker with wrong type", func(t *testing.T) {
+		msg := schema.SystemMessage("test")
+		internal.SetMessageExtra(msg, extraKeyRuntimeGeneratedSystemMessage, "yes")
+		assert.False(t, isMarkedRuntimeGeneratedSystemMessage(msg))
 	})
 }

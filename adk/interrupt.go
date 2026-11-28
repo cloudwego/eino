@@ -49,6 +49,11 @@ type ResumeInfo struct {
 type InterruptInfo struct {
 	Data any
 
+	// CheckPointID is the checkpoint key used to persist this interrupted run,
+	// when checkpoint persistence is enabled. Pass this ID to Runner.Resume or
+	// Runner.ResumeWithParams to continue the same suspended execution.
+	CheckPointID string
+
 	// InterruptContexts provides a structured, user-facing view of the interrupt chain.
 	// Each context represents a step in the agent hierarchy that was interrupted.
 	InterruptContexts []*InterruptCtx
@@ -166,11 +171,16 @@ type AddressSegment = core.AddressSegment
 type AddressSegmentType = core.AddressSegmentType
 
 const (
-	AddressSegmentAgent AddressSegmentType = "agent"
-	AddressSegmentTool  AddressSegmentType = "tool"
+	AddressSegmentAgent      AddressSegmentType = "agent"
+	AddressSegmentTool       AddressSegmentType = "tool"
+	AddressSegmentMiddleware AddressSegmentType = "middleware"
 )
 
-var allowedAddressSegmentTypes = []AddressSegmentType{AddressSegmentAgent, AddressSegmentTool}
+var allowedAddressSegmentTypes = []AddressSegmentType{
+	AddressSegmentAgent,
+	AddressSegmentTool,
+	AddressSegmentMiddleware,
+}
 
 // AppendAddressSegment adds an address segment for the current execution context.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
@@ -295,12 +305,32 @@ func runnerSaveCheckPointImpl(
 	info *InterruptInfo,
 	is *core.InterruptSignal,
 ) error {
-	if store == nil {
+	if isNilCheckPointStore(store) {
 		return nil
 	}
 
-	runCtx := getRunCtx(ctx)
+	data, err := encodeRunnerCheckPointImpl(enableStreaming, ctx, info, is)
+	if err != nil {
+		return err
+	}
+	return store.Set(ctx, key, data)
+}
 
+func encodeRunnerCheckPointImpl(
+	enableStreaming bool,
+	ctx context.Context,
+	info *InterruptInfo,
+	is *core.InterruptSignal,
+) ([]byte, error) {
+	return encodeRunnerCheckPointWithRunCtx(enableStreaming, getRunCtx(ctx), info, is)
+}
+
+func encodeRunnerCheckPointWithRunCtx(
+	enableStreaming bool,
+	runCtx *runContext,
+	info *InterruptInfo,
+	is *core.InterruptSignal,
+) ([]byte, error) {
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
 	info, infoDataStateID := compactRunnerCheckpointInfoData(info, is)
 
@@ -314,9 +344,9 @@ func runnerSaveCheckPointImpl(
 		EnableStreaming:           enableStreaming,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to encode checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
-	return store.Set(ctx, key, buf.Bytes())
+	return buf.Bytes(), nil
 }
 
 func compactRunnerCheckpointInfoData(info *InterruptInfo, is *core.InterruptSignal) (*InterruptInfo, string) {
@@ -364,19 +394,20 @@ func restoreRunnerCheckpointInfoData(s *serialization) error {
 	return nil
 }
 
-const bridgeCheckpointID = "adk_react_mock_key"
+const bridgeCheckpointID = "adk_bridge_checkpoint"
 
 func newBridgeStore() *bridgeStore {
 	return &bridgeStore{data: make(map[string][]byte)}
 }
 
 func newResumeBridgeStore(checkPointID string, data []byte) *bridgeStore {
-	payload := append([]byte{}, data...)
 	return &bridgeStore{
-		data: map[string][]byte{checkPointID: payload},
+		data: map[string][]byte{checkPointID: data},
 	}
 }
 
+// bridgeStore transfers immutable checkpoint bytes between ADK and Compose.
+// Callers must not mutate buffers after Set or buffers returned by Get or LastCheckpoint.
 type bridgeStore struct {
 	mu          sync.Mutex
 	data        map[string][]byte
@@ -388,7 +419,7 @@ func (m *bridgeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if v, ok := m.data[key]; ok {
-		return append([]byte{}, v...), true, nil
+		return v, true, nil
 	}
 	return nil, false, nil
 }
@@ -399,10 +430,9 @@ func (m *bridgeStore) Set(_ context.Context, key string, checkPoint []byte) erro
 	if m.data == nil {
 		m.data = make(map[string][]byte)
 	}
-	payload := append([]byte{}, checkPoint...)
-	m.data[key] = payload
+	m.data[key] = checkPoint
 	m.lastKey = key
-	m.lastPayload = payload
+	m.lastPayload = checkPoint
 	return nil
 }
 
@@ -412,7 +442,7 @@ func (m *bridgeStore) LastCheckpoint() (key string, payload []byte, ok bool) {
 	if m.lastKey == "" {
 		return "", nil, false
 	}
-	return m.lastKey, append([]byte{}, m.lastPayload...), true
+	return m.lastKey, m.lastPayload, true
 }
 
 func getNextResumeAgent(ctx context.Context, _ *ResumeInfo) (string, error) {

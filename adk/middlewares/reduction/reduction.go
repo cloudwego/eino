@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unicode/utf8"
 
@@ -31,7 +32,9 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -365,6 +368,10 @@ type typedToolReductionMiddleware[M adk.MessageType] struct {
 
 	excludeTruncTools map[string]struct{}
 	excludeClearTools map[string]struct{}
+}
+
+type clearRewriteDelta[M adk.MessageType] struct {
+	events []*adk.SessionEvent[M]
 }
 
 // getDefaultTokenCounter returns a default token counter function that operates on []M.
@@ -997,6 +1004,7 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 	if estimatedTokens < t.config.MaxTokensForClear {
 		return ctx, state, nil
 	}
+	state.Messages = ensureMessageIDsOnCopiedMessages(state.Messages)
 
 	// calc range
 	var (
@@ -1027,9 +1035,10 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		editTarget         []M
 		clearAtLeastTokens = t.config.ClearAtLeastTokens
 		offloadStash       []*offloadStashItem
+		pendingEvents      []*adk.SessionEvent[M]
 	)
 
-	editTarget, end, err = t.applyClearRewriteGeneric(ctx, state, start, end, clearAtLeastTokens)
+	editTarget, end, pendingEvents, err = t.applyClearRewriteGeneric(ctx, state, start, end, clearAtLeastTokens)
 	if err != nil {
 		return ctx, state, err
 	}
@@ -1102,10 +1111,32 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 
 				setToolCallArguments(toolCallMsg, tc.BlockIndex, offloadInfo.ToolArgument.Text)
 				setToolResultContent(resultMsg, offloadInfo.ToolResult, fromContent)
+
+				// Queue MessageUpdated for the tool-result message (content replaced).
+				// ClearAtLeastTokens may still abort the clear, so persistence events
+				// must be emitted only after that threshold is satisfied.
+				pendingEvents = append(pendingEvents, &adk.SessionEvent[M]{
+					Kind: adk.SessionEventMessageUpdated,
+					MessageUpdated: &adk.MessageUpdatedEvent[M]{
+						MessageID: adk.GetMessageID(resultMsg),
+						Message:   resultMsg,
+					},
+				})
 			}
 
 			// set dedup flag
 			setMsgClearedFlagGeneric(toolCallMsg)
+
+			// Queue MessageUpdated for the assistant tool-call message (arguments
+			// rewritten + cleared flag set). Reconstruction must see this so the
+			// cleared flag suppresses double-reduction.
+			pendingEvents = append(pendingEvents, &adk.SessionEvent[M]{
+				Kind: adk.SessionEventMessageUpdated,
+				MessageUpdated: &adk.MessageUpdatedEvent[M]{
+					MessageID: adk.GetMessageID(toolCallMsg),
+					Message:   toolCallMsg,
+				},
+			})
 		}
 		toolCallMsgIndex++
 	}
@@ -1131,6 +1162,12 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 		}
 	}
 
+	for _, event := range pendingEvents {
+		if err := sendClearRewriteSessionEvent(ctx, event); err != nil {
+			return ctx, state, err
+		}
+	}
+
 	state.Messages = editTarget // replace original state messages
 
 	if t.config.ClearPostProcess != nil {
@@ -1141,10 +1178,11 @@ func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx con
 }
 
 func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.Context, state *adk.TypedChatModelAgentState[M], start, end int, clearAtLeastTokens int64) (
-	[]M, int, error) {
+	[]M, int, []*adk.SessionEvent[M], error) {
 	var (
 		editTarget      []M
 		needProcessPart []M
+		delta           clearRewriteDelta[M]
 	)
 
 	editTarget = append(editTarget, state.Messages[:start]...)
@@ -1185,15 +1223,25 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 				} else {
 					toolResponseMessages = needProcessPart[trStart:trEnd]
 				}
+				spanEnd := trEnd
+				if spanEnd > len(needProcessPart) {
+					spanEnd = len(needProcessPart)
+				}
+				originalMessages := needProcessPart[i:spanEnd]
 
 				rewrittenMessages, rewriteErr := t.config.ClearMessageRewriter(ctx, msg, toolResponseMessages)
 				if rewriteErr != nil {
-					return nil, 0, rewriteErr
+					return nil, 0, nil, rewriteErr
 				}
+				events, rewriteErr := buildClearRewriteEvents(originalMessages, rewrittenMessages)
+				if rewriteErr != nil {
+					return nil, 0, nil, rewriteErr
+				}
+				delta.events = append(delta.events, events...)
 				rewritten = append(rewritten, rewrittenMessages...)
 				i = trEnd
 			} else { // unexpected
-				return nil, 0, fmt.Errorf("[applyClearRewrite] unexpected message: %v", any(msg))
+				return nil, 0, nil, fmt.Errorf("[applyClearRewrite] unexpected message: %v", any(msg))
 			}
 		}
 		editTarget = append(editTarget, rewritten...)
@@ -1204,7 +1252,140 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 		editTarget = append(editTarget, state.Messages[end:]...)
 	}
 
-	return editTarget, end, nil
+	return editTarget, end, delta.events, nil
+}
+
+func sendClearRewriteSessionEvent[M adk.MessageType](ctx context.Context, event *adk.SessionEvent[M]) error {
+	err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
+		SessionEventVariant: &adk.SessionEventVariant[M]{Event: event},
+	})
+	if err != nil && strings.Contains(err.Error(), "must be called within a ChatModelAgent Run() or Resume() execution context") {
+		return nil
+	}
+	return err
+}
+
+func buildClearRewriteEvents[M adk.MessageType](originalMessages []M, rewrittenMessages []M) ([]*adk.SessionEvent[M], error) {
+	originalIDs, err := messageIDsForRewrite("original", originalMessages, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(rewrittenMessages) == 0 {
+		return []*adk.SessionEvent[M]{{
+			Kind: adk.SessionEventMessagesDeleted,
+			MessagesDeleted: &adk.MessagesDeletedEvent{
+				MessageIDs: originalIDs,
+			},
+		}}, nil
+	}
+	rewrittenIDs, err := messageIDsForRewrite("rewritten", rewrittenMessages, true)
+	if err != nil {
+		return nil, err
+	}
+	if sameStringSlice(originalIDs, rewrittenIDs) {
+		var events []*adk.SessionEvent[M]
+		for i, msg := range rewrittenMessages {
+			if reflect.DeepEqual(originalMessages[i], msg) {
+				continue
+			}
+			events = append(events, &adk.SessionEvent[M]{
+				Kind: adk.SessionEventMessageUpdated,
+				MessageUpdated: &adk.MessageUpdatedEvent[M]{
+					MessageID: rewrittenIDs[i],
+					Message:   msg,
+				},
+			})
+		}
+		return events, nil
+	}
+
+	originalIDSet := make(map[string]struct{}, len(originalIDs))
+	for _, id := range originalIDs {
+		originalIDSet[id] = struct{}{}
+	}
+	var events []*adk.SessionEvent[M]
+	anchorID := originalIDs[0]
+	for i, msg := range rewrittenMessages {
+		if _, conflicts := originalIDSet[rewrittenIDs[i]]; conflicts {
+			msg = cloneMessageWithFreshID(msg)
+			rewrittenMessages[i] = msg
+			rewrittenIDs[i] = adk.GetMessageID(msg)
+		}
+		events = append(events, &adk.SessionEvent[M]{
+			Kind: adk.SessionEventMessageInserted,
+			MessageInserted: &adk.MessageInsertedEvent[M]{
+				Message:         msg,
+				BeforeMessageID: anchorID,
+			},
+		})
+	}
+	if err := validateUniqueIDs("rewritten", rewrittenIDs); err != nil {
+		return nil, err
+	}
+	events = append(events, &adk.SessionEvent[M]{
+		Kind: adk.SessionEventMessagesDeleted,
+		MessagesDeleted: &adk.MessagesDeletedEvent{
+			MessageIDs: originalIDs,
+		},
+	})
+	return events, nil
+}
+
+func messageIDsForRewrite[M adk.MessageType](label string, messages []M, ensure bool) ([]string, error) {
+	ids := make([]string, len(messages))
+	for i, msg := range messages {
+		if ensure {
+			adk.EnsureMessageID(msg)
+		}
+		id := adk.GetMessageID(msg)
+		if id == "" {
+			return nil, fmt.Errorf("clear rewrite: %s message at index %d has empty message ID", label, i)
+		}
+		ids[i] = id
+	}
+	if err := validateUniqueIDs(label, ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func validateUniqueIDs(label string, ids []string) error {
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("clear rewrite: %s messages contain duplicate message ID %q", label, id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneMessageWithFreshID[M adk.MessageType](msg M) M {
+	cloned := copyMessagesGeneric([]M{msg})[0]
+	switch m := any(cloned).(type) {
+	case *schema.Message:
+		if m.Extra != nil {
+			delete(m.Extra, internal.EinoMsgIDKey)
+		}
+	case *schema.AgenticMessage:
+		if m.Extra != nil {
+			delete(m.Extra, internal.EinoMsgIDKey)
+		}
+	}
+	adk.EnsureMessageID(cloned)
+	return cloned
 }
 
 func agenticResultCallID(block *schema.ContentBlock) (string, bool) {
@@ -1250,6 +1431,23 @@ func getToolResultCallID[M adk.MessageType](msg M) string {
 		}
 	}
 	return ""
+}
+
+func ensureMessageIDsOnCopiedMessages[M adk.MessageType](msgs []M) []M {
+	var copied []M
+	for i, msg := range msgs {
+		if adk.GetMessageID(msg) != "" {
+			continue
+		}
+		if copied == nil {
+			copied = copyMessagesGeneric(msgs)
+		}
+		adk.EnsureMessageID(copied[i])
+	}
+	if copied != nil {
+		return copied
+	}
+	return msgs
 }
 
 type offloadStashItem struct {
@@ -1372,30 +1570,13 @@ func isToolResultOnlyMsg[M adk.MessageType](msg M) bool {
 
 // getMsgClearedFlagGeneric checks if a message has the cleared flag set.
 func getMsgClearedFlagGeneric[M adk.MessageType](msg M) bool {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return getMsgClearedFlag(m)
-	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			return false
-		}
-		v, ok := m.Extra[msgClearedFlag].(bool)
-		return ok && v
-	}
-	return false
+	v, ok := internal.GetMessageExtra(msg)[msgClearedFlag].(bool)
+	return ok && v
 }
 
 // setMsgClearedFlagGeneric sets the cleared flag on a message.
 func setMsgClearedFlagGeneric[M adk.MessageType](msg M) {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		setMsgClearedFlag(m)
-	case *schema.AgenticMessage:
-		if m.Extra == nil {
-			m.Extra = make(map[string]any)
-		}
-		m.Extra[msgClearedFlag] = true
-	}
+	internal.SetMessageExtra(msg, msgClearedFlag, true)
 }
 
 // getToolCallsGeneric extracts tool call info from an assistant message.
@@ -1555,27 +1736,18 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 									t := *rb.Text
 									rbCopy.Text = &t
 								}
+								rbCopy.Extra = gmap.Clone(rb.Extra)
 								ftr.Content[k] = &rbCopy
 							}
 						}
 					}
 					cb.FunctionToolResult = &ftr
 				}
-				if block.Extra != nil {
-					cb.Extra = make(map[string]any, len(block.Extra))
-					for k, v := range block.Extra {
-						cb.Extra[k] = v
-					}
-				}
+				cb.Extra = gmap.Clone(block.Extra)
 				copied.ContentBlocks[j] = &cb
 			}
 		}
-		if msg.Extra != nil {
-			copied.Extra = make(map[string]any, len(msg.Extra))
-			for k, v := range msg.Extra {
-				copied.Extra[k] = v
-			}
-		}
+		copied.Extra = gmap.Clone(msg.Extra)
 		resp[i] = copied
 	}
 	return resp
@@ -1604,12 +1776,7 @@ func copyMessages(msgs []*schema.Message) []*schema.Message {
 		if msg.ToolCalls != nil {
 			copied.ToolCalls = append(make([]schema.ToolCall, 0, len(msg.ToolCalls)), msg.ToolCalls...)
 		}
-		if msg.Extra != nil {
-			copied.Extra = make(map[string]any, len(msg.Extra))
-			for k, v := range msg.Extra {
-				copied.Extra[k] = v
-			}
-		}
+		copied.Extra = gmap.Clone(msg.Extra)
 		resp[i] = copied
 	}
 	return resp
@@ -1925,10 +2092,7 @@ func getMsgClearedFlag(msg *schema.Message) (offloaded bool) {
 }
 
 func setMsgClearedFlag(msg *schema.Message) {
-	if msg.Extra == nil {
-		msg.Extra = make(map[string]any)
-	}
-	msg.Extra[msgClearedFlag] = true
+	internal.SetMessageExtra(msg, msgClearedFlag, true)
 }
 
 func toolResultFromMessage(msg *schema.Message) (result *schema.ToolResult, fromContent bool, err error) {
@@ -1953,40 +2117,61 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 	switch msgPart.Type {
 	case schema.ChatMessagePartTypeText:
 		return schema.ToolOutputPart{
-			Type: schema.ToolPartTypeText,
-			Text: msgPart.Text,
+			Type:  schema.ToolPartTypeText,
+			Text:  msgPart.Text,
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeImageURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeImage,
 			Image: &schema.ToolOutputImage{
-				MessagePartCommon: msgPart.Image.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.Image.MessagePartCommon),
 			},
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeAudioURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeAudio,
 			Audio: &schema.ToolOutputAudio{
-				MessagePartCommon: msgPart.Audio.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.Audio.MessagePartCommon),
 			},
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeVideoURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeVideo,
 			Video: &schema.ToolOutputVideo{
-				MessagePartCommon: msgPart.Video.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.Video.MessagePartCommon),
 			},
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	case schema.ChatMessagePartTypeFileURL:
 		return schema.ToolOutputPart{
 			Type: schema.ToolPartTypeFile,
 			File: &schema.ToolOutputFile{
-				MessagePartCommon: msgPart.File.MessagePartCommon,
+				MessagePartCommon: cloneMessagePartCommon(msgPart.File.MessagePartCommon),
 			},
+			Extra: gmap.Clone(msgPart.Extra),
 		}, nil
 	default:
 		return schema.ToolOutputPart{}, fmt.Errorf("unknown msg part type: %v", msgPart.Type)
 	}
+}
+
+func cloneMessagePartCommon(common schema.MessagePartCommon) schema.MessagePartCommon {
+	common.URL = cloneStringPtr(common.URL)
+	common.Base64Data = cloneStringPtr(common.Base64Data)
+	common.FileID = cloneStringPtr(common.FileID)
+	common.Extra = gmap.Clone(common.Extra)
+	return common
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // toolResultToOutputParts converts a FunctionToolResult's Content blocks to ToolOutputPart slice.
@@ -1997,26 +2182,54 @@ func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPa
 			continue
 		}
 		if block.Text != nil {
-			parts = append(parts, schema.ToolOutputPart{Type: schema.ToolPartTypeText, Text: block.Text.Text})
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeText,
+				Text:  block.Text.Text,
+				Extra: gmap.Clone(block.Extra),
+			})
 		} else if block.Image != nil {
 			parts = append(parts, schema.ToolOutputPart{
-				Type:  schema.ToolPartTypeImage,
-				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Image.URL), Base64Data: strPtr(block.Image.Base64Data), FileID: strPtr(block.Image.FileID), MIMEType: block.Image.MIMEType}},
+				Type: schema.ToolPartTypeImage,
+				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.Image.URL),
+					Base64Data: strPtr(block.Image.Base64Data),
+					FileID:     strPtr(block.Image.FileID),
+					MIMEType:   block.Image.MIMEType,
+				}},
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.Audio != nil {
 			parts = append(parts, schema.ToolOutputPart{
-				Type:  schema.ToolPartTypeAudio,
-				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Audio.URL), Base64Data: strPtr(block.Audio.Base64Data), FileID: strPtr(block.Audio.FileID), MIMEType: block.Audio.MIMEType}},
+				Type: schema.ToolPartTypeAudio,
+				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.Audio.URL),
+					Base64Data: strPtr(block.Audio.Base64Data),
+					FileID:     strPtr(block.Audio.FileID),
+					MIMEType:   block.Audio.MIMEType,
+				}},
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.Video != nil {
 			parts = append(parts, schema.ToolOutputPart{
-				Type:  schema.ToolPartTypeVideo,
-				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Video.URL), Base64Data: strPtr(block.Video.Base64Data), FileID: strPtr(block.Video.FileID), MIMEType: block.Video.MIMEType}},
+				Type: schema.ToolPartTypeVideo,
+				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.Video.URL),
+					Base64Data: strPtr(block.Video.Base64Data),
+					FileID:     strPtr(block.Video.FileID),
+					MIMEType:   block.Video.MIMEType,
+				}},
+				Extra: gmap.Clone(block.Extra),
 			})
 		} else if block.File != nil {
 			parts = append(parts, schema.ToolOutputPart{
 				Type: schema.ToolPartTypeFile,
-				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.File.URL), Base64Data: strPtr(block.File.Base64Data), FileID: strPtr(block.File.FileID), MIMEType: block.File.MIMEType}},
+				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{
+					URL:        strPtr(block.File.URL),
+					Base64Data: strPtr(block.File.Base64Data),
+					FileID:     strPtr(block.File.FileID),
+					MIMEType:   block.File.MIMEType,
+				}},
+				Extra: gmap.Clone(block.Extra),
 			})
 		}
 	}
@@ -2031,35 +2244,60 @@ func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.T
 		switch part.Type {
 		case schema.ToolPartTypeText:
 			newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-				Type: schema.FunctionToolResultContentBlockTypeText,
-				Text: &schema.UserInputText{Text: part.Text},
+				Type:  schema.FunctionToolResultContentBlockTypeText,
+				Text:  &schema.UserInputText{Text: part.Text},
+				Extra: gmap.Clone(part.Extra),
 			})
 		case schema.ToolPartTypeImage:
 			if part.Image != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-					Type:  schema.FunctionToolResultContentBlockTypeImage,
-					Image: &schema.UserInputImage{URL: ptrStr(part.Image.URL), Base64Data: ptrStr(part.Image.Base64Data), FileID: ptrStr(part.Image.FileID), MIMEType: part.Image.MIMEType},
+					Type: schema.FunctionToolResultContentBlockTypeImage,
+					Image: &schema.UserInputImage{
+						URL:        ptrStr(part.Image.URL),
+						Base64Data: ptrStr(part.Image.Base64Data),
+						FileID:     ptrStr(part.Image.FileID),
+						MIMEType:   part.Image.MIMEType,
+					},
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeAudio:
 			if part.Audio != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-					Type:  schema.FunctionToolResultContentBlockTypeAudio,
-					Audio: &schema.UserInputAudio{URL: ptrStr(part.Audio.URL), Base64Data: ptrStr(part.Audio.Base64Data), FileID: ptrStr(part.Audio.FileID), MIMEType: part.Audio.MIMEType},
+					Type: schema.FunctionToolResultContentBlockTypeAudio,
+					Audio: &schema.UserInputAudio{
+						URL:        ptrStr(part.Audio.URL),
+						Base64Data: ptrStr(part.Audio.Base64Data),
+						FileID:     ptrStr(part.Audio.FileID),
+						MIMEType:   part.Audio.MIMEType,
+					},
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeVideo:
 			if part.Video != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-					Type:  schema.FunctionToolResultContentBlockTypeVideo,
-					Video: &schema.UserInputVideo{URL: ptrStr(part.Video.URL), Base64Data: ptrStr(part.Video.Base64Data), FileID: ptrStr(part.Video.FileID), MIMEType: part.Video.MIMEType},
+					Type: schema.FunctionToolResultContentBlockTypeVideo,
+					Video: &schema.UserInputVideo{
+						URL:        ptrStr(part.Video.URL),
+						Base64Data: ptrStr(part.Video.Base64Data),
+						FileID:     ptrStr(part.Video.FileID),
+						MIMEType:   part.Video.MIMEType,
+					},
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		case schema.ToolPartTypeFile:
 			if part.File != nil {
 				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
 					Type: schema.FunctionToolResultContentBlockTypeFile,
-					File: &schema.UserInputFile{URL: ptrStr(part.File.URL), Base64Data: ptrStr(part.File.Base64Data), FileID: ptrStr(part.File.FileID), MIMEType: part.File.MIMEType},
+					File: &schema.UserInputFile{
+						URL:        ptrStr(part.File.URL),
+						Base64Data: ptrStr(part.File.Base64Data),
+						FileID:     ptrStr(part.File.FileID),
+						MIMEType:   part.File.MIMEType,
+					},
+					Extra: gmap.Clone(part.Extra),
 				})
 			}
 		}

@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,7 @@ type mockRunnerAgent struct {
 	callCount       int
 	lastInput       *AgentInput
 	enableStreaming bool
+	runContext      context.Context
 }
 
 func (a *mockRunnerAgent) Name(_ context.Context) string {
@@ -45,11 +47,12 @@ func (a *mockRunnerAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *mockRunnerAgent) Run(_ context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *mockRunnerAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	// Record the call details for verification
 	a.callCount++
 	a.lastInput = input
 	a.enableStreaming = input.EnableStreaming
+	a.runContext = ctx
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
@@ -85,6 +88,45 @@ func TestNewRunner(t *testing.T) {
 
 	// Verify that a non-nil runner is returned
 	assert.NotNil(t, runner)
+}
+
+func TestCheckpointSaveErrorPreservesSentinelAndCause(t *testing.T) {
+	cause := errors.New("checkpoint storage unavailable")
+	err := newCheckpointSaveError("failed to save checkpoint", cause)
+
+	require.ErrorIs(t, err, ErrCheckpointSave)
+	require.ErrorIs(t, err, cause)
+	assert.Equal(t, "failed to save checkpoint: checkpoint storage unavailable", err.Error())
+	assert.NotContains(t, err.Error(), ErrCheckpointSave.Error())
+	require.NotErrorIs(t, err, ErrSessionEventPersistence)
+}
+
+func TestSessionEventPersistenceErrorPreservesSentinelAndCause(t *testing.T) {
+	cause := errors.New("session event storage unavailable")
+	err := newSessionEventPersistenceError("failed to persist session events", cause)
+
+	require.ErrorIs(t, err, ErrSessionEventPersistence)
+	require.ErrorIs(t, err, cause)
+	assert.Equal(t, "failed to persist session events: session event storage unavailable", err.Error())
+	require.NotErrorIs(t, err, ErrCheckpointSave)
+}
+
+func TestRunnerSessionID(t *testing.T) {
+	agent := newMockRunnerAgent("runner", "runner", nil)
+	runner := NewRunner(context.Background(), RunnerConfig{
+		Agent: agent, SessionID: "session-1",
+	})
+	iter := runner.Query(context.Background(), "hello")
+	for {
+		if _, ok := iter.Next(); !ok {
+			break
+		}
+	}
+	sessionID, ok := RunnerSessionID(agent.runContext)
+	require.True(t, ok)
+	assert.Equal(t, "session-1", sessionID)
+	_, ok = RunnerSessionID(context.Background())
+	assert.False(t, ok)
 }
 
 func TestRunner_Run(t *testing.T) {
