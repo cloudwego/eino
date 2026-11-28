@@ -1302,7 +1302,12 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+		// Text-only results also carry their text in Content, so a model adapter that serialises a tool message as a
+		// plain string still has something to send (measured: with Content empty, the OpenAI Chat Completions adapter
+		// sent {"role":"tool","content":""} and the model answered from imagination). A result with any non-text part
+		// keeps Content empty on purpose: go-openai refuses a message holding both Content and MultiContent, and the
+		// adapter builds MultiContent from UserInputMultiContent.
+		msg := schema.ToolMessage(textOnlyContent(result), callID, schema.WithToolName(toolName))
 		var err error
 		msg.UserInputMultiContent, err = result.ToMessageInputParts()
 		if err != nil {
@@ -1321,6 +1326,20 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 	}
 }
 
+// textOnlyContent returns the result's text when every part is text, and "" otherwise. A message cannot carry both
+// Content and MultiContent through go-openai, so the plain-string form is only used when there is nothing but text.
+func textOnlyContent(result *schema.ToolResult) string {
+	if result == nil || len(result.Parts) == 0 {
+		return ""
+	}
+	for _, part := range result.Parts {
+		if part.Type != schema.ToolPartTypeText {
+			return ""
+		}
+	}
+	return result.TextContent()
+}
+
 // typedToolEnhancedStreamEvent constructs the tool result event for the enhanced stream path.
 // For *schema.Message it builds multimodal tool messages; for *schema.AgenticMessage it
 // converts each chunk's multimodal parts into FunctionToolResultBlocks.
@@ -1330,7 +1349,7 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 	case *schema.Message:
 		first := true
 		cvt := func(in *schema.ToolResult) (Message, error) {
-			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+			msg := schema.ToolMessage(textOnlyContent(in), callID, schema.WithToolName(toolName))
 			var cvtErr error
 			msg.UserInputMultiContent, cvtErr = in.ToMessageInputParts()
 			if cvtErr != nil {
